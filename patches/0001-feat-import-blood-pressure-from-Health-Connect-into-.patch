@@ -1,0 +1,227 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Thu, 16 Jul 2026 18:32:52 +0200
+Subject: [PATCH] feat: import blood pressure from Health Connect into the Lab
+ Book
+
+Maps each BloodPressureRecord to the Lab Book's systolic+diastolic row pair
+(same shape the manual marker editor writes) with deterministic ids so
+re-imports upsert instead of duplicating. Unit-tested without a client via
+HealthConnectImporter.bloodPressureRows().
+---
+ android/app/src/main/AndroidManifest.xml      |  1 +
+ .../com/noop/ingest/HealthConnectImporter.kt  | 56 ++++++++++++++++++-
+ .../noop/ingest/BloodPressureImportTest.kt    | 56 +++++++++++++++++++
+ 3 files changed, 112 insertions(+), 1 deletion(-)
+ create mode 100644 android/app/src/test/java/com/noop/ingest/BloodPressureImportTest.kt
+
+diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
+index 4293277c..cd432547 100644
+--- a/android/app/src/main/AndroidManifest.xml
++++ b/android/app/src/main/AndroidManifest.xml
+@@ -115,6 +115,7 @@
+     <uses-permission android:name="android.permission.health.READ_BODY_FAT" />
+     <uses-permission android:name="android.permission.health.READ_LEAN_BODY_MASS" />
+     <uses-permission android:name="android.permission.health.READ_EXERCISE" />
++    <uses-permission android:name="android.permission.health.READ_BLOOD_PRESSURE" />
+ 
+     <!-- Resolve the Health Connect provider on Android 14+ (platform) and earlier (app). -->
+     <queries>
+diff --git a/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt b/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt
+index 8fa0125d..504ada18 100644
+--- a/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt
++++ b/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt
+@@ -4,6 +4,7 @@ import android.content.Context
+ import androidx.health.connect.client.HealthConnectClient
+ import androidx.health.connect.client.permission.HealthPermission
+ import androidx.health.connect.client.records.ActiveCaloriesBurnedRecord
++import androidx.health.connect.client.records.BloodPressureRecord
+ import androidx.health.connect.client.records.BodyFatRecord
+ import androidx.health.connect.client.records.DistanceRecord
+ import androidx.health.connect.client.records.ExerciseSessionRecord
+@@ -22,9 +23,12 @@ import androidx.health.connect.client.records.WeightRecord
+ import androidx.health.connect.client.request.ReadRecordsRequest
+ import androidx.health.connect.client.time.TimeRangeFilter
+ import com.noop.analytics.FitnessAgeEngine
++import com.noop.analytics.LabBookProjection
++import com.noop.analytics.LabMarkerCategory
+ import com.noop.data.AppleDaily
+ import com.noop.data.DailyMetric
+ import com.noop.data.ImportSummary
++import com.noop.data.LabMarkerRow
+ import com.noop.data.MetricSeriesRow
+ import com.noop.data.SleepSession
+ import com.noop.data.WhoopRepository
+@@ -103,6 +107,7 @@ object HealthConnectImporter {
+         WeightRecord::class,
+         BodyFatRecord::class,
+         LeanBodyMassRecord::class,
++        BloodPressureRecord::class,
+         ExerciseSessionRecord::class,
+         DistanceRecord::class,
+     )
+@@ -190,6 +195,9 @@ object HealthConnectImporter {
+         // screen (which reads repo.sleepSessions) fell to its empty state. Keep each night's bounds +
+         // per-stage minutes here, paired with its wake day for the coveredDays gate at write-out.
+         val hcSleepSessions = ArrayList<Pair<String, SleepSession>>()
++        // Blood-pressure readings land in the Lab Book (a cuff measurement is a lab-style marker,
++        // not a strap metric), as the same systolic+diastolic row pair the manual editor writes.
++        val bpRows = ArrayList<LabMarkerRow>()
+ 
+         try {
+             // --- Steps ---
+@@ -306,6 +314,14 @@ object HealthConnectImporter {
+                     b.leanMassTs = r.time.epochSecond
+                 }
+             }
++            // --- Blood pressure (mmHg) -> Lab Book systolic+diastolic pair per reading ---
++            readAll(client, BloodPressureRecord::class, filter, selfPackage) { r ->
++                bpRows += bloodPressureRows(
++                    r.systolic.inMillimetersOfMercury,
++                    r.diastolic.inMillimetersOfMercury,
++                    r.time,
++                )
++            }
+             // --- Exercise sessions -> WorkoutRow(source="health-connect") ---
+             readAll(client, ExerciseSessionRecord::class, filter, selfPackage) { r ->
+                 val startS = r.startTime.epochSecond
+@@ -408,7 +424,7 @@ object HealthConnectImporter {
+             return ImportSummary.failure(SOURCE, "Health Connect read failed: ${e.message}")
+         }
+ 
+-        if (acc.isEmpty() && workouts.isEmpty()) {
++        if (acc.isEmpty() && workouts.isEmpty() && bpRows.isEmpty()) {
+             return ImportSummary(
+                 source = SOURCE,
+                 counts = emptyMap(),
+@@ -532,6 +548,9 @@ object HealthConnectImporter {
+             if (workouts.isNotEmpty()) {
+                 repo.upsertWorkouts(workouts)
+             }
++            if (bpRows.isNotEmpty()) {
++                repo.upsertLabMarkers(bpRows)
++            }
+         } catch (e: Exception) {
+             return ImportSummary.failure(SOURCE, "Saving Health Connect data failed: ${e.message}")
+         }
+@@ -540,6 +559,7 @@ object HealthConnectImporter {
+             if (appleRows.isNotEmpty()) put("appleDaily", appleRows.size)
+             if (dailyRows.isNotEmpty()) put("dailyMetric", dailyRows.size)
+             if (workouts.isNotEmpty()) put("workout", workouts.size)
++            if (bpRows.isNotEmpty()) put("bloodPressure", bpRows.size / 2)
+         }
+ 
+         // Day range across everything we touched (aggregates + workout start days).
+@@ -547,6 +567,7 @@ object HealthConnectImporter {
+             addAll(appleRows.map { it.day })
+             addAll(dailyRows.map { it.day })
+             addAll(workouts.map { LocalDate.ofInstant(Instant.ofEpochSecond(it.startTs), zone).toString() })
++            addAll(bpRows.map { it.day })
+         }
+         val firstDay = touchedDays.firstOrNull()
+         val lastDay = touchedDays.lastOrNull()
+@@ -803,6 +824,39 @@ object HealthConnectImporter {
+         return round2(FitnessAgeEngine.bmi(w, heightCm))
+     }
+ 
++    /**
++     * Map one blood-pressure reading (mmHg) to the Lab Book's systolic+diastolic [LabMarkerRow]
++     * pair — the same shape the manual marker editor writes. Ids are deterministic
++     * ("<key>-<epochSecond>-hc") so a re-import upserts the same rows instead of duplicating them.
++     * Factored out (and internal) so the mapping can be unit-tested without a HealthConnectClient.
++     */
++    internal fun bloodPressureRows(
++        systolicMmHg: Double,
++        diastolicMmHg: Double,
++        time: Instant,
++    ): List<LabMarkerRow> {
++        val epoch = time.epochSecond
++        val day = LocalDate.ofInstant(time, ZoneId.systemDefault()).toString()
++        fun row(key: String, mmHg: Double) = LabMarkerRow(
++            id = "$key-$epoch-hc",
++            deviceId = WHOOP,
++            markerKey = key,
++            category = LabMarkerCategory.BLOOD_PRESSURE.raw,
++            day = day,
++            takenAt = epoch,
++            value = round1(mmHg),
++            valueText = null,
++            unit = "mmHg",
++            source = HC_DEVICE,
++            note = null,
++            referenceText = null,
++        )
++        return listOf(
++            row(LabBookProjection.BP_SYSTOLIC_KEY, systolicMmHg),
++            row(LabBookProjection.BP_DIASTOLIC_KEY, diastolicMmHg),
++        )
++    }
++
+     /**
+      * Derive basal kcal = total - active when both are present and positive; else null.
+      * Takes the already de-overlapped per-day totals (#589 max-across-sources), not the raw [DayAcc],
+diff --git a/android/app/src/test/java/com/noop/ingest/BloodPressureImportTest.kt b/android/app/src/test/java/com/noop/ingest/BloodPressureImportTest.kt
+new file mode 100644
+index 00000000..2ca9d082
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/ingest/BloodPressureImportTest.kt
+@@ -0,0 +1,56 @@
++package com.noop.ingest
++
++import com.noop.analytics.LabBookProjection
++import com.noop.analytics.LabMarkerCategory
++import java.time.Instant
++import java.time.LocalDate
++import java.time.ZoneId
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Test
++
++/**
++ * The Health Connect blood-pressure import maps one cuff reading to the Lab Book's
++ * systolic+diastolic row pair — the same shape the manual marker editor writes — via
++ * [HealthConnectImporter.bloodPressureRows]. This pins that contract: deterministic ids
++ * ("<key>-<epochSecond>-hc") so re-imports upsert instead of duplicating, the catalog's
++ * bp_systolic/bp_diastolic keys, mmHg unit, and values rounded to one place. No Health
++ * Connect client needed.
++ */
++class BloodPressureImportTest {
++
++    private val time: Instant = Instant.ofEpochSecond(1_752_672_000L) // 2025-07-16T13:20:00Z
++
++    @Test fun mapsOneReadingToSystolicAndDiastolicRows() {
++        val rows = HealthConnectImporter.bloodPressureRows(120.0, 80.0, time)
++        assertEquals(2, rows.size)
++        val (sys, dia) = rows
++
++        assertEquals(LabBookProjection.BP_SYSTOLIC_KEY, sys.markerKey)
++        assertEquals(LabBookProjection.BP_DIASTOLIC_KEY, dia.markerKey)
++        assertEquals(120.0, sys.value!!, 1e-9)
++        assertEquals(80.0, dia.value!!, 1e-9)
++        for (row in rows) {
++            assertEquals(LabMarkerCategory.BLOOD_PRESSURE.raw, row.category)
++            assertEquals("mmHg", row.unit)
++            assertEquals("health-connect", row.source)
++            assertEquals(time.epochSecond, row.takenAt)
++            assertEquals(LocalDate.ofInstant(time, ZoneId.systemDefault()).toString(), row.day)
++            assertNull(row.valueText)
++        }
++    }
++
++    @Test fun idsAreDeterministicSoReimportsUpsert() {
++        val first = HealthConnectImporter.bloodPressureRows(120.0, 80.0, time)
++        val second = HealthConnectImporter.bloodPressureRows(120.0, 80.0, time)
++        assertEquals("bp_systolic-${time.epochSecond}-hc", first[0].id)
++        assertEquals("bp_diastolic-${time.epochSecond}-hc", first[1].id)
++        assertEquals(first.map { it.id }, second.map { it.id })
++    }
++
++    @Test fun valuesRoundToOnePlaceLikeOtherHcMetrics() {
++        val rows = HealthConnectImporter.bloodPressureRows(120.4999, 79.9501, time)
++        assertEquals(120.5, rows[0].value!!, 1e-9)
++        assertEquals(80.0, rows[1].value!!, 1e-9)
++    }
++}
+-- 
+2.54.0
+

@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Thu, 16 Jul 2026 18:33:20 +0200
+Subject: [PATCH] chore: point the in-app update check at the family fork's
+ releases
+
+A ryanbr APK would not install over this fork's signature, so offering it
+would only confuse; Obtainium against the same releases is the primary
+update path.
+---
+ android/app/src/main/java/com/noop/update/UpdateCheck.kt | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/android/app/src/main/java/com/noop/update/UpdateCheck.kt b/android/app/src/main/java/com/noop/update/UpdateCheck.kt
+index ff10cbb3..74d31cf2 100644
+--- a/android/app/src/main/java/com/noop/update/UpdateCheck.kt
++++ b/android/app/src/main/java/com/noop/update/UpdateCheck.kt
+@@ -15,7 +15,8 @@ import java.net.URL
+  */
+ object UpdateCheck {
+ 
+-    private const val ENDPOINT = "https://api.github.com/repos/ryanbr/noop/releases/latest"
++    // victor:endpoint — the fork's own releases (a ryanbr APK would not install over our signature).
++    private const val ENDPOINT = "https://api.github.com/repos/mompletvictor/strap-lab/releases/latest"
+ 
+     sealed interface Result {
+         data class UpToDate(val version: String) : Result
+-- 
+2.54.0
+

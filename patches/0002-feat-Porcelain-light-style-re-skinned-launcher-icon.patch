@@ -1,0 +1,207 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Thu, 16 Jul 2026 18:33:09 +0200
+Subject: [PATCH] feat: Porcelain light style + re-skinned launcher icon
+
+Adds a second light token set (cool iOS-style grouped background, AA blue
+accent, red-to-green data ramps) behind a new Appearance sub-preference
+'Light style: Paper / Porcelain'. The AppearanceMode enum is untouched, so
+onboarding and SYSTEM composition keep working; Palette.isLight now treats
+any non-dark set as light. Launcher vectors re-skinned to the fork's blue
+tile + white loop mark (Navy alias untouched).
+---
+ .../src/main/java/com/noop/ui/MainActivity.kt |  1 +
+ .../main/java/com/noop/ui/PorcelainTokens.kt  | 81 +++++++++++++++++++
+ .../main/java/com/noop/ui/SettingsScreen.kt   | 12 +++
+ .../app/src/main/java/com/noop/ui/Theme.kt    |  4 +-
+ .../res/drawable/ic_launcher_background.xml   |  4 +-
+ .../res/drawable/ic_launcher_foreground.xml   |  6 +-
+ 6 files changed, 101 insertions(+), 7 deletions(-)
+ create mode 100644 android/app/src/main/java/com/noop/ui/PorcelainTokens.kt
+
+diff --git a/android/app/src/main/java/com/noop/ui/MainActivity.kt b/android/app/src/main/java/com/noop/ui/MainActivity.kt
+index 8d42a977..2d3b8272 100644
+--- a/android/app/src/main/java/com/noop/ui/MainActivity.kt
++++ b/android/app/src/main/java/com/noop/ui/MainActivity.kt
+@@ -91,6 +91,7 @@ class MainActivity : ComponentActivity() {
+         // and chart ramps are correct from the very first frame (no flash).
+         AppearancePrefs.load(this)
+         ChartStylePrefs.load(this)
++        LightStylePrefs.load(this)
+         // Decode the optional on-device profile photo (if set) before first composition so the Today
+         // header + Settings avatars show it from the first frame. No-op when no photo is set.
+         ProfileAvatarStore.load(this)
+diff --git a/android/app/src/main/java/com/noop/ui/PorcelainTokens.kt b/android/app/src/main/java/com/noop/ui/PorcelainTokens.kt
+new file mode 100644
+index 00000000..89778839
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/ui/PorcelainTokens.kt
+@@ -0,0 +1,81 @@
++package com.noop.ui
++
++import android.content.Context
++import android.content.SharedPreferences
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.graphics.Color
++
++// MARK: - Porcelain — a second light scheme (cool iOS-style grouped background)
++//
++// A fork-added alternative to the Warm Paper light set: #F2F2F7 canvas, pure-white cards, a blue
++// accent darkened to AA on white (#0B63CE; the familiar #007AFF stays on the non-text focusRing),
++// and red→green data ramps calibrated for a light canvas (the Warm Paper set keeps its gold ramps).
++// Same 63-token shape as [DarkTokens]/[LightTokens]; picked by [resolvedLightTokens] when the
++// resolved scheme is light and [LightStylePrefs] says PORCELAIN. `Palette.isLight` stays true for
++// both light sets, so the card shadow / per-scheme idioms apply unchanged.
++val PorcelainTokens = PaletteTokens(
++    surfaceBase = Color(0xFFF2F2F7), surfaceRaised = Color(0xFFFFFFFF), surfaceOverlay = Color(0xFFFFFFFF),
++    surfaceInset = Color(0xFFE8E8ED), hairline = Color(0xFFE2E2E9), hairlineStrong = Color(0xFFCFCFD8),
++    textPrimary = Color(0xFF17171C), textSecondary = Color(0xFF4E4E58), textTertiary = Color(0xFF7E7E88),
++    glowAmbient = Color(0xFFE4EEFC),
++    accent = Color(0xFF0B63CE), accentHover = Color(0xFF084EA8), accentMuted = Color(0xFFE7F0FE), focusRing = Color(0xFF007AFF),
++    recovery000 = Color(0xFFD70015), recovery030 = Color(0xFFD96C0A), recovery055 = Color(0xFFAD8A00),
++    recovery078 = Color(0xFF4F9B2D), recovery100 = Color(0xFF248A3D),
++    strain000 = Color(0xFF6FA5E8), strain033 = Color(0xFF3D82DC), strain066 = Color(0xFF1E5FC0), strain100 = Color(0xFF123F8F),
++    sleepAwake = Color(0xFF98A2B3), sleepLight = Color(0xFF4A90DE), sleepDeep = Color(0xFF1E4FA3), sleepREM = Color(0xFF6B5ECF),
++    zone1 = Color(0xFF8E98A8), zone2 = Color(0xFF2E9D64), zone3 = Color(0xFFB08C00), zone4 = Color(0xFFD96C0A), zone5 = Color(0xFFD70015),
++    statusPositive = Color(0xFF248A3D), statusWarning = Color(0xFFC77800), statusCritical = Color(0xFFD70015),
++    metricCyan = Color(0xFF0E7C9E), metricPurple = Color(0xFF6B5ECF), metricAmber = Color(0xFFC77800), metricRose = Color(0xFFD33B62),
++    chargeColor = Color(0xFF2AA152), chargeDeep = Color(0xFF1D7A3D), chargeBright = Color(0xFF52C878), chargeGlow = Color(0xFF34C759),
++    effortColor = Color(0xFF0B63CE), effortDeep = Color(0xFF0A4DA0), effortBright = Color(0xFF4A96EC), effortGlow = Color(0xFF007AFF),
++    restColor = Color(0xFF5A55D2), restDeep = Color(0xFF423DA8), restBright = Color(0xFF8681E6), restGlow = Color(0xFF5E5CE6),
++    stressColor = Color(0xFFD9730D), stressDeep = Color(0xFF3D82DC), stressBright = Color(0xFFD14A12), stressGlow = Color(0xFFFF9500),
++    scenicCenter = Color(0xFFFFFFFF), scenicEdge = Color(0xFFEFEFF4), scenicStar = Color(0xFFC9C9D1),
++    cardFillTop = Color(0xFFFFFFFF), cardFillBottom = Color(0xFFF9F9FC),
++    gold = Color(0xFF0B63CE), goldLight = Color(0xFF5EA0F0), goldDeep = Color(0xFF0A4DA0),
++    goldDeepText = Color(0xFFFFFFFF), signalYellow = Color(0xFFE8A800),
++    titaniumTop = Color(0xFFE8EAEE), titaniumMid = Color(0xFFC6CBD2), titaniumLow = Color(0xFF9AA1AA), titaniumDeep = Color(0xFF6E757E),
++    tipCore = Color(0xFF14141A),
++)
++
++// MARK: - Light style preference (Paper / Porcelain)
++
++/** Which token set the LIGHT scheme uses. Orthogonal to [AppearanceMode], so it composes with
++ *  SYSTEM (dark at night, the chosen light style by day) and the onboarding stays untouched. */
++enum class LightStyle(val storageValue: String, val label: String) {
++    PAPER("paper", "Paper"),
++    PORCELAIN("porcelain", "Porcelain");
++
++    companion object {
++        fun fromStorage(raw: String?): LightStyle =
++            entries.firstOrNull { it.storageValue == raw } ?: PAPER
++    }
++}
++
++/** Light-style preference, persisted in `noop_prefs` and mirrored in snapshot state so a flip
++ *  re-resolves the palette live (same idiom as [ChartStylePrefs]). */
++object LightStylePrefs {
++    private const val FILE = "noop_prefs"
++    private const val KEY = "theme.lightStyle"
++
++    private fun prefs(ctx: Context): SharedPreferences =
++        ctx.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
++
++    var style by mutableStateOf(LightStyle.PAPER)
++        private set
++
++    fun load(ctx: Context) {
++        style = LightStyle.fromStorage(prefs(ctx).getString(KEY, LightStyle.PAPER.storageValue))
++    }
++
++    fun set(ctx: Context, value: LightStyle) {
++        style = value
++        prefs(ctx).edit().putString(KEY, value.storageValue).apply()
++    }
++}
++
++/** The token set the light scheme resolves to: Warm Paper (upstream default) or Porcelain. */
++fun resolvedLightTokens(): PaletteTokens =
++    if (LightStylePrefs.style == LightStyle.PORCELAIN) PorcelainTokens else LightTokens
+diff --git a/android/app/src/main/java/com/noop/ui/SettingsScreen.kt b/android/app/src/main/java/com/noop/ui/SettingsScreen.kt
+index 0ff8b073..4b7a95ec 100644
+--- a/android/app/src/main/java/com/noop/ui/SettingsScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/SettingsScreen.kt
+@@ -983,6 +983,18 @@ fun SettingsScreen(
+                     },
+                 )
+             }
++            RowDivider()
++            // victor:light-style — fork-added: which palette the LIGHT scheme resolves to (upstream's
++            // Warm Paper or the cool Porcelain set in PorcelainTokens.kt). Reads/writes LightStylePrefs
++            // (snapshot state), so the pill stays live without a local remember var.
++            FormRow(label = "Light style") {
++                SegmentedPillControl(
++                    items = listOf(LightStyle.PAPER, LightStyle.PORCELAIN),
++                    selection = LightStylePrefs.style,
++                    label = { it.label },
++                    onSelect = { style -> LightStylePrefs.set(context, style) },
++                )
++            }
+             RowDivider()   // #79 parity: the hairline every other section has between FormRows (Android rows
+                            // were already 16dp-spaced, unlike iOS where they touched — this matches both)
+             FormRow(label = uiString(R.string.l10n_settings_screen_chart_colours_525f4a37)) {
+diff --git a/android/app/src/main/java/com/noop/ui/Theme.kt b/android/app/src/main/java/com/noop/ui/Theme.kt
+index c36684b3..d1e2373f 100644
+--- a/android/app/src/main/java/com/noop/ui/Theme.kt
++++ b/android/app/src/main/java/com/noop/ui/Theme.kt
+@@ -47,7 +47,7 @@ object Palette {
+     // composables AND Canvas DrawScopes) with no call-site changes. Set by NoopTheme.
+     internal var active by mutableStateOf(DarkTokens)
+     /** True when the light scheme is active (surface code uses this for the per-scheme idiom). */
+-    val isLight: Boolean get() = active === LightTokens
++    val isLight: Boolean get() = active !== DarkTokens
+ 
+     // Chart style — when CLASSIC, the DATA accessors below return the throwback red→green ramps
+     // (light/dark tuned). Reads ChartStylePrefs.style (snapshot state) so a flip re-colours live.
+@@ -546,7 +546,7 @@ fun NoopTheme(content: @Composable () -> Unit) {
+         AppearanceMode.DARK -> true
+         AppearanceMode.SYSTEM -> isSystemInDarkTheme()
+     }
+-    val tokens = if (dark) DarkTokens else LightTokens
++    val tokens = if (dark) DarkTokens else resolvedLightTokens()
+     if (Palette.active !== tokens) Palette.active = tokens
+ 
+     // Status-/nav-bar icon appearance: light icons on the dark theme, dark icons on the warm-paper
+diff --git a/android/app/src/main/res/drawable/ic_launcher_background.xml b/android/app/src/main/res/drawable/ic_launcher_background.xml
+index 6a494ee7..d1d11731 100644
+--- a/android/app/src/main/res/drawable/ic_launcher_background.xml
++++ b/android/app/src/main/res/drawable/ic_launcher_background.xml
+@@ -1,5 +1,5 @@
+ <?xml version="1.0" encoding="utf-8"?>
+-<!-- Adaptive launcher background: WHOOP-dark tile (the green loop mark lives in the foreground). -->
++<!-- Adaptive launcher background: the fork's Porcelain-blue tile (the loop mark lives in the foreground). -->
+ <vector xmlns:android="http://schemas.android.com/apk/res/android"
+     xmlns:aapt="http://schemas.android.com/aapt"
+     android:width="108dp" android:height="108dp"
+@@ -7,7 +7,7 @@
+     <path android:pathData="M0,0h108v108h-108z">
+         <aapt:attr name="android:fillColor">
+             <gradient android:type="linear" android:startX="0" android:startY="0" android:endX="0" android:endY="108"
+-                android:startColor="#1C2128" android:endColor="#0E1116"/>
++                android:startColor="#0F6FE0" android:endColor="#0A4DA0"/>
+         </aapt:attr>
+     </path>
+ </vector>
+diff --git a/android/app/src/main/res/drawable/ic_launcher_foreground.xml b/android/app/src/main/res/drawable/ic_launcher_foreground.xml
+index 86218600..e7b98243 100644
+--- a/android/app/src/main/res/drawable/ic_launcher_foreground.xml
++++ b/android/app/src/main/res/drawable/ic_launcher_foreground.xml
+@@ -1,11 +1,11 @@
+ <?xml version="1.0" encoding="utf-8"?>
+-<!-- Adaptive launcher foreground: the NOOP loop mark — open green recovery ring + white core,
+-     centred within the adaptive safe zone (108dp viewport). -->
++<!-- Adaptive launcher foreground: the NOOP loop mark in the fork's finish — open white recovery ring
++     + white core, centred within the adaptive safe zone (108dp viewport). -->
+ <vector xmlns:android="http://schemas.android.com/apk/res/android"
+     android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+     <path
+         android:pathData="M54,28 A26,26 0 1 1 29.3,46"
+-        android:strokeColor="#03E095"
++        android:strokeColor="#FFFFFF"
+         android:strokeWidth="7"
+         android:strokeLineCap="round"
+         android:fillColor="#00000000"/>
+-- 
+2.54.0
+

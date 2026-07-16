@@ -1,0 +1,155 @@
+name: Sync upstream y release firmada
+
+on:
+  schedule:
+    - cron: '23 5,17 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Republicar aunque no haya tag nuevo'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: ryanbr/noop
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      new: ${{ steps.d.outputs.new }}
+      tag: ${{ steps.d.outputs.tag }}
+      ours: ${{ steps.d.outputs.ours }}
+    steps:
+      - id: d
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          UP=$(gh api "repos/${UPSTREAM}/releases/latest" --jq .tag_name)
+          # El tag viene de un repo de TERCEROS: validarlo estrictamente antes de usarlo en nada
+          # (los refnames de git admiten ';' y '$(' — sin esto habría inyección de shell aguas abajo).
+          [[ "$UP" =~ ^v[0-9]+(\.[0-9]+){1,3}$ ]] || { echo "::error::Tag upstream sospechoso: $UP"; exit 1; }
+          LAST=$(gh release list -R "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName // ""')
+          BASE="${LAST%%-victor.*}"
+          if [ "$UP" = "$BASE" ] && [ "$FORCE" != "true" ]; then
+            echo "new=false" >> "$GITHUB_OUTPUT"; echo "Al día ($UP)"; exit 0
+          fi
+          N=1; [ "$UP" = "$BASE" ] && N=$(( ${LAST##*-victor.} + 1 ))
+          { echo "new=true"; echo "tag=$UP"; echo "ours=${UP}-victor.${N}"; } >> "$GITHUB_OUTPUT"
+
+  build-release:
+    needs: check
+    if: needs.check.outputs.new == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      OURS: ${{ needs.check.outputs.ours }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Guardar parches y traer upstream
+        run: |
+          set -euo pipefail
+          cp -r patches "$RUNNER_TEMP/patches"
+          git remote add upstream "https://github.com/${UPSTREAM}.git"
+          git fetch upstream main --tags
+
+      - name: Espejo (backup anti-takedown, best-effort)
+        continue-on-error: true
+        run: |
+          git push origin "refs/remotes/upstream/main:refs/heads/mirror" --force
+          git push origin "refs/tags/$TAG" || true
+
+      - name: Aplicar parches sobre el tag upstream
+        run: |
+          set -euo pipefail
+          git config user.name "victor-ci"
+          git config user.email "mompletvictor@gmail.com"
+          git checkout -B build "$TAG"
+          git am --3way "$RUNNER_TEMP"/patches/*.patch
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/wrapper-validation@v4
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Materializar firma desde secrets
+        working-directory: android
+        env:
+          KS_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$KS_B64" | base64 -d > release.keystore
+          {
+            echo "storeFile=release.keystore"
+            echo "storePassword=${KS_PASS}"
+            echo "keyAlias=${KS_ALIAS}"
+            echo "keyPassword=${KEY_PASS}"
+          } > keystore.properties
+
+      - name: Build + smoke checks (flavor full = la app real)
+        # Mismos gates que el CI de upstream (android.yml): assemble + unit tests. Sin lint —
+        # upstream no lo corre y un fallo de lint suyo bloquearía todas nuestras releases.
+        working-directory: android
+        run: ./gradlew assembleFullRelease testFullDebugUnitTest
+
+      - name: Verificar firma y versión del APK
+        working-directory: android
+        env:
+          EXPECTED_CERT: ${{ vars.EXPECTED_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          APK=$(ls app/build/outputs/apk/full/release/*.apk)
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          "$BT/apksigner" verify --print-certs "$APK" | tee /tmp/certs.txt
+          grep -qi "$EXPECTED_CERT" /tmp/certs.txt \
+            || { echo "::error::El APK no lleva NUESTRA firma"; exit 1; }
+          VER=$("$BT/aapt2" dump badging "$APK" | grep -o "versionName='[^']*'" | cut -d"'" -f2)
+          [ "$VER" = "${TAG#v}" ] || { echo "::error::versionName $VER != ${TAG#v}"; exit 1; }
+
+      - name: Publicar GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK=$(ls android/app/build/outputs/apk/full/release/*.apk)
+          cp "$APK" "noop-${OURS}.apk"
+          gh release create "$OURS" "noop-${OURS}.apk" -R "$GITHUB_REPOSITORY" \
+            --title "Build ${OURS#v}" \
+            --notes "Base upstream: ${TAG} + tema Porcelana + tensión arterial (Health Connect). Tests en verde; firmado con la clave de la familia."
+
+  notify-failure:
+    needs: [check, build-release]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          TITLE="Sync roto: ${TAG:-desconocido}"
+          EXISTS=$(gh issue list -R "$GITHUB_REPOSITORY" --state open \
+                    --search "in:title \"$TITLE\"" --json number --jq 'length')
+          [ "$EXISTS" -gt 0 ] || gh issue create -R "$GITHUB_REPOSITORY" \
+            --title "$TITLE" \
+            --body "Falló el build automático de ${TAG}: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. Los móviles siguen en la última versión buena; no se ha publicado nada. Arreglar el parche en el Mac y relanzar con workflow_dispatch."
