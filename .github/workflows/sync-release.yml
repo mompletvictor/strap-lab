@@ -109,8 +109,15 @@ jobs:
       - name: Build + smoke checks (flavor full = la app real)
         # Mismos gates que el CI de upstream (android.yml): assemble + unit tests. Sin lint —
         # upstream no lo corre y un fallo de lint suyo bloquearía todas nuestras releases.
+        # DOS invocaciones de Gradle a propósito: desde 9.3.x `syncRoomSchemaSnapshot` declara
+        # dependencia solo de `kspFullDebugKotlin` y lee el directorio donde también escribe
+        # `kspFullReleaseKotlin`, así que pedir release + tests en la MISMA invocación aborta con
+        # "uses this output ... without declaring an explicit dependency". Upstream no lo ve porque
+        # su android.yml compila debug. Reproducido en v9.3.1 limpio, sin nuestros parches.
         working-directory: android
-        run: ./gradlew assembleFullRelease testFullDebugUnitTest
+        run: |
+          ./gradlew assembleFullRelease
+          ./gradlew testFullDebugUnitTest
 
       - name: Verificar firma y versión del APK
         working-directory: android
