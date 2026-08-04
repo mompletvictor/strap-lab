@@ -20,7 +20,7 @@ tile + white loop mark (Navy alias untouched).
  create mode 100644 android/app/src/main/java/com/noop/ui/PorcelainTokens.kt
 
 diff --git a/android/app/src/main/java/com/noop/ui/MainActivity.kt b/android/app/src/main/java/com/noop/ui/MainActivity.kt
-index 8d42a977..2d3b8272 100644
+index cc7be49c..85151d61 100644
 --- a/android/app/src/main/java/com/noop/ui/MainActivity.kt
 +++ b/android/app/src/main/java/com/noop/ui/MainActivity.kt
 @@ -91,6 +91,7 @@ class MainActivity : ComponentActivity() {
@@ -119,10 +119,10 @@ index 00000000..89778839
 +fun resolvedLightTokens(): PaletteTokens =
 +    if (LightStylePrefs.style == LightStyle.PORCELAIN) PorcelainTokens else LightTokens
 diff --git a/android/app/src/main/java/com/noop/ui/SettingsScreen.kt b/android/app/src/main/java/com/noop/ui/SettingsScreen.kt
-index 0ff8b073..4b7a95ec 100644
+index 469a2f73..a632f42f 100644
 --- a/android/app/src/main/java/com/noop/ui/SettingsScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/SettingsScreen.kt
-@@ -983,6 +983,18 @@ fun SettingsScreen(
+@@ -1055,6 +1055,18 @@ fun SettingsScreen(
                      },
                  )
              }
@@ -142,7 +142,7 @@ index 0ff8b073..4b7a95ec 100644
                             // were already 16dp-spaced, unlike iOS where they touched — this matches both)
              FormRow(label = uiString(R.string.l10n_settings_screen_chart_colours_525f4a37)) {
 diff --git a/android/app/src/main/java/com/noop/ui/Theme.kt b/android/app/src/main/java/com/noop/ui/Theme.kt
-index c36684b3..d1e2373f 100644
+index 04406982..afe44b88 100644
 --- a/android/app/src/main/java/com/noop/ui/Theme.kt
 +++ b/android/app/src/main/java/com/noop/ui/Theme.kt
 @@ -47,7 +47,7 @@ object Palette {
@@ -154,7 +154,7 @@ index c36684b3..d1e2373f 100644
  
      // Chart style — when CLASSIC, the DATA accessors below return the throwback red→green ramps
      // (light/dark tuned). Reads ChartStylePrefs.style (snapshot state) so a flip re-colours live.
-@@ -546,7 +546,7 @@ fun NoopTheme(content: @Composable () -> Unit) {
+@@ -547,7 +547,7 @@ fun NoopTheme(content: @Composable () -> Unit) {
          AppearanceMode.DARK -> true
          AppearanceMode.SYSTEM -> isSystemInDarkTheme()
      }
