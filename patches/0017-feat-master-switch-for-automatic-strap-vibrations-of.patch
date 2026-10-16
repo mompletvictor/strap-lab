@@ -1,0 +1,169 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Fri, 16 Oct 2026 15:06:46 +0200
+Subject: [PATCH] feat: master switch for automatic strap vibrations, off by
+ default
+
+StrapVibration gates WhoopBleClient.buzz(), the single funnel shared by
+notification/call mirroring, inactivity and stress nudges, HR-zone coaching,
+intervals, breathing, live sessions and double-tap actions. Off in the family
+build; a card at the top of Automations turns it back on. Explicit one-shot
+requests (buzzStrapOnce: Live "buzz now", Tasker) are not gated; the strap's
+own firmware may still buzz when a link re-bonds.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../main/java/com/noop/ble/WhoopBleClient.kt  |  1 +
+ .../java/com/noop/haptics/StrapVibration.kt   | 23 +++++++++
+ .../com/noop/haptics/StrapVibrationSection.kt | 50 +++++++++++++++++++
+ .../java/com/noop/ui/AutomationsScreen.kt     |  1 +
+ .../res/values-es/strings_victor_haptics.xml  |  9 ++++
+ .../res/values/strings_victor_haptics.xml     |  9 ++++
+ 6 files changed, 93 insertions(+)
+ create mode 100644 android/app/src/main/java/com/noop/haptics/StrapVibration.kt
+ create mode 100644 android/app/src/main/java/com/noop/haptics/StrapVibrationSection.kt
+ create mode 100644 android/app/src/main/res/values-es/strings_victor_haptics.xml
+ create mode 100644 android/app/src/main/res/values/strings_victor_haptics.xml
+
+diff --git a/android/app/src/main/java/com/noop/ble/WhoopBleClient.kt b/android/app/src/main/java/com/noop/ble/WhoopBleClient.kt
+index b7a7a7e7..dbbaaa32 100644
+--- a/android/app/src/main/java/com/noop/ble/WhoopBleClient.kt
++++ b/android/app/src/main/java/com/noop/ble/WhoopBleClient.kt
+@@ -4608,6 +4608,7 @@ class WhoopBleClient(
+      * "buzz the strap now" action use [buzzStrapOnce] instead (#921).
+      */
+     fun buzz(loops: Int = 2) {
++        if (!com.noop.haptics.StrapVibration.automaticAllowed(context)) { log("Buzz: suppressed (automatic strap vibrations off)"); return }   // victor:haptics
+         val n = loops.coerceIn(0, 255)
+         send(CommandNumber.RUN_HAPTICS_PATTERN, byteArrayOf(2, n.toByte(), 0, 0, 0))
+         log("Buzz: patternId=2 loops=$n")
+diff --git a/android/app/src/main/java/com/noop/haptics/StrapVibration.kt b/android/app/src/main/java/com/noop/haptics/StrapVibration.kt
+new file mode 100644
+index 00000000..769f8d08
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/haptics/StrapVibration.kt
+@@ -0,0 +1,23 @@
++package com.noop.haptics
++
++import android.content.Context
++
++/**
++ * victor:haptics — one master switch for every AUTOMATIC strap vibration the app sends (notification and
++ * call mirroring, inactivity and stress nudges, HR-zone coaching, intervals, breathing and live-session
++ * cues, double-tap actions). OFF by default in the family build: the strap stays quiet unless the wearer
++ * opts in. Gated at [com.noop.ble.WhoopBleClient.buzz], the single funnel those features share; explicit
++ * one-shot requests ([com.noop.ble.WhoopBleClient.buzzStrapOnce]: the Live "buzz now" button and Tasker)
++ * are not gated, and neither is the strap's own firmware (it may still buzz when a link re-bonds).
++ */
++object StrapVibration {
++    private const val FILE = "noop_prefs"
++    private const val KEY = "victor.haptics.automatic"
++
++    fun automaticAllowed(ctx: Context): Boolean =
++        ctx.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean(KEY, false)
++
++    fun setAutomaticAllowed(ctx: Context, on: Boolean) {
++        ctx.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean(KEY, on).apply()
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/haptics/StrapVibrationSection.kt b/android/app/src/main/java/com/noop/haptics/StrapVibrationSection.kt
+new file mode 100644
+index 00000000..3fc67aea
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/haptics/StrapVibrationSection.kt
+@@ -0,0 +1,50 @@
++package com.noop.haptics
++
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.width
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.filled.Vibration
++import androidx.compose.material3.Icon
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.unit.dp
++import com.noop.R
++import com.noop.ui.NoopCard
++import com.noop.ui.NoopType
++import com.noop.ui.Overline
++import com.noop.ui.Palette
++import com.noop.ui.SettingsToggleRow
++import com.noop.ui.uiString
++
++/** victor:haptics — the master switch card at the top of Automations ([StrapVibration]). */
++@Composable
++internal fun StrapVibrationSection() {
++    val ctx = LocalContext.current
++    var on by remember { mutableStateOf(StrapVibration.automaticAllowed(ctx)) }
++    NoopCard(padding = 20.dp, tint = Palette.accent) {
++        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
++            Row(verticalAlignment = Alignment.CenterVertically) {
++                Icon(Icons.Filled.Vibration, contentDescription = null, tint = if (on) Palette.accent else Palette.textSecondary)
++                Spacer(Modifier.width(10.dp))
++                Text(uiString(R.string.victor_haptics_title), style = NoopType.title2, color = Palette.textPrimary)
++            }
++            SettingsToggleRow(
++                title = uiString(R.string.victor_haptics_toggle),
++                detail = uiString(if (on) R.string.victor_haptics_on else R.string.victor_haptics_off),
++                checked = on,
++                onCheckedChange = { v -> StrapVibration.setAutomaticAllowed(ctx, v); on = v },
++            )
++            Overline(uiString(R.string.victor_haptics_note))
++        }
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt b/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt
+index d77d799e..29decf5f 100644
+--- a/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt
+@@ -122,6 +122,7 @@ fun AutomationsScreen(viewModel: AppViewModel) {
+         title = uiString(R.string.l10n_automations_screen_automations_82542d6d),
+         subtitle = "Make the strap do things: tap to act, walk away to lock, train by feel.",
+     ) {
++        item { com.noop.haptics.StrapVibrationSection() }   // victor:haptics — master switch, off by default
+         // #haptics (#1115): per-event in-session haptic toggles, default ON (opt-out) — turn off any cue you
+         // find noisy; the feature keeps working, just without that wrist buzz.
+         item {
+diff --git a/android/app/src/main/res/values-es/strings_victor_haptics.xml b/android/app/src/main/res/values-es/strings_victor_haptics.xml
+new file mode 100644
+index 00000000..f507b522
+--- /dev/null
++++ b/android/app/src/main/res/values-es/strings_victor_haptics.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- victor:haptics — textos propios del fork. -->
++<resources>
++    <string name="victor_haptics_title">Vibraciones de la pulsera</string>
++    <string name="victor_haptics_toggle">Vibraciones automáticas</string>
++    <string name="victor_haptics_off">Apagadas: la pulsera nunca vibra por su cuenta (notificaciones, llamadas, inactividad, zonas, sesiones, doble toque). Tasker y «Vibrar ahora» siguen funcionando.</string>
++    <string name="victor_haptics_on">Encendidas: las funciones que actives abajo pueden hacer vibrar la pulsera.</string>
++    <string name="victor_haptics_note">La propia pulsera puede dar un toque corto al reconectarse.</string>
++</resources>
+diff --git a/android/app/src/main/res/values/strings_victor_haptics.xml b/android/app/src/main/res/values/strings_victor_haptics.xml
+new file mode 100644
+index 00000000..5b510b6b
+--- /dev/null
++++ b/android/app/src/main/res/values/strings_victor_haptics.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- victor:haptics — fork-only strings. -->
++<resources>
++    <string name="victor_haptics_title">Strap vibrations</string>
++    <string name="victor_haptics_toggle">Automatic vibrations</string>
++    <string name="victor_haptics_off">Off: the strap never buzzes on its own (notifications, calls, inactivity, zones, sessions, double tap). Tasker and "Buzz now" still work.</string>
++    <string name="victor_haptics_on">On: the features you enable below can buzz the strap.</string>
++    <string name="victor_haptics_note">The strap itself may still give a short buzz when it reconnects.</string>
++</resources>
+-- 
+2.54.0
+
