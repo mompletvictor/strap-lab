@@ -1,0 +1,273 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Fri, 16 Oct 2026 12:32:27 +0200
+Subject: [PATCH] feat: Scale card on Health
+
+Fork-added card (Spanish: Bascula) after Vitality on the Health screen:
+newest reading date and time, weight with its change over ~7 and ~30 days
+and a 30-day sparkline (the existing Sparkline component), then whichever of
+body fat, lean mass, bone mass, body water and BMR the scale wrote. A metric
+older than the headline day says 'as of <date>'. Masses follow the
+metric/imperial preference; the time follows the clock-format setting.
+With no scale data it explains the Samsung Health -> Health Connect -> NOOP
+steps instead.
+
+Hook: one item line in HealthScreen. Strings live in fork-only
+strings_victor_scale.xml (English + Spanish).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/main/java/com/noop/ui/HealthScreen.kt |   1 +
+ .../src/main/java/com/noop/ui/ScaleCard.kt    | 174 ++++++++++++++++++
+ .../res/values-es/strings_victor_scale.xml    |  19 ++
+ .../main/res/values/strings_victor_scale.xml  |  19 ++
+ 4 files changed, 213 insertions(+)
+ create mode 100644 android/app/src/main/java/com/noop/ui/ScaleCard.kt
+ create mode 100644 android/app/src/main/res/values-es/strings_victor_scale.xml
+ create mode 100644 android/app/src/main/res/values/strings_victor_scale.xml
+
+diff --git a/android/app/src/main/java/com/noop/ui/HealthScreen.kt b/android/app/src/main/java/com/noop/ui/HealthScreen.kt
+index 93aec86f..74792a32 100644
+--- a/android/app/src/main/java/com/noop/ui/HealthScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/HealthScreen.kt
+@@ -209,6 +209,7 @@ fun HealthScreen(
+             item { Spacer(Modifier.height(Metrics.selectorTopUp)) }
+             item { FitnessAgeSection(vm = vm, days = days, profile = profile, onOpenSettings = onOpenSettings) }
+             item { VitalitySection(vm = vm, days = days, profile = profile) }
++            item { ScaleCard(vm) }   // victor:scale — fork-added smart-scale card (ScaleCard.kt)
+             // SKIN TEMPERATURE (v5 pillar) — Cycle awareness (opt-in), Body clock + an illness heads-up,
+             // each from a pure engine RESULT the ViewModel publishes. A section of Health, never its own
+             // destination (umbrella §2.4). Non-clinical observations about your own numbers.
+diff --git a/android/app/src/main/java/com/noop/ui/ScaleCard.kt b/android/app/src/main/java/com/noop/ui/ScaleCard.kt
+new file mode 100644
+index 00000000..c5625ad4
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/ui/ScaleCard.kt
+@@ -0,0 +1,174 @@
++package com.noop.ui
++
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.width
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.filled.MonitorWeight
++import androidx.compose.material3.Icon
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.unit.dp
++import com.noop.R
++import com.noop.analytics.ScaleBody
++import com.noop.ingest.ScaleImport
++import java.time.LocalDate
++import java.time.format.DateTimeFormatter
++import java.time.format.FormatStyle
++import java.util.Locale
++import kotlin.math.abs
++import kotlin.math.roundToInt
++
++/**
++ * victor:scale — fork-added Health card for a smart scale (a Hume Body Pod via Samsung Health → Health
++ * Connect): the newest reading's date/time, weight with its change over ~7 and ~30 days and a 30-day
++ * line, then whichever of body fat / lean mass / bone mass / body water / BMR the scale wrote. With no
++ * scale data it explains how to let the readings in. Reads the Health Connect series only.
++ */
++@Composable
++internal fun ScaleCard(vm: AppViewModel) {
++    val ctx = LocalContext.current
++    var loaded by remember { mutableStateOf(false) }
++    var snapshot by remember { mutableStateOf<ScaleBody.Snapshot?>(null) }
++    LaunchedEffect(Unit) {
++        snapshot = runCatching { ScaleImport.snapshot(vm.repo, ScaleImport.newestReading(ctx)) }.getOrNull()
++        loaded = true
++    }
++    // Nothing until the read lands, so the "no data" hint never flashes over real readings.
++    if (!loaded) return
++    val s = snapshot
++    val system = UnitPrefs.system(ctx)
++
++    NoopCard(padding = 20.dp, tint = Palette.accent) {
++        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
++            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
++                Overline(uiString(R.string.victor_scale_overline))
++                Row(verticalAlignment = Alignment.CenterVertically) {
++                    Icon(Icons.Filled.MonitorWeight, contentDescription = null, tint = if (s != null) Palette.accent else Palette.textSecondary)
++                    Spacer(Modifier.width(10.dp))
++                    Text(uiString(R.string.victor_scale_title), style = NoopType.title2, color = Palette.textPrimary)
++                }
++                if (s != null) {
++                    Text(
++                        uiString(R.string.victor_scale_latest, readingStamp(s, ClockPrefs.uses24Hour(ctx))),
++                        style = NoopType.footnote,
++                        color = Palette.textTertiary,
++                    )
++                }
++            }
++            if (s == null) {
++                Text(uiString(R.string.victor_scale_empty), style = NoopType.subhead, color = Palette.textSecondary)
++                return@Column
++            }
++
++            s.weight?.let { w ->
++                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
++                    Overline(uiString(R.string.victor_scale_weight), color = Palette.textTertiary)
++                    Text(UnitFormatter.massFromKilograms(w.value, system), style = NoopType.number(34f), color = Palette.accent)
++                    metricNote(w, s.day) { signedMass(it, system) }?.let {
++                        Text(it, style = NoopType.footnote, color = Palette.textSecondary)
++                    }
++                }
++                if (s.weightTrend.size >= 2) {
++                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
++                        Sparkline(s.weightTrend, color = Palette.accent)
++                        Text(uiString(R.string.victor_scale_trend), style = NoopType.footnote, color = Palette.textTertiary)
++                    }
++                }
++            }
++
++            val cells = buildList {
++                s.bodyFat?.let { m ->
++                    add(Triple(uiString(R.string.victor_scale_body_fat), oneDecimal(m.value) + " %", metricNote(m, s.day) { signedPlain(it) + " %" }))
++                }
++                s.leanMass?.let { m ->
++                    add(Triple(uiString(R.string.victor_scale_lean_mass), UnitFormatter.massFromKilograms(m.value, system), metricNote(m, s.day, null)))
++                }
++                s.boneMass?.let { m ->
++                    add(Triple(uiString(R.string.victor_scale_bone_mass), UnitFormatter.massFromKilograms(m.value, system), metricNote(m, s.day, null)))
++                }
++                s.bodyWater?.let { m ->
++                    add(Triple(uiString(R.string.victor_scale_body_water), UnitFormatter.massFromKilograms(m.value, system), metricNote(m, s.day, null)))
++                }
++                s.bmr?.let { m ->
++                    add(Triple(uiString(R.string.victor_scale_bmr), uiString(R.string.victor_scale_kcal_day, "${m.value.roundToInt()}"), metricNote(m, s.day, null)))
++                }
++            }
++            if (cells.isNotEmpty()) {
++                if (s.weight != null) SettingsRowDivider()
++                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
++                    cells.chunked(2).forEach { pair ->
++                        Row(horizontalArrangement = Arrangement.spacedBy(Metrics.gap)) {
++                            pair.forEach { (label, value, note) -> ScaleCell(label, value, note, Modifier.weight(1f)) }
++                            if (pair.size == 1) Spacer(Modifier.weight(1f))
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
++
++@Composable
++private fun ScaleCell(label: String, value: String, note: String?, modifier: Modifier) {
++    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
++        Overline(label, color = Palette.textTertiary)
++        Text(value, style = NoopType.number(18f), color = Palette.textPrimary)
++        if (note != null) Text(note, style = NoopType.footnote, color = Palette.textTertiary)
++    }
++}
++
++/** "15 Oct 2026, 07:42" — the clock time only when the importer saw the newest reading's time. */
++private fun readingStamp(s: ScaleBody.Snapshot, is24h: Boolean): String {
++    val date = shortDate(s.day)
++    return s.readingAt?.let { "$date, ${clockTimeLabel(it, is24h)}" } ?: date
++}
++
++private fun shortDate(day: String): String =
++    runCatching {
++        LocalDate.parse(day).format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).withLocale(Locale.getDefault()))
++    }.getOrDefault(day)
++
++/**
++ * The line under a metric: "as of <date>" when its newest reading is older than the card's headline day,
++ * then its change over ~7 / ~30 days when [delta] formats one. Null when there is nothing to say.
++ */
++private fun metricNote(m: ScaleBody.Metric, headlineDay: String, delta: ((Double) -> String)?): String? {
++    val parts = ArrayList<String>()
++    if (m.day != headlineDay) parts += uiString(R.string.victor_scale_as_of, shortDate(m.day))
++    if (delta != null) {
++        m.vs7d?.let { parts += uiString(R.string.victor_scale_in_7d, delta(it)) }
++        m.vs30d?.let { parts += uiString(R.string.victor_scale_in_30d, delta(it)) }
++    }
++    return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")
++}
++
++/** Signed mass change in the reader's unit: "−0.6 kg", "+1.3 lb", "±0.0 kg". */
++private fun signedMass(deltaKg: Double, system: UnitSystem): String {
++    val magnitude = UnitFormatter.massFromKilograms(abs(deltaKg), system)
++    return signOf(deltaKg, magnitude.startsWith("0.0 ")) + magnitude
++}
++
++/** Signed one-decimal number: "−0.3", "+1.2", "±0.0". */
++private fun signedPlain(delta: Double): String {
++    val magnitude = oneDecimal(abs(delta))
++    return signOf(delta, magnitude == "0.0") + magnitude
++}
++
++private fun signOf(delta: Double, roundsToZero: Boolean): String = when {
++    roundsToZero -> "±"
++    delta < 0 -> "−"
++    else -> "+"
++}
++
++private fun oneDecimal(v: Double): String = String.format(Locale.US, "%.1f", v)
+diff --git a/android/app/src/main/res/values-es/strings_victor_scale.xml b/android/app/src/main/res/values-es/strings_victor_scale.xml
+new file mode 100644
+index 00000000..07f9fe03
+--- /dev/null
++++ b/android/app/src/main/res/values-es/strings_victor_scale.xml
+@@ -0,0 +1,19 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- victor:scale — fork-only strings for the smart-scale card, kept out of upstream's strings.xml so the patch never conflicts. -->
++<resources>
++    <string name="victor_scale_overline">Composición corporal</string>
++    <string name="victor_scale_title">Báscula</string>
++    <string name="victor_scale_latest">Última medición · %1$s</string>
++    <string name="victor_scale_weight">Peso</string>
++    <string name="victor_scale_body_fat">Grasa corporal</string>
++    <string name="victor_scale_lean_mass">Masa magra</string>
++    <string name="victor_scale_bone_mass">Masa ósea</string>
++    <string name="victor_scale_body_water">Agua corporal</string>
++    <string name="victor_scale_bmr">Metabolismo basal</string>
++    <string name="victor_scale_kcal_day">%1$s kcal/día</string>
++    <string name="victor_scale_in_7d">%1$s en 7 días</string>
++    <string name="victor_scale_in_30d">%1$s en 30 días</string>
++    <string name="victor_scale_as_of">del %1$s</string>
++    <string name="victor_scale_trend">Peso, últimos 30 días</string>
++    <string name="victor_scale_empty">Aún no hay mediciones de la báscula. En Samsung Health → Health Connect, deja que Samsung Health comparta el peso y la composición corporal, y permite que NOOP los lea. Después, en NOOP: Fuentes de datos → Health Connect → Composición corporal.</string>
++</resources>
+diff --git a/android/app/src/main/res/values/strings_victor_scale.xml b/android/app/src/main/res/values/strings_victor_scale.xml
+new file mode 100644
+index 00000000..7b9ef683
+--- /dev/null
++++ b/android/app/src/main/res/values/strings_victor_scale.xml
+@@ -0,0 +1,19 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- victor:scale — fork-only strings for the smart-scale card, kept out of upstream's strings.xml so the patch never conflicts. -->
++<resources>
++    <string name="victor_scale_overline">Body composition</string>
++    <string name="victor_scale_title">Scale</string>
++    <string name="victor_scale_latest">Latest reading · %1$s</string>
++    <string name="victor_scale_weight">Weight</string>
++    <string name="victor_scale_body_fat">Body fat</string>
++    <string name="victor_scale_lean_mass">Lean mass</string>
++    <string name="victor_scale_bone_mass">Bone mass</string>
++    <string name="victor_scale_body_water">Body water</string>
++    <string name="victor_scale_bmr">BMR</string>
++    <string name="victor_scale_kcal_day">%1$s kcal/day</string>
++    <string name="victor_scale_in_7d">%1$s in 7 days</string>
++    <string name="victor_scale_in_30d">%1$s in 30 days</string>
++    <string name="victor_scale_as_of">as of %1$s</string>
++    <string name="victor_scale_trend">Weight, last 30 days</string>
++    <string name="victor_scale_empty">No scale readings yet. In Samsung Health → Health Connect, let Samsung Health share weight and body composition, and allow NOOP to read them. Then in NOOP: Data Sources → Health Connect → Body composition.</string>
++</resources>
+-- 
+2.54.0
+

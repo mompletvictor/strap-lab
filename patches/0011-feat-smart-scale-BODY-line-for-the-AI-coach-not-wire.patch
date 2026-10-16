@@ -1,0 +1,179 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Fri, 16 Oct 2026 12:32:36 +0200
+Subject: [PATCH] feat: smart-scale BODY line for the AI coach (not wired)
+
+ScaleCoachContext.line(repo) returns one compact English line, e.g.
+'BODY (smart scale, latest 2026-10-15): weight 78.2 kg (-0.6 kg vs 7d,
+-1.4 kg vs 30d), body fat 18.1% (-0.3 pp vs 7d), lean mass 61.0 kg, bone
+3.1 kg, water 45.2 kg, BMR 1780 kcal', or null when there is no scale data.
+Missing figures are omitted, never dashed; an older metric says 'as of'.
+Left for AiCoach to call; no upstream file changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../java/com/noop/ai/ScaleCoachContext.kt     | 56 ++++++++++++
+ .../java/com/noop/ai/ScaleCoachContextTest.kt | 88 +++++++++++++++++++
+ 2 files changed, 144 insertions(+)
+ create mode 100644 android/app/src/main/java/com/noop/ai/ScaleCoachContext.kt
+ create mode 100644 android/app/src/test/java/com/noop/ai/ScaleCoachContextTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/ai/ScaleCoachContext.kt b/android/app/src/main/java/com/noop/ai/ScaleCoachContext.kt
+new file mode 100644
+index 00000000..e1198114
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/ai/ScaleCoachContext.kt
+@@ -0,0 +1,56 @@
++package com.noop.ai
++
++import com.noop.analytics.ScaleBody
++import com.noop.data.WhoopRepository
++import com.noop.ingest.ScaleImport
++import java.util.Locale
++import kotlin.math.roundToInt
++
++/**
++ * victor:scale — one compact English line about the smart-scale body composition for the AI coach's data
++ * context, e.g.
++ *
++ * `BODY (smart scale, latest 2026-10-15): weight 78.2 kg (-0.6 kg vs 7d, -1.4 kg vs 30d), body fat 18.1%
++ * (-0.3 pp vs 7d), lean mass 61.0 kg, bone 3.1 kg, water 45.2 kg, BMR 1780 kcal`
++ *
++ * Null when there is no scale data, so the caller can simply skip it. Not wired here: AiCoach calls it.
++ * Metric units always (kg, %, kcal) since this is prompt text, not display. A metric whose newest reading
++ * is older than the headline day says so ("as of ..."); a missing figure is omitted, never dashed.
++ */
++object ScaleCoachContext {
++
++    /** Reads the stored Health Connect scale series and formats [line]; null when there is none. */
++    suspend fun line(repo: WhoopRepository): String? = line(ScaleImport.snapshot(repo))
++
++    /** Pure formatter behind [line]; null for a null snapshot or one with no metric. */
++    fun line(snapshot: ScaleBody.Snapshot?): String? {
++        val s = snapshot ?: return null
++        val parts = ArrayList<String>()
++        s.weight?.let { parts += item("weight", "${f1(it.value)} kg", it, s.day, "kg") }
++        s.bodyFat?.let { parts += item("body fat", "${f1(it.value)}%", it, s.day, "pp") }
++        s.leanMass?.let { parts += item("lean mass", "${f1(it.value)} kg", it, s.day, null) }
++        s.boneMass?.let { parts += item("bone", "${f1(it.value)} kg", it, s.day, null) }
++        s.bodyWater?.let { parts += item("water", "${f1(it.value)} kg", it, s.day, null) }
++        s.bmr?.let { parts += item("BMR", "${it.value.roundToInt()} kcal", it, s.day, null) }
++        if (parts.isEmpty()) return null
++        return "BODY (smart scale, latest ${s.day}): " + parts.joinToString(", ")
++    }
++
++    private fun item(label: String, value: String, m: ScaleBody.Metric, day: String, deltaUnit: String?): String {
++        val notes = ArrayList<String>()
++        if (m.day != day) notes += "as of ${m.day}"
++        if (deltaUnit != null) {
++            m.vs7d?.let { notes += "${signed(it)} $deltaUnit vs 7d" }
++            m.vs30d?.let { notes += "${signed(it)} $deltaUnit vs 30d" }
++        }
++        return if (notes.isEmpty()) "$label $value" else "$label $value (${notes.joinToString(", ")})"
++    }
++
++    private fun f1(v: Double): String = String.format(Locale.US, "%.1f", v)
++
++    /** "+0.4" / "-0.6"; a change that rounds to zero reads "+0.0", never "-0.0". */
++    private fun signed(v: Double): String {
++        val s = String.format(Locale.US, "%+.1f", v)
++        return if (s == "-0.0") "+0.0" else s
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/ai/ScaleCoachContextTest.kt b/android/app/src/test/java/com/noop/ai/ScaleCoachContextTest.kt
+new file mode 100644
+index 00000000..0c7b5b4a
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/ai/ScaleCoachContextTest.kt
+@@ -0,0 +1,88 @@
++package com.noop.ai
++
++import com.noop.analytics.ScaleBody
++import com.noop.analytics.ScaleBody.Metric
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Test
++
++/** victor:scale — the one-line BODY context the AI coach receives. */
++class ScaleCoachContextTest {
++
++    private fun snapshot(
++        weight: Metric? = null,
++        bodyFat: Metric? = null,
++        leanMass: Metric? = null,
++        boneMass: Metric? = null,
++        bodyWater: Metric? = null,
++        bmr: Metric? = null,
++    ) = ScaleBody.Snapshot(
++        day = "2026-10-15", readingAt = null,
++        weight = weight, bodyFat = bodyFat, leanMass = leanMass,
++        boneMass = boneMass, bodyWater = bodyWater, bmr = bmr,
++        weightTrend = emptyList(),
++    )
++
++    @Test
++    fun fullReadingFormatsAsOneCompactLine() {
++        val line = ScaleCoachContext.line(
++            snapshot(
++                weight = Metric("2026-10-15", 78.2, vs7d = -0.6, vs30d = -1.4),
++                bodyFat = Metric("2026-10-15", 18.1, vs7d = -0.3),
++                leanMass = Metric("2026-10-15", 61.0),
++                boneMass = Metric("2026-10-15", 3.1),
++                bodyWater = Metric("2026-10-15", 45.2),
++                bmr = Metric("2026-10-15", 1780.4),
++            ),
++        )
++        assertEquals(
++            "BODY (smart scale, latest 2026-10-15): weight 78.2 kg (-0.6 kg vs 7d, -1.4 kg vs 30d), " +
++                "body fat 18.1% (-0.3 pp vs 7d), lean mass 61.0 kg, bone 3.1 kg, water 45.2 kg, BMR 1780 kcal",
++            line,
++        )
++    }
++
++    @Test
++    fun onlyWhatTheScaleWroteAndOlderMetricsSayWhen() {
++        val line = ScaleCoachContext.line(
++            snapshot(
++                weight = Metric("2026-10-15", 78.24, vs7d = 0.4),
++                bodyFat = Metric("2026-10-12", 18.4),
++            ),
++        )
++        assertEquals(
++            "BODY (smart scale, latest 2026-10-15): weight 78.2 kg (+0.4 kg vs 7d), body fat 18.4% (as of 2026-10-12)",
++            line,
++        )
++    }
++
++    @Test
++    fun aChangeThatRoundsToZeroIsNeverNegativeZero() {
++        val line = ScaleCoachContext.line(snapshot(weight = Metric("2026-10-15", 78.2, vs7d = -0.04)))
++        assertEquals("BODY (smart scale, latest 2026-10-15): weight 78.2 kg (+0.0 kg vs 7d)", line)
++    }
++
++    @Test
++    fun noScaleDataMeansNoLine() {
++        assertNull(ScaleCoachContext.line(null as ScaleBody.Snapshot?))
++        assertNull(ScaleCoachContext.line(snapshot()))
++    }
++
++    @Test
++    fun lineFromRealSeriesEndToEnd() {
++        val s = ScaleBody.snapshot(
++            mapOf(
++                ScaleBody.KEY_WEIGHT to listOf(
++                    ScaleBody.Reading("2026-09-15", 79.6),
++                    ScaleBody.Reading("2026-10-08", 78.8),
++                    ScaleBody.Reading("2026-10-15", 78.2),
++                ),
++                ScaleBody.KEY_BONE_MASS to listOf(ScaleBody.Reading("2026-10-15", 3.1)),
++            ),
++        )
++        assertEquals(
++            "BODY (smart scale, latest 2026-10-15): weight 78.2 kg (-0.6 kg vs 7d, -1.4 kg vs 30d), bone 3.1 kg",
++            ScaleCoachContext.line(s),
++        )
++    }
++}
+-- 
+2.54.0
+

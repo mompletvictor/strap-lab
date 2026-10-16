@@ -16,16 +16,25 @@ Subject: [PATCH] fix: AI Coach works with the Claude 5.x models
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- .../app/src/main/java/com/noop/ai/AiCoach.kt  | 39 ++++++++++---
+ .../app/src/main/java/com/noop/ai/AiCoach.kt  | 41 +++++++++++---
  .../src/main/java/com/noop/ai/AiProvider.kt   | 20 ++++---
  .../com/noop/ai/AnthropicReplyTextTest.kt     | 55 +++++++++++++++++++
- 3 files changed, 100 insertions(+), 14 deletions(-)
+ 3 files changed, 101 insertions(+), 15 deletions(-)
  create mode 100644 android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/ai/AiCoach.kt b/android/app/src/main/java/com/noop/ai/AiCoach.kt
-index 8a4667f1..6f0b80fb 100644
+index 8a4667f1..10935d2e 100644
 --- a/android/app/src/main/java/com/noop/ai/AiCoach.kt
 +++ b/android/app/src/main/java/com/noop/ai/AiCoach.kt
+@@ -70,7 +70,7 @@ class AiCoach(
+ 
+     private val http: OkHttpClient = OkHttpClient.Builder()
+         .connectTimeout(20, TimeUnit.SECONDS)
+-        .readTimeout(60, TimeUnit.SECONDS)
++        .readTimeout(180, TimeUnit.SECONDS)   // victor:claude-models — was 60: Claude 5.x thinks before a non-streamed reply (morning brief)
+         .writeTimeout(30, TimeUnit.SECONDS)
+         .build()
+ 
 @@ -848,7 +848,9 @@ class AiCoach(
  
          val body = JSONObject()
@@ -61,10 +70,10 @@ index 8a4667f1..6f0b80fb 100644
              .put("system", systemPrompt)
              .put("messages", messages)
              .put("stream", true)
-@@ -1231,6 +1230,32 @@ class AiCoach(
-          * Pure + `internal` so it is unit-testable without a network. Same `{"error":{"message":…}}`
-          * shape [extractApiErrorMessage] reads.
-          */
+@@ -1223,6 +1222,32 @@ class AiCoach(
+             return base
+         }
+ 
 +        /** victor:claude-models — reply cap for both Anthropic calls (see [callAnthropic]). */
 +        internal const val ANTHROPIC_MAX_TOKENS = 16000
 +
@@ -91,9 +100,9 @@ index 8a4667f1..6f0b80fb 100644
 +                emptyReplyMessage(body)
 +            }
 +
-         internal fun emptyReplyMessage(body: String): String {
-             val providerError = runCatching {
-                 JSONObject(body).optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() }
+         /**
+          * The user-facing message for a 200 response whose assistant content is empty (#1074). Some
+          * OpenAI-compatible servers (e.g. a hand-set model the provider doesn't offer) return the real
 diff --git a/android/app/src/main/java/com/noop/ai/AiProvider.kt b/android/app/src/main/java/com/noop/ai/AiProvider.kt
 index 9158a97d..6e37baa2 100644
 --- a/android/app/src/main/java/com/noop/ai/AiProvider.kt

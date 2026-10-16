@@ -1,0 +1,1629 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Fri, 16 Oct 2026 12:40:41 +0200
+Subject: [PATCH] =?UTF-8?q?feat(food):=20photo=20food=20log=20core=20?=
+ =?UTF-8?q?=E2=80=94=20Claude=20vision=20estimate,=20local=20store,=20nutr?=
+ =?UTF-8?q?ition=20lane?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+New fork-owned package com.noop.food (no upstream file touched):
+- FoodVision: one raw-HTTP Messages API call per photo with the wearer's
+  Anthropic key (AiKeyStore), image + note in one user turn, structured
+  output via output_config.format json_schema; one plain retry when an
+  older model rejects output_config. Never sends temperature/top_p/
+  thinking/tool_choice; reads text through AiCoach.anthropicReplyText so
+  the leading thinking block of Claude 5.x is skipped. Errors map to a
+  FoodError enum (key, busy, offline, timeout, refusal, unreadable...).
+- FoodImage: EXIF-upright downscale to 1568 px, JPEG 85 (stepping down
+  only above 3.5 MB), plus a 320 px thumbnail; full photos never stored.
+- FoodStore: JSON log in files/food (write-then-rename, corrupt file set
+  aside), thumbnails in files/food/thumbs.
+- FoodNutritionSync: mirrors each day's totals into the existing
+  "nutrition-csv" lane (calories_in, protein_g, carbs_g, fat_g) so
+  Explore/Compare/Data Sources show them with no reader hooks. Only days
+  with photo entries are written, weight is never touched, and a cleared
+  day deletes only values still equal to what the log wrote (ledger), so
+  CSV imports survive.
+- FoodCoachContext.line(): one compact English line for the AI Coach.
+
+Tests: request shape and banned params, structured/fallback/refusal
+parsing, retry and status mapping, day totals, lane plan, coach line,
+codec round trip (27 JVM tests).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../java/com/noop/food/FoodCoachContext.kt    |  48 +++
+ .../src/main/java/com/noop/food/FoodDraft.kt  |  94 +++++
+ .../src/main/java/com/noop/food/FoodImage.kt  | 126 +++++++
+ .../src/main/java/com/noop/food/FoodModels.kt | 104 ++++++
+ .../java/com/noop/food/FoodNutritionSync.kt   |  86 +++++
+ .../src/main/java/com/noop/food/FoodStore.kt  | 253 +++++++++++++
+ .../src/main/java/com/noop/food/FoodVision.kt | 332 ++++++++++++++++++
+ .../test/java/com/noop/food/FoodLogTest.kt    | 171 +++++++++
+ .../java/com/noop/food/FoodStoreCodecTest.kt  |  62 ++++
+ .../java/com/noop/food/FoodVisionReplyTest.kt | 134 +++++++
+ .../com/noop/food/FoodVisionRequestTest.kt    |  90 +++++
+ 11 files changed, 1500 insertions(+)
+ create mode 100644 android/app/src/main/java/com/noop/food/FoodCoachContext.kt
+ create mode 100644 android/app/src/main/java/com/noop/food/FoodDraft.kt
+ create mode 100644 android/app/src/main/java/com/noop/food/FoodImage.kt
+ create mode 100644 android/app/src/main/java/com/noop/food/FoodModels.kt
+ create mode 100644 android/app/src/main/java/com/noop/food/FoodNutritionSync.kt
+ create mode 100644 android/app/src/main/java/com/noop/food/FoodStore.kt
+ create mode 100644 android/app/src/main/java/com/noop/food/FoodVision.kt
+ create mode 100644 android/app/src/test/java/com/noop/food/FoodLogTest.kt
+ create mode 100644 android/app/src/test/java/com/noop/food/FoodStoreCodecTest.kt
+ create mode 100644 android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
+ create mode 100644 android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/food/FoodCoachContext.kt b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
+new file mode 100644
+index 00000000..689f397a
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
+@@ -0,0 +1,48 @@
++package com.noop.food
++
++import android.content.Context
++import java.time.LocalDate
++import kotlin.math.roundToInt
++
++/**
++ * victor:food — one compact English line about the photo food log for the AI Coach prompt. Not wired
++ * here: the Coach adds it to its context. Numbers are whole (no locale-dependent decimals).
++ */
++object FoodCoachContext {
++
++    private const val PREFIX = "FOOD LOG (photo estimates): "
++    private const val WINDOW_DAYS = 7L
++
++    /** Null when nothing is logged today or in the previous 7 days. Reads the log from disk. */
++    suspend fun line(ctx: Context, today: LocalDate = LocalDate.now()): String? =
++        line(FoodStore.load(ctx), today)
++
++    /**
++     * Pure. Example: `FOOD LOG (photo estimates): today 1850 kcal (P 120 g, C 180 g, F 60 g) from 3 meals;
++     * previous 7 days avg 2100 kcal/day over 6 logged days`. Today is left out of the average because it
++     * is still in progress.
++     */
++    internal fun line(entries: List<FoodEntry>, today: LocalDate): String? {
++        val todayKey = today.toString()
++        val todayEntries = entries.filter { it.day == todayKey }
++        val from = today.minusDays(WINDOW_DAYS).toString()
++        val prior = entries.filter { it.day >= from && it.day < todayKey }.groupBy { it.day }
++        if (todayEntries.isEmpty() && prior.isEmpty()) return null
++
++        val parts = ArrayList<String>(2)
++        if (todayEntries.isNotEmpty()) {
++            val t = FoodTotals.ofEntries(todayEntries)
++            val n = todayEntries.size
++            parts += "today ${t.kcal.roundToInt()} kcal (P ${t.proteinG.roundToInt()} g, " +
++                "C ${t.carbsG.roundToInt()} g, F ${t.fatG.roundToInt()} g) from $n ${if (n == 1) "meal" else "meals"}"
++        } else {
++            parts += "today nothing logged yet"
++        }
++        if (prior.isNotEmpty()) {
++            val avg = prior.values.map { FoodTotals.ofEntries(it).kcal }.average().roundToInt()
++            val d = prior.size
++            parts += "previous $WINDOW_DAYS days avg $avg kcal/day over $d logged ${if (d == 1) "day" else "days"}"
++        }
++        return PREFIX + parts.joinToString("; ")
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/food/FoodDraft.kt b/android/app/src/main/java/com/noop/food/FoodDraft.kt
+new file mode 100644
+index 00000000..225dc70c
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/food/FoodDraft.kt
+@@ -0,0 +1,94 @@
++package com.noop.food
++
++import java.util.Locale
++import kotlin.math.roundToLong
++
++/** victor:food — one item as the review sheet edits it: numbers stay text until saved. */
++data class FoodItemDraft(
++    val name: String,
++    val portion: String,
++    val kcal: String,
++    val protein: String,
++    val carbs: String,
++    val fat: String,
++) {
++    fun toItem() = FoodItem(
++        name = name.trim(),
++        portion = portion.trim(),
++        kcal = parseAmount(kcal),
++        proteinG = parseAmount(protein),
++        carbsG = parseAmount(carbs),
++        fatG = parseAmount(fat),
++    )
++
++    /** Worth saving: named, or carrying energy. */
++    val isMeaningful: Boolean get() = name.isNotBlank() || parseAmount(kcal) > 0.0
++
++    companion object {
++        val EMPTY = FoodItemDraft("", "", "", "", "", "")
++
++        fun of(i: FoodItem) = FoodItemDraft(
++            name = i.name,
++            portion = i.portion,
++            kcal = formatAmount(i.kcal),
++            protein = formatAmount(i.proteinG),
++            carbs = formatAmount(i.carbsG),
++            fat = formatAmount(i.fatG),
++        )
++
++        /** "12,5" and "12.5" both read as 12.5; blank, junk, negative → 0. */
++        fun parseAmount(s: String): Double =
++            round1(s.trim().replace(',', '.').toDoubleOrNull() ?: 0.0)
++
++        /** Whole numbers without decimals, otherwise one decimal. Locale-free so it parses back. */
++        fun formatAmount(v: Double): String {
++            val r = round1(v)
++            return if (r == r.roundToLong().toDouble()) r.roundToLong().toString()
++            else String.format(Locale.ROOT, "%.1f", r)
++        }
++    }
++}
++
++enum class FoodStage { PREPARE, ANALYZING, REVIEW }
++
++/**
++ * victor:food — the sheet's working copy of a meal: a new photo on its way through analysis, or an
++ * existing entry being edited ([entryId] set). [photoJpeg] lives only in memory. A plain class (not a
++ * data class) on purpose: it holds byte arrays, and every update must reach the StateFlow.
++ */
++class FoodDraft(
++    val entryId: String?,
++    val timestamp: Long,
++    val day: String,
++    val note: String,
++    val items: List<FoodItemDraft>,
++    val photoJpeg: ByteArray?,
++    val thumbJpeg: ByteArray?,
++    val thumbPath: String?,
++    val confidence: String?,
++    val aiNotes: String?,
++    val stage: FoodStage,
++    /** True once Claude has answered for this photo (an empty item list then means "no food seen"). */
++    val analyzed: Boolean = false,
++    val error: FoodError? = null,
++    val errorDetail: String? = null,
++    val saving: Boolean = false,
++) {
++    fun copy(
++        note: String = this.note,
++        items: List<FoodItemDraft> = this.items,
++        confidence: String? = this.confidence,
++        aiNotes: String? = this.aiNotes,
++        stage: FoodStage = this.stage,
++        analyzed: Boolean = this.analyzed,
++        error: FoodError? = this.error,
++        errorDetail: String? = this.errorDetail,
++        saving: Boolean = this.saving,
++    ) = FoodDraft(
++        entryId, timestamp, day, note, items, photoJpeg, thumbJpeg, thumbPath,
++        confidence, aiNotes, stage, analyzed, error, errorDetail, saving,
++    )
++
++    val totals: FoodTotals get() = FoodTotals.ofItems(items.map { it.toItem() })
++    val canSave: Boolean get() = !saving && items.any { it.isMeaningful }
++}
+diff --git a/android/app/src/main/java/com/noop/food/FoodImage.kt b/android/app/src/main/java/com/noop/food/FoodImage.kt
+new file mode 100644
+index 00000000..0a1cfd78
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/food/FoodImage.kt
+@@ -0,0 +1,126 @@
++package com.noop.food
++
++import android.Manifest
++import android.content.Context
++import android.content.pm.PackageManager
++import android.graphics.Bitmap
++import android.graphics.BitmapFactory
++import android.graphics.Matrix
++import android.media.ExifInterface
++import java.io.ByteArrayOutputStream
++import java.io.File
++import java.io.InputStream
++import kotlin.math.max
++import kotlin.math.roundToInt
++
++/**
++ * victor:food — photo preparation: one decode gives the analysis JPEG (≤ [MAX_EDGE] px on the long
++ * edge, EXIF rotation applied, kept in memory only) and a small thumbnail for the log. The
++ * full-resolution photo is never stored.
++ */
++object FoodImage {
++
++    /** The API's recommended long edge; larger images are downscaled server-side anyway. */
++    const val MAX_EDGE = 1568
++    const val JPEG_QUALITY = 85
++
++    /** Raw JPEG ceiling: base64 adds a third, so this keeps the request well under the 5 MB image cap. */
++    const val MAX_BYTES = 3_500_000
++    const val THUMB_EDGE = 320
++    private const val THUMB_QUALITY = 80
++
++    class Prepared(val jpeg: ByteArray, val thumb: ByteArray)
++
++    /**
++     * Decode the image [open] yields (called up to three times: bounds, EXIF, pixels). Null when it
++     * cannot be read or decoded. Blocking: call off the main thread.
++     */
++    fun prepare(open: () -> InputStream?): Prepared? = runCatching {
++        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
++        open()?.use { BitmapFactory.decodeStream(it, null, bounds) }
++        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
++
++        // BitmapFactory drops EXIF, so read the orientation from its own stream first.
++        val orientation = runCatching {
++            open()?.use { ExifInterface(it).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL) }
++        }.getOrNull() ?: ExifInterface.ORIENTATION_NORMAL
++
++        val opts = BitmapFactory.Options().apply { inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, MAX_EDGE) }
++        val decoded = open()?.use { BitmapFactory.decodeStream(it, null, opts) } ?: return null
++        val upright = scaleAndOrient(decoded, MAX_EDGE, orientation)
++        val jpeg = encodeUnder(upright, MAX_BYTES)
++        val (tw, th) = fitWithin(upright.width, upright.height, THUMB_EDGE)
++        val thumbBitmap = Bitmap.createScaledBitmap(upright, tw, th, true)
++        val thumb = encode(thumbBitmap, THUMB_QUALITY)
++        if (thumbBitmap !== upright) thumbBitmap.recycle()
++        upright.recycle()
++        if (jpeg == null) null else Prepared(jpeg, thumb)
++    }.getOrNull()
++
++    /** Where the camera writes before analysis (cache, shared via the app's FileProvider `food/` path). */
++    fun captureFile(ctx: Context): File =
++        File(File(ctx.cacheDir, "food").apply { mkdirs() }, "capture.jpg")
++
++    /**
++     * TakePicture needs no permission unless the app DECLARES CAMERA in its manifest; then the
++     * permission must be granted first or the launch throws. True when a runtime request is needed.
++     */
++    fun cameraPermissionNeeded(ctx: Context): Boolean {
++        val declared = runCatching {
++            @Suppress("DEPRECATION")
++            ctx.packageManager.getPackageInfo(ctx.packageName, PackageManager.GET_PERMISSIONS)
++                .requestedPermissions?.contains(Manifest.permission.CAMERA) == true
++        }.getOrDefault(false)
++        return declared && ctx.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED
++    }
++
++    /** Largest power-of-two subsample that keeps the long edge at or above [maxEdge] (exact fit happens later). */
++    internal fun sampleSize(width: Int, height: Int, maxEdge: Int): Int {
++        var sample = 1
++        while (max(width, height) / (sample * 2) >= maxEdge) sample *= 2
++        return sample
++    }
++
++    /** The size that fits [width]×[height] within [maxEdge] on the long edge, never upscaling. */
++    internal fun fitWithin(width: Int, height: Int, maxEdge: Int): Pair<Int, Int> {
++        val longest = max(width, height)
++        if (longest <= maxEdge) return width to height
++        val f = maxEdge.toDouble() / longest
++        return max(1, (width * f).roundToInt()) to max(1, (height * f).roundToInt())
++    }
++
++    private fun scaleAndOrient(src: Bitmap, maxEdge: Int, orientation: Int): Bitmap {
++        val (w, _) = fitWithin(src.width, src.height, maxEdge)
++        val factor = w.toFloat() / src.width
++        val m = Matrix()
++        if (factor != 1f) m.postScale(factor, factor)
++        when (orientation) {
++            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.postScale(-1f, 1f)
++            ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
++            ExifInterface.ORIENTATION_FLIP_VERTICAL -> m.postScale(1f, -1f)
++            ExifInterface.ORIENTATION_TRANSPOSE -> { m.postRotate(90f); m.postScale(-1f, 1f) }
++            ExifInterface.ORIENTATION_ROTATE_90 -> m.postRotate(90f)
++            ExifInterface.ORIENTATION_TRANSVERSE -> { m.postRotate(270f); m.postScale(-1f, 1f) }
++            ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
++        }
++        if (m.isIdentity) return src
++        val out = Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
++        if (out !== src) src.recycle()
++        return out
++    }
++
++    private fun encode(b: Bitmap, quality: Int): ByteArray =
++        ByteArrayOutputStream().use { out ->
++            b.compress(Bitmap.CompressFormat.JPEG, quality, out)
++            out.toByteArray()
++        }
++
++    /** [JPEG_QUALITY] first, stepping down only if a very detailed photo would exceed [limit]. */
++    private fun encodeUnder(b: Bitmap, limit: Int): ByteArray? {
++        for (q in listOf(JPEG_QUALITY, 75, 65, 50)) {
++            val bytes = encode(b, q)
++            if (bytes.size <= limit) return bytes
++        }
++        return null
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/food/FoodModels.kt b/android/app/src/main/java/com/noop/food/FoodModels.kt
+new file mode 100644
+index 00000000..160dbeef
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/food/FoodModels.kt
+@@ -0,0 +1,104 @@
++package com.noop.food
++
++import java.time.Instant
++import java.time.LocalDate
++import java.time.ZoneId
++import kotlin.math.roundToLong
++
++/*
++ * victor:food — the photo food log's value types. Fork-owned: nothing here is shared with upstream,
++ * and nothing is stored in Room except the day totals FoodNutritionSync mirrors into the
++ * nutrition lane.
++ */
++
++/** One food the estimate (or the wearer) listed, with its portion and macros for that portion. */
++data class FoodItem(
++    val name: String,
++    val portion: String,
++    val kcal: Double,
++    val proteinG: Double,
++    val carbsG: Double,
++    val fatG: Double,
++)
++
++/** Energy and macros, summed. Values are always finite and non-negative. */
++data class FoodTotals(
++    val kcal: Double,
++    val proteinG: Double,
++    val carbsG: Double,
++    val fatG: Double,
++) {
++    operator fun plus(o: FoodTotals) =
++        FoodTotals(kcal + o.kcal, proteinG + o.proteinG, carbsG + o.carbsG, fatG + o.fatG)
++
++    /** One decimal everywhere: what is stored, shown and compared, so float noise never leaks. */
++    fun rounded() = FoodTotals(round1(kcal), round1(proteinG), round1(carbsG), round1(fatG))
++
++    companion object {
++        val ZERO = FoodTotals(0.0, 0.0, 0.0, 0.0)
++
++        fun ofItems(items: List<FoodItem>): FoodTotals =
++            items.fold(ZERO) { acc, i -> acc + FoodTotals(i.kcal, i.proteinG, i.carbsG, i.fatG) }.rounded()
++
++        fun ofEntries(entries: List<FoodEntry>): FoodTotals =
++            entries.fold(ZERO) { acc, e -> acc + e.totals }.rounded()
++    }
++}
++
++/**
++ * One logged meal. [day] is the LOCAL calendar day the meal was logged on, fixed at creation so a
++ * later time-zone change never moves it. [kcal]/[proteinG]/[carbsG]/[fatG] are the sum of [items]
++ * at save time. [thumbnailPath] is relative to the food directory (see FoodStore.foodDir); the
++ * full-resolution photo is never kept.
++ */
++data class FoodEntry(
++    val id: String,
++    val timestamp: Long,
++    val day: String,
++    val note: String,
++    val items: List<FoodItem>,
++    val kcal: Double,
++    val proteinG: Double,
++    val carbsG: Double,
++    val fatG: Double,
++    val thumbnailPath: String?,
++    val confidence: String? = null,
++    val aiNotes: String? = null,
++) {
++    val totals: FoodTotals get() = FoodTotals(kcal, proteinG, carbsG, fatG)
++}
++
++/** What Claude returned for one photo, already sanitised. */
++data class FoodEstimate(
++    val items: List<FoodItem>,
++    /** The totals the model reported; the app always re-sums [items] rather than trusting these. */
++    val reportedTotals: FoodTotals,
++    /** "low" | "medium" | "high", or null when the reply had none. */
++    val confidence: String?,
++    val notes: String,
++)
++
++/** Day bucketing and per-day totals over the log. Pure. */
++object FoodDays {
++
++    fun dayOf(timestampMs: Long, zone: ZoneId = ZoneId.systemDefault()): String =
++        Instant.ofEpochMilli(timestampMs).atZone(zone).toLocalDate().toString()
++
++    fun today(zone: ZoneId = ZoneId.systemDefault()): String = LocalDate.now(zone).toString()
++
++    /** The day's totals, or null when nothing is logged that day (distinct from a logged 0 kcal). */
++    fun totalsFor(entries: List<FoodEntry>, day: String): FoodTotals? {
++        val ofDay = entries.filter { it.day == day }
++        return if (ofDay.isEmpty()) null else FoodTotals.ofEntries(ofDay)
++    }
++
++    /** Days newest first; within a day, meals in the order they were eaten. */
++    fun groupedByDay(entries: List<FoodEntry>): List<Pair<String, List<FoodEntry>>> =
++        entries.groupBy { it.day }
++            .toSortedMap(compareByDescending { it })
++            .map { (day, list) -> day to list.sortedBy { it.timestamp } }
++}
++
++/** Finite, non-negative, one decimal. */
++internal fun round1(v: Double): Double =
++    if (!v.isFinite() || v <= 0.0) 0.0 else (v * 10.0).roundToLong() / 10.0
+diff --git a/android/app/src/main/java/com/noop/food/FoodNutritionSync.kt b/android/app/src/main/java/com/noop/food/FoodNutritionSync.kt
+new file mode 100644
+index 00000000..6a1b02b4
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/food/FoodNutritionSync.kt
+@@ -0,0 +1,86 @@
++package com.noop.food
++
++import com.noop.data.MetricSeriesRow
++import com.noop.data.WhoopRepository
++import com.noop.ingest.NutritionCsvImporter
++import kotlin.math.abs
++
++/**
++ * victor:food — mirrors the photo log's day totals into NOOP's existing nutrition lane, so Explore,
++ * Compare and Data Sources show them with no reader changes.
++ *
++ * Why the SAME source id as the CSV importer ("nutrition-csv") rather than a source of our own:
++ * every nutrition reader is hard-wired to that one source (Explore scans it for keys, Compare's
++ * catalogue names it per metric, Data Sources counts it, and the repository's source resolution
++ * treats nutrition as single-source by design). A second source would need hooks in each of those
++ * upstream screens and would show two "Calories in" metrics side by side.
++ *
++ * metricSeries is keyed (deviceId, day, key) and written with @Upsert, so a CSV import is already
++ * per-day last-writer-wins against its own earlier imports. The photo log joins that lane at day
++ * granularity with three rules that keep CSV imports intact:
++ *  1. It only ever writes the four intake keys (never `weight`), and only for days that have photo
++ *     entries. Days without photo entries are never touched.
++ *  2. A day with photo entries shows the photo totals: an edit there overwrites that day's intake
++ *     values. A later CSV import of the same day replaces them again until the next photo edit of
++ *     that day (the same last-writer-wins the importer has with itself).
++ *  3. It remembers what it last wrote per day (the ledger). When a day loses its last photo entry,
++ *     a key is deleted only if the stored value is still exactly what the photo log wrote, so a CSV
++ *     value imported over it in the meantime survives.
++ */
++internal object FoodNutritionSync {
++
++    const val SOURCE_ID: String = NutritionCsvImporter.SOURCE_ID
++
++    /** The four intake keys of the nutrition vocabulary, in a fixed order. */
++    val KEYS: List<String> = listOf(
++        NutritionCsvImporter.KEY_CALORIES_IN,
++        NutritionCsvImporter.KEY_PROTEIN_G,
++        NutritionCsvImporter.KEY_CARBS_G,
++        NutritionCsvImporter.KEY_FAT_G,
++    )
++
++    /** Values compare equal within this tolerance (everything is stored at one decimal). */
++    private const val EPSILON = 0.05
++
++    data class Plan(
++        val upserts: List<MetricSeriesRow>,
++        val deleteKeys: List<String>,
++        /** The ledger value to remember for the day afterwards; null = forget the day. */
++        val ledger: FoodTotals?,
++    )
++
++    fun valuesOf(t: FoodTotals): Map<String, Double> = mapOf(
++        KEYS[0] to t.kcal,
++        KEYS[1] to t.proteinG,
++        KEYS[2] to t.carbsG,
++        KEYS[3] to t.fatG,
++    )
++
++    /**
++     * Pure: what to write for [day] given its current photo [totals] (null = no entries left), the
++     * totals the photo log [lastWritten] there, and the values [stored] in the lane right now.
++     */
++    fun plan(day: String, totals: FoodTotals?, lastWritten: FoodTotals?, stored: Map<String, Double?>): Plan {
++        if (totals != null) {
++            val rows = valuesOf(totals.rounded()).map { (k, v) -> MetricSeriesRow(SOURCE_ID, day, k, v) }
++            return Plan(upserts = rows, deleteKeys = emptyList(), ledger = totals.rounded())
++        }
++        if (lastWritten == null) return Plan(emptyList(), emptyList(), null)
++        val ours = valuesOf(lastWritten)
++        val deletes = KEYS.filter { k ->
++            val now = stored[k] ?: return@filter false
++            val wrote = ours[k] ?: return@filter false
++            abs(now - wrote) < EPSILON
++        }
++        return Plan(upserts = emptyList(), deleteKeys = deletes, ledger = null)
++    }
++
++    /** Read the lane's current values for [day] (only needed when a day may be cleared). */
++    suspend fun storedValues(repo: WhoopRepository, day: String): Map<String, Double?> =
++        KEYS.associateWith { k -> repo.metricSeries(SOURCE_ID, k, day, day).firstOrNull()?.value }
++
++    suspend fun apply(repo: WhoopRepository, day: String, plan: Plan) {
++        if (plan.upserts.isNotEmpty()) repo.upsertMetricSeries(plan.upserts)
++        for (k in plan.deleteKeys) repo.deleteMetricSeriesPoint(SOURCE_ID, day, k)
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/food/FoodStore.kt b/android/app/src/main/java/com/noop/food/FoodStore.kt
+new file mode 100644
+index 00000000..52ade9e6
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/food/FoodStore.kt
+@@ -0,0 +1,253 @@
++package com.noop.food
++
++import android.content.Context
++import com.noop.data.WhoopRepository
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import kotlinx.coroutines.sync.Mutex
++import kotlinx.coroutines.sync.withLock
++import kotlinx.coroutines.withContext
++import org.json.JSONArray
++import org.json.JSONObject
++import java.io.File
++
++/** victor:food — everything the food log persists: the meals and the nutrition-lane ledger. */
++internal data class FoodState(
++    val entries: List<FoodEntry> = emptyList(),
++    /** Per day, the totals the photo log last wrote into the nutrition lane (see FoodNutritionSync). */
++    val synced: Map<String, FoodTotals> = emptyMap(),
++)
++
++/**
++ * victor:food — JSON codec for [FoodState]. Pure, so the round trip is JVM-testable. Unknown fields
++ * are ignored and missing optional ones default, so the format can grow without a migration.
++ */
++internal object FoodStoreCodec {
++
++    const val VERSION = 1
++
++    fun encode(state: FoodState): String {
++        val entries = JSONArray()
++        for (e in state.entries) {
++            val items = JSONArray()
++            for (i in e.items) {
++                items.put(
++                    JSONObject()
++                        .put("name", i.name)
++                        .put("portion", i.portion)
++                        .put("kcal", i.kcal)
++                        .put("protein_g", i.proteinG)
++                        .put("carbs_g", i.carbsG)
++                        .put("fat_g", i.fatG),
++                )
++            }
++            val o = JSONObject()
++                .put("id", e.id)
++                .put("ts", e.timestamp)
++                .put("day", e.day)
++                .put("note", e.note)
++                .put("items", items)
++                .put("kcal", e.kcal)
++                .put("protein_g", e.proteinG)
++                .put("carbs_g", e.carbsG)
++                .put("fat_g", e.fatG)
++            e.thumbnailPath?.let { o.put("thumb", it) }
++            e.confidence?.let { o.put("confidence", it) }
++            e.aiNotes?.let { o.put("ai_notes", it) }
++            entries.put(o)
++        }
++        val synced = JSONObject()
++        for ((day, t) in state.synced.toSortedMap()) synced.put(day, totalsJson(t))
++        return JSONObject()
++            .put("version", VERSION)
++            .put("entries", entries)
++            .put("synced", synced)
++            .toString()
++    }
++
++    /** Throws on text that is not a food-log document, so a corrupt file is never mistaken for empty. */
++    fun decode(text: String): FoodState {
++        val root = JSONObject(text)
++        val arr = root.getJSONArray("entries")
++        val entries = ArrayList<FoodEntry>(arr.length())
++        for (n in 0 until arr.length()) {
++            val o = arr.optJSONObject(n) ?: continue
++            val id = o.optString("id").takeIf { it.isNotBlank() } ?: continue
++            val ts = o.optLong("ts", 0L)
++            val itemsArr = o.optJSONArray("items") ?: JSONArray()
++            val items = (0 until itemsArr.length()).mapNotNull { i ->
++                val io = itemsArr.optJSONObject(i) ?: return@mapNotNull null
++                FoodItem(
++                    name = io.optString("name"),
++                    portion = io.optString("portion"),
++                    kcal = round1(io.optDouble("kcal", 0.0)),
++                    proteinG = round1(io.optDouble("protein_g", 0.0)),
++                    carbsG = round1(io.optDouble("carbs_g", 0.0)),
++                    fatG = round1(io.optDouble("fat_g", 0.0)),
++                )
++            }
++            entries += FoodEntry(
++                id = id,
++                timestamp = ts,
++                day = o.optString("day").takeIf { it.isNotBlank() } ?: FoodDays.dayOf(ts),
++                note = o.optString("note"),
++                items = items,
++                kcal = round1(o.optDouble("kcal", 0.0)),
++                proteinG = round1(o.optDouble("protein_g", 0.0)),
++                carbsG = round1(o.optDouble("carbs_g", 0.0)),
++                fatG = round1(o.optDouble("fat_g", 0.0)),
++                thumbnailPath = o.optString("thumb").takeIf { it.isNotBlank() },
++                confidence = o.optString("confidence").takeIf { it.isNotBlank() },
++                aiNotes = o.optString("ai_notes").takeIf { it.isNotBlank() },
++            )
++        }
++        val synced = LinkedHashMap<String, FoodTotals>()
++        root.optJSONObject("synced")?.let { s ->
++            for (day in s.keys()) {
++                val t = s.optJSONObject(day) ?: continue
++                synced[day] = FoodTotals(
++                    round1(t.optDouble("kcal", 0.0)),
++                    round1(t.optDouble("protein_g", 0.0)),
++                    round1(t.optDouble("carbs_g", 0.0)),
++                    round1(t.optDouble("fat_g", 0.0)),
++                )
++            }
++        }
++        return FoodState(entries.sortedBy { it.timestamp }, synced)
++    }
++
++    private fun totalsJson(t: FoodTotals) = JSONObject()
++        .put("kcal", t.kcal)
++        .put("protein_g", t.proteinG)
++        .put("carbs_g", t.carbsG)
++        .put("fat_g", t.fatG)
++}
++
++/**
++ * victor:food — the food log on disk: `files/food/log.json` plus small thumbnails under
++ * `files/food/thumbs/`. App-private, never in the Room DB. Every mutation re-syncs the touched
++ * days into the nutrition lane (see [FoodNutritionSync]). All calls are serialized by one mutex
++ * and run on [Dispatchers.IO].
++ */
++object FoodStore {
++
++    private const val DIR = "food"
++    private const val FILE = "log.json"
++    private const val THUMBS = "thumbs"
++
++    private val mutex = Mutex()
++    private var cache: FoodState? = null
++
++    private val _entries = MutableStateFlow<List<FoodEntry>>(emptyList())
++    /** The log, oldest first. Empty until the first [load]. */
++    val entries: StateFlow<List<FoodEntry>> = _entries.asStateFlow()
++
++    fun foodDir(ctx: Context): File = File(ctx.applicationContext.filesDir, DIR)
++
++    /** Resolve an entry's relative [FoodEntry.thumbnailPath]. */
++    fun thumbFile(ctx: Context, relativePath: String): File = File(foodDir(ctx), relativePath)
++
++    suspend fun load(ctx: Context): List<FoodEntry> = withContext(Dispatchers.IO) {
++        mutex.withLock { state(ctx).entries }
++    }
++
++    /**
++     * Add or replace [entry] (matched by id). [newThumbJpeg], when given, replaces the thumbnail.
++     * Then rewrites the nutrition lane for the entry's day (and its old day, if it moved).
++     */
++    suspend fun save(ctx: Context, repo: WhoopRepository, entry: FoodEntry, newThumbJpeg: ByteArray?) =
++        withContext(Dispatchers.IO) {
++            mutex.withLock {
++                val current = state(ctx)
++                val old = current.entries.firstOrNull { it.id == entry.id }
++                var toSave = entry
++                if (newThumbJpeg != null) {
++                    val rel = "$THUMBS/${entry.id}.jpg"
++                    val f = thumbFile(ctx, rel)
++                    f.parentFile?.mkdirs()
++                    f.writeBytes(newThumbJpeg)
++                    toSave = entry.copy(thumbnailPath = rel)
++                }
++                val entries = current.entries.filterNot { it.id == entry.id } + toSave
++                var next = current.copy(entries = entries.sortedBy { it.timestamp })
++                persist(ctx, next)
++                next = syncDays(repo, next, setOfNotNull(toSave.day, old?.day))
++                persist(ctx, next)
++            }
++        }
++
++    /** Delete the entry with [id] and its thumbnail, then rewrite (or clear) its day in the lane. */
++    suspend fun delete(ctx: Context, repo: WhoopRepository, id: String) = withContext(Dispatchers.IO) {
++        mutex.withLock {
++            val current = state(ctx)
++            val old = current.entries.firstOrNull { it.id == id } ?: return@withLock
++            old.thumbnailPath?.let { runCatching { thumbFile(ctx, it).delete() } }
++            var next = current.copy(entries = current.entries.filterNot { it.id == id })
++            persist(ctx, next)
++            next = syncDays(repo, next, setOf(old.day))
++            persist(ctx, next)
++        }
++    }
++
++    /**
++     * Repair pass: re-sync every day whose ledger disagrees with its entries (a write that failed
++     * half-way, e.g. the app was killed between the file and the DB). It compares the ledger with
++     * the log, never with the DB, so it does not fight a CSV import made on purpose.
++     */
++    suspend fun reconcile(ctx: Context, repo: WhoopRepository) = withContext(Dispatchers.IO) {
++        mutex.withLock {
++            val current = state(ctx)
++            val days = (current.entries.map { it.day } + current.synced.keys).toSet()
++            val stale = days.filter { d -> FoodDays.totalsFor(current.entries, d) != current.synced[d] }.toSet()
++            if (stale.isNotEmpty()) persist(ctx, syncDays(repo, current, stale))
++        }
++    }
++
++    private suspend fun syncDays(repo: WhoopRepository, state: FoodState, days: Set<String>): FoodState {
++        val ledger = state.synced.toMutableMap()
++        for (day in days) {
++            val totals = FoodDays.totalsFor(state.entries, day)
++            val stored = if (totals == null && ledger[day] != null) {
++                FoodNutritionSync.storedValues(repo, day)
++            } else {
++                emptyMap()
++            }
++            val plan = FoodNutritionSync.plan(day, totals, ledger[day], stored)
++            FoodNutritionSync.apply(repo, day, plan)
++            if (plan.ledger != null) ledger[day] = plan.ledger else ledger.remove(day)
++        }
++        return state.copy(synced = ledger)
++    }
++
++    /** Caller holds [mutex]. A corrupt file is set aside (never silently overwritten) and the log starts empty. */
++    private fun state(ctx: Context): FoodState {
++        cache?.let { return it }
++        val file = File(foodDir(ctx), FILE)
++        val loaded = if (!file.exists()) {
++            FoodState()
++        } else {
++            runCatching { FoodStoreCodec.decode(file.readText()) }.getOrElse {
++                runCatching { file.renameTo(File(foodDir(ctx), "$FILE.corrupt-${System.currentTimeMillis()}")) }
++                FoodState()
++            }
++        }
++        cache = loaded
++        _entries.value = loaded.entries
++        return loaded
++    }
++
++    /** Caller holds [mutex]. Write-then-rename so a crash mid-write never leaves half a file. */
++    private fun persist(ctx: Context, state: FoodState) {
++        val dir = foodDir(ctx).apply { mkdirs() }
++        val tmp = File(dir, "$FILE.tmp")
++        tmp.writeText(FoodStoreCodec.encode(state))
++        if (!tmp.renameTo(File(dir, FILE))) {
++            File(dir, FILE).writeText(FoodStoreCodec.encode(state))
++            tmp.delete()
++        }
++        cache = state
++        _entries.value = state.entries
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/food/FoodVision.kt b/android/app/src/main/java/com/noop/food/FoodVision.kt
+new file mode 100644
+index 00000000..adcefae0
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/food/FoodVision.kt
+@@ -0,0 +1,332 @@
++package com.noop.food
++
++import android.content.Context
++import com.noop.ai.AiCoach
++import com.noop.ai.AiKeyStore
++import com.noop.ai.AiProvider
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.withContext
++import okhttp3.MediaType.Companion.toMediaType
++import okhttp3.OkHttpClient
++import okhttp3.Request
++import okhttp3.RequestBody.Companion.toRequestBody
++import org.json.JSONArray
++import org.json.JSONObject
++import java.io.IOException
++import java.io.InterruptedIOException
++import java.net.ConnectException
++import java.net.SocketTimeoutException
++import java.net.UnknownHostException
++import java.util.Base64
++import java.util.concurrent.TimeUnit
++
++/** victor:food — why an analysis did not produce an estimate. The UI maps each to a string. */
++enum class FoodError {
++    NO_KEY,
++    KEY_REJECTED,
++    BUSY,
++    SERVER,
++    BAD_REQUEST,
++    OFFLINE,
++    TIMEOUT,
++    NETWORK,
++    REFUSAL,
++    UNREADABLE,
++    IMAGE,
++}
++
++sealed interface FoodResult {
++    data class Ok(val estimate: FoodEstimate) : FoodResult
++    /** [detail] is the provider's own error text, when it sent one (never the key or the image). */
++    data class Failed(val error: FoodError, val detail: String? = null) : FoodResult
++}
++
++/**
++ * victor:food — the one network call of the food log: a photo (plus the wearer's note) to the
++ * Anthropic Messages API, answered as structured JSON.
++ *
++ * Same opt-in posture and raw-HTTP idiom as [AiCoach]: nothing is sent until the wearer has saved
++ * an Anthropic key in the Coach settings and taps Analyse; only the downscaled photo and the note
++ * leave the phone. Claude 5.x rejects `temperature`, `top_p`, `thinking` and `tool_choice`, so the
++ * body never carries them; its replies start with a thinking block, so text is read through
++ * [AiCoach.anthropicReplyText], never `content[0]`.
++ */
++object FoodVision {
++
++    private const val API_VERSION = "2023-06-01"
++    private val JSON = "application/json; charset=utf-8".toMediaType()
++
++    // Thinking models can take a while on a photo: generous read/call budgets.
++    private val http: OkHttpClient = OkHttpClient.Builder()
++        .connectTimeout(20, TimeUnit.SECONDS)
++        .writeTimeout(60, TimeUnit.SECONDS)
++        .readTimeout(120, TimeUnit.SECONDS)
++        .callTimeout(180, TimeUnit.SECONDS)
++        .build()
++
++    /** Analyse one JPEG. Needs the Anthropic key from the Coach settings; [FoodError.NO_KEY] otherwise. */
++    suspend fun analyze(ctx: Context, jpeg: ByteArray, note: String): FoodResult = withContext(Dispatchers.IO) {
++        val app = ctx.applicationContext
++        val key = AiKeyStore.read(app, AiProvider.ANTHROPIC) ?: return@withContext FoodResult.Failed(FoodError.NO_KEY)
++        val model = AiKeyStore.readModel(app, AiProvider.ANTHROPIC)
++        val base64 = Base64.getEncoder().encodeToString(jpeg)
++        run(model, base64, note) { body -> post(AiProvider.ANTHROPIC.endpoint, key, body) }
++    }
++
++    /**
++     * The request/retry/parse flow over an injectable [send] (body JSON in, status + body out), so
++     * it is testable without a network. One retry without `output_config` when the model rejects
++     * structured output (an older model id).
++     */
++    internal suspend fun run(
++        model: String,
++        imageBase64: String,
++        note: String,
++        send: suspend (String) -> Pair<Int, String>,
++    ): FoodResult {
++        var structured = true
++        while (true) {
++            val (code, body) = try {
++                send(buildRequestBody(model, imageBase64, note, structured).toString())
++            } catch (e: CancellationException) {
++                throw e
++            } catch (e: UnknownHostException) {
++                return FoodResult.Failed(FoodError.OFFLINE)
++            } catch (e: ConnectException) {
++                return FoodResult.Failed(FoodError.OFFLINE)
++            } catch (e: SocketTimeoutException) {
++                return FoodResult.Failed(FoodError.TIMEOUT)
++            } catch (e: InterruptedIOException) {
++                return FoodResult.Failed(FoodError.TIMEOUT)
++            } catch (e: IOException) {
++                return FoodResult.Failed(FoodError.NETWORK)
++            }
++            if (code in 200..299) return parseReply(body)
++            if (structured && shouldRetryWithoutStructuredOutput(code, body)) {
++                structured = false
++                continue
++            }
++            return FoodResult.Failed(errorForStatus(code), apiErrorMessage(body))
++        }
++    }
++
++    // MARK: - Request (pure)
++
++    /** The JSON schema the reply must follow. All fields required, no extras (structured output rules). */
++    internal fun outputSchema(): JSONObject {
++        fun num() = JSONObject().put("type", "number")
++        fun str() = JSONObject().put("type", "string")
++        val item = JSONObject()
++            .put("type", "object")
++            .put(
++                "properties",
++                JSONObject()
++                    .put("name", str())
++                    .put("portion", str())
++                    .put("kcal", num())
++                    .put("protein_g", num())
++                    .put("carbs_g", num())
++                    .put("fat_g", num()),
++            )
++            .put("required", JSONArray(listOf("name", "portion", "kcal", "protein_g", "carbs_g", "fat_g")))
++            .put("additionalProperties", false)
++        return JSONObject()
++            .put("type", "object")
++            .put(
++                "properties",
++                JSONObject()
++                    .put("items", JSONObject().put("type", "array").put("items", item))
++                    .put("total_kcal", num())
++                    .put("total_protein_g", num())
++                    .put("total_carbs_g", num())
++                    .put("total_fat_g", num())
++                    .put("confidence", JSONObject().put("type", "string").put("enum", JSONArray(listOf("low", "medium", "high"))))
++                    .put("notes", str()),
++            )
++            .put(
++                "required",
++                JSONArray(
++                    listOf(
++                        "items", "total_kcal", "total_protein_g", "total_carbs_g", "total_fat_g",
++                        "confidence", "notes",
++                    ),
++                ),
++            )
++            .put("additionalProperties", false)
++    }
++
++    internal fun prompt(note: String, structured: Boolean): String = buildString {
++        append("Estimate the nutrition of the meal in this photo.\n")
++        append("- List each distinct food or drink you can see as one item.\n")
++        append("- Estimate a realistic portion for each from visual cues (plate and cutlery size, hands, packaging) ")
++        append("and write it in plain units (g, ml, units).\n")
++        append("- Give kcal, protein_g, carbs_g and fat_g for that portion from standard food composition data. ")
++        append("Include oil, butter, sauces and dressings you can reasonably infer.\n")
++        append("- The user's note describes what was actually eaten; when it conflicts with the photo, follow the note.\n")
++        append("- total_* must equal the sum of the items.\n")
++        append("- confidence: high when foods and amounts are clear, medium when portions are uncertain, ")
++        append("low when the photo is unclear or the food is hard to identify.\n")
++        append("- Write name, portion and notes in Spanish (Spain). notes: one or two short sentences with ")
++        append("the main assumptions.\n")
++        append("- If the photo does not show food or drink, return no items, zero totals, confidence low, ")
++        append("and say so in notes.\n")
++        val trimmed = note.trim()
++        append("\nUser's note: ")
++        append(if (trimmed.isEmpty()) "(none)" else "\"$trimmed\"")
++        if (!structured) {
++            append("\n\nReply with ONLY one JSON object, no other text, matching this JSON schema:\n")
++            append(outputSchema().toString())
++        }
++    }
++
++    /**
++     * The Messages API body: model, reply cap, one user turn of [image, text], and (when
++     * [structured]) `output_config.format` with [outputSchema]. Never temperature/top_p/thinking/
++     * tool_choice: Claude 5.x answers those with HTTP 400.
++     */
++    internal fun buildRequestBody(model: String, imageBase64: String, note: String, structured: Boolean): JSONObject {
++        val image = JSONObject()
++            .put("type", "image")
++            .put(
++                "source",
++                JSONObject()
++                    .put("type", "base64")
++                    .put("media_type", "image/jpeg")
++                    .put("data", imageBase64),
++            )
++        val text = JSONObject().put("type", "text").put("text", prompt(note, structured))
++        val message = JSONObject()
++            .put("role", "user")
++            .put("content", JSONArray().put(image).put(text))
++        val body = JSONObject()
++            .put("model", model)
++            .put("max_tokens", AiCoach.ANTHROPIC_MAX_TOKENS)
++            .put("messages", JSONArray().put(message))
++        if (structured) {
++            body.put(
++                "output_config",
++                JSONObject().put("format", JSONObject().put("type", "json_schema").put("schema", outputSchema())),
++            )
++        }
++        return body
++    }
++
++    /** A 400 that names the structured-output parameter means "this model cannot do it": retry plain. */
++    internal fun shouldRetryWithoutStructuredOutput(code: Int, body: String): Boolean {
++        if (code != 400) return false
++        val msg = (apiErrorMessage(body) ?: body).lowercase()
++        if ("output_config" in msg || "output_format" in msg || "json_schema" in msg) return true
++        return "format" in msg && "image" !in msg
++    }
++
++    internal fun errorForStatus(code: Int): FoodError = when (code) {
++        401, 403 -> FoodError.KEY_REJECTED
++        413 -> FoodError.IMAGE
++        429, 529 -> FoodError.BUSY
++        in 500..599 -> FoodError.SERVER
++        else -> FoodError.BAD_REQUEST
++    }
++
++    // MARK: - Reply (pure)
++
++    /** A 2xx body to a result: refusal, unreadable, or a sanitised estimate. */
++    internal fun parseReply(body: String): FoodResult {
++        val json = runCatching { JSONObject(body) }.getOrNull()
++            ?: return FoodResult.Failed(FoodError.UNREADABLE)
++        if (json.optString("stop_reason") == "refusal") return FoodResult.Failed(FoodError.REFUSAL)
++        val text = AiCoach.anthropicReplyText(json)
++        val estimate = if (text.isEmpty()) null else parseEstimate(text)
++        return if (estimate != null) FoodResult.Ok(estimate) else FoodResult.Failed(FoodError.UNREADABLE)
++    }
++
++    /** The estimate in [text]: the whole text as JSON, else the first JSON object inside it. */
++    internal fun parseEstimate(text: String): FoodEstimate? {
++        val obj = runCatching { JSONObject(text.trim()) }.getOrNull()
++            ?: extractFirstJsonObject(text)?.let { runCatching { JSONObject(it) }.getOrNull() }
++            ?: return null
++        val arr = obj.optJSONArray("items") ?: return null
++        val items = (0 until arr.length()).mapNotNull { i ->
++            val o = arr.optJSONObject(i) ?: return@mapNotNull null
++            FoodItem(
++                name = o.optString("name").trim(),
++                portion = o.optString("portion").trim(),
++                kcal = round1(o.optDouble("kcal", 0.0)),
++                proteinG = round1(o.optDouble("protein_g", 0.0)),
++                carbsG = round1(o.optDouble("carbs_g", 0.0)),
++                fatG = round1(o.optDouble("fat_g", 0.0)),
++            )
++        }.filter { it.name.isNotEmpty() || it.kcal > 0.0 }
++        val reported = FoodTotals(
++            round1(obj.optDouble("total_kcal", 0.0)),
++            round1(obj.optDouble("total_protein_g", 0.0)),
++            round1(obj.optDouble("total_carbs_g", 0.0)),
++            round1(obj.optDouble("total_fat_g", 0.0)),
++        )
++        val confidence = obj.optString("confidence").trim().lowercase().takeIf { it in setOf("low", "medium", "high") }
++        return FoodEstimate(items, reported, confidence, obj.optString("notes").trim())
++    }
++
++    /** The first balanced `{...}` in [text] (strings and escapes respected), or null. Tolerates ```json fences. */
++    internal fun extractFirstJsonObject(text: String): String? {
++        var start = text.indexOf('{')
++        while (start >= 0) {
++            var depth = 0
++            var inString = false
++            var escaped = false
++            for (i in start until text.length) {
++                val c = text[i]
++                if (inString) {
++                    when {
++                        escaped -> escaped = false
++                        c == '\\' -> escaped = true
++                        c == '"' -> inString = false
++                    }
++                    continue
++                }
++                when (c) {
++                    '"' -> inString = true
++                    '{' -> depth++
++                    '}' -> {
++                        depth--
++                        if (depth == 0) {
++                            val candidate = text.substring(start, i + 1)
++                            if (runCatching { JSONObject(candidate) }.isSuccess) return candidate
++                            break
++                        }
++                    }
++                }
++            }
++            start = text.indexOf('{', start + 1)
++        }
++        return null
++    }
++
++    private fun apiErrorMessage(body: String): String? = runCatching {
++        JSONObject(body).optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() }
++    }.getOrNull()
++
++    // MARK: - Transport
++
++    private suspend fun post(url: String, key: String, body: String): Pair<Int, String> =
++        withContext(Dispatchers.IO) {
++            val request = Request.Builder()
++                .url(url)
++                .addHeader("x-api-key", key)
++                .addHeader("anthropic-version", API_VERSION)
++                .addHeader("content-type", "application/json")
++                .post(body.toRequestBody(JSON))
++                .build()
++            val call = http.newCall(request)
++            // Leaving the sheet cancels the coroutine; cancel the socket too instead of waiting it out.
++            val handle = coroutineContext[Job]?.invokeOnCompletion { cause ->
++                if (cause is CancellationException) call.cancel()
++            }
++            try {
++                call.execute().use { resp -> resp.code to resp.body?.string().orEmpty() }
++            } finally {
++                handle?.dispose()
++            }
++        }
++}
+diff --git a/android/app/src/test/java/com/noop/food/FoodLogTest.kt b/android/app/src/test/java/com/noop/food/FoodLogTest.kt
+new file mode 100644
+index 00000000..b48d0d07
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/food/FoodLogTest.kt
+@@ -0,0 +1,171 @@
++package com.noop.food
++
++import com.noop.data.MetricSeriesRow
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.time.LocalDate
++import java.time.ZoneId
++
++/** victor:food — day totals, the review draft's number handling, the nutrition-lane plan and the Coach line. */
++class FoodLogTest {
++
++    private fun entry(id: String, day: String, kcal: Double, p: Double = 10.0, c: Double = 20.0, f: Double = 5.0, ts: Long = 0L) =
++        FoodEntry(
++            id = id, timestamp = ts, day = day, note = "", items = emptyList(),
++            kcal = kcal, proteinG = p, carbsG = c, fatG = f, thumbnailPath = null,
++        )
++
++    // MARK: - Day totals
++
++    @Test
++    fun dayTotalsSumOnlyThatDayAndRoundToOneDecimal() {
++        val log = listOf(
++            entry("a", "2026-10-16", 500.04, 30.1, 40.0, 10.0),
++            entry("b", "2026-10-16", 700.03, 20.2, 80.0, 25.5),
++            entry("c", "2026-10-15", 1000.0),
++        )
++        assertEquals(FoodTotals(1200.1, 50.3, 120.0, 35.5), FoodDays.totalsFor(log, "2026-10-16"))
++        assertEquals(FoodTotals(1000.0, 10.0, 20.0, 5.0), FoodDays.totalsFor(log, "2026-10-15"))
++        assertNull("no entries is not the same as a logged zero", FoodDays.totalsFor(log, "2026-10-14"))
++    }
++
++    @Test
++    fun totalsStayFiniteAndNonNegative() {
++        val items = listOf(
++            FoodItem("a", "", 100.0, 1.0, 2.0, 3.0),
++            FoodItem("b", "", -150.0, Double.NaN, 1.0, 1.0),
++        )
++        // The sum is clamped field by field: a bad term zeroes only its own field.
++        val t = FoodTotals.ofItems(items)
++        assertEquals(0.0, t.kcal, 0.0)
++        assertEquals(0.0, t.proteinG, 0.0)
++        assertEquals(3.0, t.carbsG, 0.0)
++        assertEquals(4.0, t.fatG, 0.0)
++    }
++
++    @Test
++    fun groupedByDayIsNewestDayFirstAndMealsInOrder() {
++        val log = listOf(
++            entry("late", "2026-10-15", 1.0, ts = 300),
++            entry("today", "2026-10-16", 1.0, ts = 400),
++            entry("early", "2026-10-15", 1.0, ts = 100),
++        )
++        val g = FoodDays.groupedByDay(log)
++        assertEquals(listOf("2026-10-16", "2026-10-15"), g.map { it.first })
++        assertEquals(listOf("early", "late"), g[1].second.map { it.id })
++    }
++
++    @Test
++    fun dayOfUsesTheLocalCalendarDay() {
++        // 2026-10-16 23:30 in Madrid (UTC+2) is still the 16th locally, the 16th 21:30 in UTC.
++        val ts = 1792186200000L
++        assertEquals("2026-10-16", FoodDays.dayOf(ts, ZoneId.of("Europe/Madrid")))
++        assertEquals("2026-10-17", FoodDays.dayOf(ts, ZoneId.of("Asia/Tokyo")))
++    }
++
++    // MARK: - Review draft numbers
++
++    @Test
++    fun draftAmountsParseCommaAndDotAndFormatBack() {
++        assertEquals(12.5, FoodItemDraft.parseAmount("12,5"), 0.0)
++        assertEquals(12.5, FoodItemDraft.parseAmount(" 12.5 "), 0.0)
++        assertEquals(0.0, FoodItemDraft.parseAmount(""), 0.0)
++        assertEquals(0.0, FoodItemDraft.parseAmount("1,2,3"), 0.0)
++        assertEquals("250", FoodItemDraft.formatAmount(250.0))
++        assertEquals("3.4", FoodItemDraft.formatAmount(3.44))
++        val item = FoodItem("Arroz", "150 g", 195.0, 4.1, 42.3, 0.4)
++        assertEquals(item, FoodItemDraft.of(item).toItem())
++    }
++
++    // MARK: - Nutrition lane plan
++
++    private val keys = FoodNutritionSync.KEYS
++
++    @Test
++    fun aDayWithEntriesWritesAllFourIntakeKeysAndRemembersThem() {
++        val t = FoodTotals(1850.0, 120.0, 180.0, 60.0)
++        val plan = FoodNutritionSync.plan("2026-10-16", t, lastWritten = null, stored = emptyMap())
++        assertEquals(
++            listOf(
++                MetricSeriesRow("nutrition-csv", "2026-10-16", "calories_in", 1850.0),
++                MetricSeriesRow("nutrition-csv", "2026-10-16", "protein_g", 120.0),
++                MetricSeriesRow("nutrition-csv", "2026-10-16", "carbs_g", 180.0),
++                MetricSeriesRow("nutrition-csv", "2026-10-16", "fat_g", 60.0),
++            ),
++            plan.upserts,
++        )
++        assertTrue(plan.deleteKeys.isEmpty())
++        assertEquals(t, plan.ledger)
++        assertTrue("weight is never written", plan.upserts.none { it.key == "weight" })
++    }
++
++    @Test
++    fun clearingADayDeletesOnlyWhatThePhotoLogStillOwns() {
++        val wrote = FoodTotals(1850.0, 120.0, 180.0, 60.0)
++        // A CSV import later replaced calories and protein for that day; carbs/fat are still ours.
++        val stored = mapOf(keys[0] to 2100.0, keys[1] to 130.0, keys[2] to 180.0, keys[3] to 60.0)
++        val plan = FoodNutritionSync.plan("2026-10-16", null, wrote, stored)
++        assertTrue(plan.upserts.isEmpty())
++        assertEquals(listOf("carbs_g", "fat_g"), plan.deleteKeys)
++        assertNull(plan.ledger)
++    }
++
++    @Test
++    fun aDayThePhotoLogNeverWroteIsNeverTouched() {
++        val stored = mapOf(keys[0] to 2100.0, keys[1] to 130.0, keys[2] to 200.0, keys[3] to 70.0)
++        val plan = FoodNutritionSync.plan("2026-10-10", null, lastWritten = null, stored = stored)
++        assertTrue(plan.upserts.isEmpty())
++        assertTrue(plan.deleteKeys.isEmpty())
++        assertNull(plan.ledger)
++    }
++
++    @Test
++    fun alreadyDeletedValuesAreSkipped() {
++        val wrote = FoodTotals(500.0, 20.0, 50.0, 10.0)
++        val plan = FoodNutritionSync.plan("2026-10-16", null, wrote, keys.associateWith { null })
++        assertTrue(plan.deleteKeys.isEmpty())
++    }
++
++    // MARK: - Coach line
++
++    private val today = LocalDate.of(2026, 10, 16)
++
++    @Test
++    fun coachLineIsNullWithNothingRecent() {
++        assertNull(FoodCoachContext.line(emptyList(), today))
++        assertNull(FoodCoachContext.line(listOf(entry("old", "2026-10-01", 2000.0)), today))
++    }
++
++    @Test
++    fun coachLineSummarisesTodayAndThePreviousWeek() {
++        val log = listOf(
++            entry("t1", "2026-10-16", 600.0, 40.0, 60.0, 20.0),
++            entry("t2", "2026-10-16", 800.0, 50.0, 70.0, 25.0),
++            entry("t3", "2026-10-16", 450.0, 30.0, 50.0, 15.0),
++            entry("y1", "2026-10-15", 2000.0),
++            entry("y2", "2026-10-15", 200.0),
++            entry("d3", "2026-10-13", 1900.0),
++            entry("d8", "2026-10-09", 2500.0), // 7 days before today: inside the window
++            entry("d9", "2026-10-08", 9999.0), // 8 days before: outside
++        )
++        assertEquals(
++            "FOOD LOG (photo estimates): today 1850 kcal (P 120 g, C 180 g, F 60 g) from 3 meals; " +
++                "previous 7 days avg 2200 kcal/day over 3 logged days",
++            FoodCoachContext.line(log, today),
++        )
++    }
++
++    @Test
++    fun coachLineWithoutTodayOrWithoutHistory() {
++        assertEquals(
++            "FOOD LOG (photo estimates): today nothing logged yet; previous 7 days avg 2000 kcal/day over 1 logged day",
++            FoodCoachContext.line(listOf(entry("y", "2026-10-15", 2000.0)), today),
++        )
++        assertEquals(
++            "FOOD LOG (photo estimates): today 500 kcal (P 10 g, C 20 g, F 5 g) from 1 meal",
++            FoodCoachContext.line(listOf(entry("t", "2026-10-16", 500.0)), today),
++        )
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/food/FoodStoreCodecTest.kt b/android/app/src/test/java/com/noop/food/FoodStoreCodecTest.kt
+new file mode 100644
+index 00000000..8369ae42
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/food/FoodStoreCodecTest.kt
+@@ -0,0 +1,62 @@
++package com.noop.food
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/** victor:food — the on-disk JSON round-trips exactly and refuses to read garbage as an empty log. */
++class FoodStoreCodecTest {
++
++    private val full = FoodEntry(
++        id = "e1",
++        timestamp = 1792152000000L,
++        day = "2026-10-16",
++        note = "media ración, sin aceite \"casero\"",
++        items = listOf(
++            FoodItem("Lentejas con chorizo", "1 plato (300 g)", 420.0, 22.5, 48.0, 14.3),
++            FoodItem("Pan", "1 rebanada", 80.0, 2.7, 15.0, 0.9),
++        ),
++        kcal = 500.0, proteinG = 25.2, carbsG = 63.0, fatG = 15.2,
++        thumbnailPath = "thumbs/e1.jpg",
++        confidence = "medium",
++        aiNotes = "Ración estimada por el tamaño del plato.",
++    )
++
++    private val bare = FoodEntry(
++        id = "e2", timestamp = 1792100000000L, day = "2026-10-15", note = "",
++        items = listOf(FoodItem("Café con leche", "", 60.0, 3.0, 5.0, 3.0)),
++        kcal = 60.0, proteinG = 3.0, carbsG = 5.0, fatG = 3.0,
++        thumbnailPath = null,
++    )
++
++    @Test
++    fun roundTripKeepsEveryFieldAndTheLedger() {
++        val state = FoodState(
++            entries = listOf(bare, full),
++            synced = mapOf(
++                "2026-10-15" to FoodTotals(60.0, 3.0, 5.0, 3.0),
++                "2026-10-16" to FoodTotals(500.0, 25.2, 63.0, 15.2),
++            ),
++        )
++        val decoded = FoodStoreCodec.decode(FoodStoreCodec.encode(state))
++        assertEquals(state, decoded)
++        assertEquals(null, decoded.entries[0].confidence)
++        assertEquals(null, decoded.entries[0].thumbnailPath)
++    }
++
++    @Test
++    fun entriesComeBackOldestFirstAndUnknownFieldsAreIgnored() {
++        val json = """{"version":7,"future":true,"entries":[
++            {"id":"b","ts":20,"day":"2026-10-16","items":[],"kcal":1,"extra":"x"},
++            {"id":"a","ts":10,"day":"2026-10-16","items":[],"kcal":2},
++            {"id":"","ts":5,"day":"2026-10-16","items":[]}]}"""
++        val s = FoodStoreCodec.decode(json)
++        assertEquals(listOf("a", "b"), s.entries.map { it.id })
++        assertTrue(s.synced.isEmpty())
++    }
++
++    @Test(expected = Exception::class)
++    fun garbageIsAnErrorNotAnEmptyLog() {
++        FoodStoreCodec.decode("{\"something\":\"else\"}")
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt b/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
+new file mode 100644
+index 00000000..d05e6ef9
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
+@@ -0,0 +1,134 @@
++package com.noop.food
++
++import kotlinx.coroutines.runBlocking
++import org.json.JSONObject
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.net.SocketTimeoutException
++import java.net.UnknownHostException
++
++/** victor:food — reading replies (structured and fallback) and the retry/error flow, without a network. */
++class FoodVisionReplyTest {
++
++    private val estimateJson = """
++        {"items":[
++           {"name":"Tortilla de patatas","portion":"1 porción (150 g)","kcal":280,"protein_g":10.5,"carbs_g":20,"fat_g":17.2},
++           {"name":"Pan","portion":"40 g","kcal":"100","protein_g":3.4,"carbs_g":20.1,"fat_g":0.5}],
++         "total_kcal":380,"total_protein_g":13.9,"total_carbs_g":40.1,"total_fat_g":17.7,
++         "confidence":"MEDIUM","notes":"Supongo aceite de oliva en la tortilla."}
++    """.trimIndent()
++
++    private fun reply(text: String, stop: String = "end_turn"): String =
++        JSONObject()
++            .put(
++                "content",
++                org.json.JSONArray()
++                    .put(JSONObject().put("type", "thinking").put("thinking", "").put("signature", "sig"))
++                    .put(JSONObject().put("type", "text").put("text", text)),
++            )
++            .put("stop_reason", stop)
++            .toString()
++
++    @Test
++    fun structuredReplyAfterAThinkingBlockParses() {
++        val result = FoodVision.parseReply(reply(estimateJson))
++        assertTrue(result is FoodResult.Ok)
++        val e = (result as FoodResult.Ok).estimate
++        assertEquals(2, e.items.size)
++        assertEquals("Tortilla de patatas", e.items[0].name)
++        assertEquals(280.0, e.items[0].kcal, 0.0)
++        assertEquals(100.0, e.items[1].kcal, 0.0) // a number sent as a string still reads
++        assertEquals("medium", e.confidence)
++        assertEquals("Supongo aceite de oliva en la tortilla.", e.notes)
++        assertEquals(FoodTotals(380.0, 13.9, 40.1, 17.7), e.reportedTotals)
++        assertEquals(FoodTotals(380.0, 13.9, 40.1, 17.7), FoodTotals.ofItems(e.items))
++    }
++
++    @Test
++    fun fallbackTextWithProseAndFenceParses() {
++        val text = "Claro, aquí va la estimación:\n```json\n$estimateJson\n```\nEspero que sirva {de ayuda}."
++        val result = FoodVision.parseReply(reply(text))
++        assertTrue(result is FoodResult.Ok)
++        assertEquals(2, (result as FoodResult.Ok).estimate.items.size)
++    }
++
++    @Test
++    fun firstJsonObjectRespectsBracesInsideStrings() {
++        val text = """nota {no json} y luego {"items":[{"name":"Salsa {casera}","portion":"\"1\" cda","kcal":50,"protein_g":0,"carbs_g":2,"fat_g":5}],"notes":"x"} fin"""
++        val json = FoodVision.extractFirstJsonObject(text)!!
++        assertEquals("Salsa {casera}", JSONObject(json).getJSONArray("items").getJSONObject(0).getString("name"))
++        assertNull(FoodVision.extractFirstJsonObject("sin objeto aquí"))
++    }
++
++    @Test
++    fun insaneValuesAreClampedAndBlankRowsDropped() {
++        val text = """{"items":[{"name":"Agua","portion":"","kcal":-5,"protein_g":"abc","carbs_g":0,"fat_g":0},
++            {"name":"","portion":"","kcal":0,"protein_g":0,"carbs_g":0,"fat_g":0}],
++            "total_kcal":0,"total_protein_g":0,"total_carbs_g":0,"total_fat_g":0,"confidence":"sure","notes":""}"""
++        val e = FoodVision.parseEstimate(text)!!
++        assertEquals(1, e.items.size)
++        assertEquals(0.0, e.items[0].kcal, 0.0)
++        assertEquals(0.0, e.items[0].proteinG, 0.0)
++        assertNull(e.confidence)
++    }
++
++    @Test
++    fun notFoodIsAnEmptyEstimateNotAnError() {
++        val text = """{"items":[],"total_kcal":0,"total_protein_g":0,"total_carbs_g":0,"total_fat_g":0,"confidence":"low","notes":"La foto no muestra comida."}"""
++        val result = FoodVision.parseReply(reply(text))
++        assertTrue(result is FoodResult.Ok)
++        val e = (result as FoodResult.Ok).estimate
++        assertTrue(e.items.isEmpty())
++        assertEquals("La foto no muestra comida.", e.notes)
++    }
++
++    @Test
++    fun refusalEmptyAndJunkRepliesFail() {
++        val refusal = """{"content":[],"stop_reason":"refusal"}"""
++        assertEquals(FoodResult.Failed(FoodError.REFUSAL), FoodVision.parseReply(refusal))
++        assertEquals(FoodResult.Failed(FoodError.UNREADABLE), FoodVision.parseReply(reply("", stop = "max_tokens")))
++        assertEquals(FoodResult.Failed(FoodError.UNREADABLE), FoodVision.parseReply(reply("no puedo ver bien la foto")))
++        assertEquals(FoodResult.Failed(FoodError.UNREADABLE), FoodVision.parseReply("<html>"))
++    }
++
++    @Test
++    fun outputConfigRejectionRetriesOncePlain() = runBlocking {
++        val sent = ArrayList<JSONObject>()
++        val result = FoodVision.run("old-model", "x", "") { body ->
++            sent += JSONObject(body)
++            if (sent.size == 1) {
++                400 to """{"type":"error","error":{"type":"invalid_request_error","message":"output_config.format: not supported for this model"}}"""
++            } else {
++                200 to reply(estimateJson)
++            }
++        }
++        assertTrue(result is FoodResult.Ok)
++        assertEquals(2, sent.size)
++        assertTrue(sent[0].has("output_config"))
++        assertFalse(sent[1].has("output_config"))
++    }
++
++    @Test
++    fun otherFailuresMapWithoutRetry() = runBlocking {
++        fun statusRun(code: Int, body: String = "{}"): Pair<FoodResult, Int> {
++            var calls = 0
++            val r = runBlocking { FoodVision.run("m", "x", "") { calls++; code to body } }
++            return r to calls
++        }
++        val imageError = """{"type":"error","error":{"message":"Could not process image: unsupported image format"}}"""
++        assertEquals(FoodResult.Failed(FoodError.BAD_REQUEST, "Could not process image: unsupported image format") to 1, statusRun(400, imageError))
++        assertEquals(FoodError.KEY_REJECTED, (statusRun(401).first as FoodResult.Failed).error)
++        assertEquals(FoodError.BUSY, (statusRun(429).first as FoodResult.Failed).error)
++        assertEquals(FoodError.BUSY, (statusRun(529).first as FoodResult.Failed).error)
++        assertEquals(FoodError.SERVER, (statusRun(500).first as FoodResult.Failed).error)
++        assertEquals(FoodError.IMAGE, (statusRun(413).first as FoodResult.Failed).error)
++
++        val offline = FoodVision.run("m", "x", "") { throw UnknownHostException("api.anthropic.com") }
++        assertEquals(FoodResult.Failed(FoodError.OFFLINE), offline)
++        val slow = FoodVision.run("m", "x", "") { throw SocketTimeoutException("timeout") }
++        assertEquals(FoodResult.Failed(FoodError.TIMEOUT), slow)
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt b/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
+new file mode 100644
+index 00000000..d7802def
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
+@@ -0,0 +1,90 @@
++package com.noop.food
++
++import org.json.JSONObject
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/** victor:food — the Messages API body for a photo: shape, structured output, and the banned params. */
++class FoodVisionRequestTest {
++
++    private val banned = listOf("temperature", "top_p", "top_k", "thinking", "tool_choice")
++
++    @Test
++    fun structuredBodyCarriesImageThenTextAndTheSchema() {
++        val body = FoodVision.buildRequestBody("claude-opus-5-5", "QUJD", "media ración", structured = true)
++
++        assertEquals(setOf("model", "max_tokens", "messages", "output_config"), body.keySet())
++        assertEquals("claude-opus-5-5", body.getString("model"))
++        assertEquals(16000, body.getInt("max_tokens"))
++
++        val messages = body.getJSONArray("messages")
++        assertEquals(1, messages.length())
++        val msg = messages.getJSONObject(0)
++        assertEquals("user", msg.getString("role"))
++        val content = msg.getJSONArray("content")
++        assertEquals(2, content.length())
++
++        val image = content.getJSONObject(0)
++        assertEquals("image", image.getString("type"))
++        val source = image.getJSONObject("source")
++        assertEquals("base64", source.getString("type"))
++        assertEquals("image/jpeg", source.getString("media_type"))
++        assertEquals("QUJD", source.getString("data"))
++
++        val text = content.getJSONObject(1)
++        assertEquals("text", text.getString("type"))
++        assertTrue(text.getString("text").contains("\"media ración\""))
++        assertTrue(text.getString("text").contains("Spanish"))
++
++        val format = body.getJSONObject("output_config").getJSONObject("format")
++        assertEquals("json_schema", format.getString("type"))
++        assertEquals(FoodVision.outputSchema().toString(), format.getJSONObject("schema").toString())
++    }
++
++    @Test
++    fun neverSendsParamsClaude5Rejects() {
++        for (structured in listOf(true, false)) {
++            val body = FoodVision.buildRequestBody("m", "x", "", structured)
++            for (k in banned) assertFalse("$k must not be sent", body.has(k))
++            assertFalse(body.toString().contains("\"temperature\""))
++        }
++    }
++
++    @Test
++    fun fallbackBodyDropsOutputConfigAndAsksForJsonInThePrompt() {
++        val body = FoodVision.buildRequestBody("m", "x", "  ", structured = false)
++        assertEquals(setOf("model", "max_tokens", "messages"), body.keySet())
++        val prompt = body.getJSONArray("messages").getJSONObject(0).getJSONArray("content")
++            .getJSONObject(1).getString("text")
++        assertTrue(prompt.contains("(none)"))
++        assertTrue(prompt.contains("ONLY one JSON object"))
++        assertTrue(prompt.contains("\"total_kcal\""))
++    }
++
++    @Test
++    fun schemaIsStrictAndRequiresEveryField() {
++        val schema = FoodVision.outputSchema()
++        assertFalse(schema.getBoolean("additionalProperties"))
++        assertEquals(keysOf(schema.getJSONObject("properties")), requiredOf(schema))
++
++        val item = schema.getJSONObject("properties").getJSONObject("items").getJSONObject("items")
++        assertFalse(item.getBoolean("additionalProperties"))
++        assertEquals(
++            setOf("name", "portion", "kcal", "protein_g", "carbs_g", "fat_g"),
++            requiredOf(item),
++        )
++        assertEquals(keysOf(item.getJSONObject("properties")), requiredOf(item))
++
++        val confidence = schema.getJSONObject("properties").getJSONObject("confidence").getJSONArray("enum")
++        assertEquals(listOf("low", "medium", "high"), (0 until confidence.length()).map { confidence.getString(it) })
++    }
++
++    private fun keysOf(o: JSONObject): Set<String> = o.keySet().toSet()
++
++    private fun requiredOf(o: JSONObject): Set<String> {
++        val arr = o.getJSONArray("required")
++        return (0 until arr.length()).map { arr.getString(it) }.toSet()
++    }
++}
+-- 
+2.54.0
+

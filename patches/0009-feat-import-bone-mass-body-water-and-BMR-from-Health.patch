@@ -1,0 +1,742 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Fri, 16 Oct 2026 12:32:20 +0200
+Subject: [PATCH] feat: import bone mass, body water and BMR from Health
+ Connect
+
+A smart scale (Hume Body Pod via Samsung Health) can write more than the
+weight / body fat / lean mass NOOP already imports. BoneMassRecord,
+BodyWaterMassRecord and BasalMetabolicRateRecord now ride the Body
+composition category (same consent, selection and grant gating) and land in
+metricSeries under the Health Connect source as bone_mass (kg), body_water
+(kg) and bmr (kcal/day), latest reading of each local day, keyed by the
+record's own offset like upstream's weight. Nothing is written when Health
+Connect holds none of them.
+
+The importer also remembers the time of the newest scale reading (fork
+prefs), since the stored series carry only a day. ScaleBody is the pure
+snapshot model (newest values, ~7 / ~30 day deltas, 30-day weight trend)
+the card and the coach line build on.
+
+Hooks: one spread line in BODY_COMPOSITION, one read call before the
+write-out, one append to the metricSeries batch, three manifest permissions.
+All logic lives in ScaleImport.kt / ScaleBody.kt.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ android/app/src/main/AndroidManifest.xml      |   4 +
+ .../main/java/com/noop/analytics/ScaleBody.kt | 128 +++++++++++
+ .../com/noop/ingest/HealthConnectImporter.kt  |   8 +
+ .../main/java/com/noop/ingest/ScaleImport.kt  | 189 ++++++++++++++++
+ .../java/com/noop/analytics/ScaleBodyTest.kt  | 105 +++++++++
+ .../java/com/noop/ingest/ScaleImportTest.kt   | 207 ++++++++++++++++++
+ 6 files changed, 641 insertions(+)
+ create mode 100644 android/app/src/main/java/com/noop/analytics/ScaleBody.kt
+ create mode 100644 android/app/src/main/java/com/noop/ingest/ScaleImport.kt
+ create mode 100644 android/app/src/test/java/com/noop/analytics/ScaleBodyTest.kt
+ create mode 100644 android/app/src/test/java/com/noop/ingest/ScaleImportTest.kt
+
+diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
+index 7d91c7ba..08b2041f 100644
+--- a/android/app/src/main/AndroidManifest.xml
++++ b/android/app/src/main/AndroidManifest.xml
+@@ -137,6 +137,10 @@
+          declared or Health Connect silently drops the runtime request (same trap as #412 above). -->
+     <uses-permission android:name="android.permission.health.READ_HYDRATION" />
+     <uses-permission android:name="android.permission.health.READ_BLOOD_PRESSURE" />
++    <!-- victor:scale — smart-scale body composition beyond weight / body fat / lean mass. -->
++    <uses-permission android:name="android.permission.health.READ_BONE_MASS" />
++    <uses-permission android:name="android.permission.health.READ_BODY_WATER_MASS" />
++    <uses-permission android:name="android.permission.health.READ_BASAL_METABOLIC_RATE" />
+ 
+     <!-- Resolve the Health Connect provider on Android 14+ (platform) and earlier (app). -->
+     <queries>
+diff --git a/android/app/src/main/java/com/noop/analytics/ScaleBody.kt b/android/app/src/main/java/com/noop/analytics/ScaleBody.kt
+new file mode 100644
+index 00000000..e1d9f840
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/analytics/ScaleBody.kt
+@@ -0,0 +1,128 @@
++package com.noop.analytics
++
++import java.time.LocalDate
++import kotlin.math.abs
++
++/**
++ * victor:scale — pure model behind the smart-scale card and the coach's BODY line.
++ *
++ * Input is the per-day body-composition series the Health Connect importer stores (latest reading of
++ * each local day, one metricSeries point per key). Everything here is database- and Android-free so it
++ * runs as a plain JVM test; the reads live in `ScaleImport.snapshot`.
++ */
++object ScaleBody {
++    // Upstream keys (HealthConnectImporter / AppleHealthImporter), reused verbatim.
++    const val KEY_WEIGHT = "weight"         // kg
++    const val KEY_BODY_FAT = "body_fat"     // percent, 0-100
++    const val KEY_LEAN_MASS = "lean_mass"   // kg
++    // Fork-added keys. No Swift twin defines a vocabulary for these yet; named in the same style.
++    const val KEY_BONE_MASS = "bone_mass"   // kg
++    const val KEY_BODY_WATER = "body_water" // kg (mass, as Health Connect stores it, not a percentage)
++    const val KEY_BMR = "bmr"               // kcal/day
++
++    /** Every series the scale card reads, in display order. */
++    val KEYS: List<String> =
++        listOf(KEY_WEIGHT, KEY_BODY_FAT, KEY_LEAN_MASS, KEY_BONE_MASS, KEY_BODY_WATER, KEY_BMR)
++
++    /** Days of weight shown in the trend line, ending at the newest weigh-in. */
++    const val TREND_DAYS = 30L
++
++    /**
++     * "~7 days" / "~30 days" earlier: the reading CLOSEST to the target day within this many days either
++     * side. A scale is not used daily by everyone, so an exact-day match would leave most deltas empty;
++     * the tolerance keeps each window clear of the other and of the newest reading itself.
++     */
++    private const val WEEK_TOLERANCE_DAYS = 3L
++    private const val MONTH_TOLERANCE_DAYS = 7L
++
++    data class Reading(val day: String, val value: Double)
++
++    /** One metric's newest reading, plus its change vs ~7 and ~30 days earlier when that is tracked. */
++    data class Metric(
++        val day: String,
++        val value: Double,
++        val vs7d: Double? = null,
++        val vs30d: Double? = null,
++    )
++
++    data class Snapshot(
++        /** The newest local day any scale metric was recorded on. */
++        val day: String,
++        /** Epoch seconds of the newest reading, only when it is known AND falls on [day]. */
++        val readingAt: Long?,
++        val weight: Metric?,
++        val bodyFat: Metric?,
++        val leanMass: Metric?,
++        val boneMass: Metric?,
++        val bodyWater: Metric?,
++        val bmr: Metric?,
++        /** Weight values over the [TREND_DAYS] days ending at the newest weigh-in, oldest first. */
++        val weightTrend: List<Double>,
++    )
++
++    /**
++     * Build the snapshot from [series] (key -> readings, any order). Null when no key carries a reading,
++     * which is what the card and the coach treat as "no scale data". [newestReading] is the importer's
++     * remembered (epoch seconds, local day) of the newest reading; its time is only used when its day is
++     * the snapshot's day, so a stale stamp can never put a clock time on a different day's numbers.
++     */
++    fun snapshot(series: Map<String, List<Reading>>, newestReading: Pair<Long, String>? = null): Snapshot? {
++        val sorted = KEYS.associateWith { key ->
++            series[key].orEmpty().filter { parseDay(it.day) != null }.sortedBy { it.day }
++        }
++        val day = sorted.values.mapNotNull { it.lastOrNull()?.day }.maxOrNull() ?: return null
++        fun metric(key: String, withDeltas: Boolean): Metric? {
++            val s = sorted.getValue(key)
++            val last = s.lastOrNull() ?: return null
++            return if (withDeltas) {
++                Metric(last.day, last.value, delta(s, 7, WEEK_TOLERANCE_DAYS), delta(s, 30, MONTH_TOLERANCE_DAYS))
++            } else {
++                Metric(last.day, last.value)
++            }
++        }
++        return Snapshot(
++            day = day,
++            readingAt = newestReading?.takeIf { it.second == day }?.first,
++            weight = metric(KEY_WEIGHT, withDeltas = true),
++            bodyFat = metric(KEY_BODY_FAT, withDeltas = true),
++            leanMass = metric(KEY_LEAN_MASS, withDeltas = false),
++            boneMass = metric(KEY_BONE_MASS, withDeltas = false),
++            bodyWater = metric(KEY_BODY_WATER, withDeltas = false),
++            bmr = metric(KEY_BMR, withDeltas = false),
++            weightTrend = trend(sorted.getValue(KEY_WEIGHT)),
++        )
++    }
++
++    /**
++     * Newest value minus the reading closest to [daysBack] days before it (within ±[toleranceDays],
++     * ties going to the OLDER reading). Null when the series has no reading in that window.
++     * [series] must be sorted ascending by day.
++     */
++    internal fun delta(series: List<Reading>, daysBack: Long, toleranceDays: Long): Double? {
++        val last = series.lastOrNull() ?: return null
++        val lastDate = parseDay(last.day) ?: return null
++        val target = lastDate.minusDays(daysBack)
++        var best: Reading? = null
++        var bestDistance = Long.MAX_VALUE
++        // Ascending walk with a strict '<', so on a tie the earlier (older) reading is kept.
++        for (r in series) {
++            val d = parseDay(r.day) ?: continue
++            if (!d.isBefore(lastDate)) continue
++            val distance = abs(d.toEpochDay() - target.toEpochDay())
++            if (distance <= toleranceDays && distance < bestDistance) {
++                best = r
++                bestDistance = distance
++            }
++        }
++        return best?.let { last.value - it.value }
++    }
++
++    /** Weight values from the [TREND_DAYS]-day window ending at the newest weigh-in, oldest first. */
++    internal fun trend(series: List<Reading>): List<Double> {
++        val last = series.lastOrNull() ?: return emptyList()
++        val from = parseDay(last.day)?.minusDays(TREND_DAYS - 1)?.toString() ?: return emptyList()
++        return series.filter { it.day >= from }.map { it.value }
++    }
++
++    private fun parseDay(day: String): LocalDate? = runCatching { LocalDate.parse(day) }.getOrNull()
++}
+diff --git a/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt b/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt
+index b620aa73..a839766e 100644
+--- a/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt
++++ b/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt
+@@ -139,6 +139,7 @@ object HealthConnectImporter {
+                 WeightRecord::class,
+                 BodyFatRecord::class,
+                 LeanBodyMassRecord::class,
++                *ScaleImport.RECORD_TYPES,   // victor:scale — bone mass, body water, BMR
+             ),
+         ),
+     }
+@@ -742,6 +743,12 @@ object HealthConnectImporter {
+             }
+         }
+ 
++        // victor:scale — bone mass / body water / BMR, latest of the day (ScaleImport.kt). Touching the
++        // day bucket keeps a scale-only day from tripping the "nothing found" bail below.
++        val scaleRows = ScaleImport.read(context, HC_DEVICE, filter, { i, o -> dayOf(i, o).also { bucket(it) } }) { t, r, cb ->
++            readSelected(t, r, cb)
++        }
++
+         if (acc.isEmpty() && workouts.isEmpty() && bpRows.isEmpty()) {
+         // #1735: record that an import RAN and what it brought. "Hours after a ride it still is not
+         // there" cannot be told from "Health Connect never imported it" without this: the log had per-source
+@@ -853,6 +860,7 @@ object HealthConnectImporter {
+                 }
+             }
+         }
++        metricSeriesRows += scaleRows   // victor:scale
+ 
+         // Persist. Register the devices we write under so name() lookups resolve.
+         try {
+diff --git a/android/app/src/main/java/com/noop/ingest/ScaleImport.kt b/android/app/src/main/java/com/noop/ingest/ScaleImport.kt
+new file mode 100644
+index 00000000..301478c2
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/ingest/ScaleImport.kt
+@@ -0,0 +1,189 @@
++package com.noop.ingest
++
++import android.content.Context
++import androidx.health.connect.client.records.BasalMetabolicRateRecord
++import androidx.health.connect.client.records.BodyFatRecord
++import androidx.health.connect.client.records.BodyWaterMassRecord
++import androidx.health.connect.client.records.BoneMassRecord
++import androidx.health.connect.client.records.LeanBodyMassRecord
++import androidx.health.connect.client.records.Record
++import androidx.health.connect.client.records.WeightRecord
++import androidx.health.connect.client.time.TimeRangeFilter
++import com.noop.analytics.ScaleBody
++import com.noop.data.MetricSeriesRow
++import com.noop.data.WhoopRepository
++import com.noop.ui.NoopPrefs
++import java.time.Duration
++import java.time.Instant
++import java.time.ZoneOffset
++import kotlin.math.round
++import kotlin.reflect.KClass
++
++/**
++ * The importer's gated per-type reader (upstream's local `readSelected`), erased to [Record] so it can be
++ * handed across as a lambda: a Kotlin lambda cannot be generic. Returns whether the type was read.
++ */
++internal typealias ScaleReader = suspend (KClass<Record>, TimeRangeFilter, (Record) -> Unit) -> Boolean
++
++/**
++ * victor:scale — the smart-scale readings Health Connect carries beyond the weight / body fat / lean mass
++ * upstream already imports: bone mass, body water mass and basal metabolic rate. A Hume Body Pod writes
++ * them to Samsung Health, which shares to Health Connect; whether Samsung forwards these three types is
++ * unverified, so every path here is a quiet no-op when Health Connect holds none.
++ *
++ * Stored exactly like upstream's body_fat / lean_mass: one metricSeries point per local day under the
++ * Health Connect source, the LATEST reading of the day winning, keys in [ScaleBody]. Reached through
++ * marked hooks in HealthConnectImporter: [RECORD_TYPES] spread into BODY_COMPOSITION (so the same
++ * consent, selection and grant gating cover them), [read] before the write-out, and its rows appended
++ * to the metricSeries batch.
++ */
++object ScaleImport {
++
++    /** Spread into upstream's `setOf(...)` for BODY_COMPOSITION, hence an array. */
++    internal val RECORD_TYPES: Array<KClass<out Record>> = arrayOf(
++        BoneMassRecord::class,
++        BodyWaterMassRecord::class,
++        BasalMetabolicRateRecord::class,
++    )
++
++    /**
++     * Read ONLY for the time of the newest weigh-in: the stored series carry a day, never a clock time,
++     * and upstream already stores these three values. A short window keeps the extra read to a handful
++     * of records; a newest reading older than this just shows its date without a time.
++     */
++    private val WEIGH_IN_TYPES: Array<KClass<out Record>> = arrayOf(
++        WeightRecord::class,
++        BodyFatRecord::class,
++        LeanBodyMassRecord::class,
++    )
++    private val WEIGH_IN_TIME_WINDOW: Duration = Duration.ofDays(90)
++
++    private const val KEY_NEWEST_AT = "victor.scale.newestReadingAt"
++    private const val KEY_NEWEST_DAY = "victor.scale.newestReadingDay"
++
++    /** The metricSeries key and stored-unit value for one of [RECORD_TYPES]; null for any other record. */
++    internal fun entry(record: Record): Pair<String, Double>? = when (record) {
++        is BoneMassRecord -> ScaleBody.KEY_BONE_MASS to record.mass.inKilograms
++        is BodyWaterMassRecord -> ScaleBody.KEY_BODY_WATER to record.mass.inKilograms
++        is BasalMetabolicRateRecord -> ScaleBody.KEY_BMR to record.basalMetabolicRate.inKilocaloriesPerDay
++        else -> null
++    }
++
++    /**
++     * When a scale record was taken: (time, zone offset) for every type this file reads; null otherwise.
++     * Spelled out per type because Health Connect's shared `InstantaneousRecord` interface is internal.
++     */
++    internal fun stamp(record: Record): Pair<Instant, ZoneOffset?>? = when (record) {
++        is BoneMassRecord -> record.time to record.zoneOffset
++        is BodyWaterMassRecord -> record.time to record.zoneOffset
++        is BasalMetabolicRateRecord -> record.time to record.zoneOffset
++        is WeightRecord -> record.time to record.zoneOffset
++        is BodyFatRecord -> record.time to record.zoneOffset
++        is LeanBodyMassRecord -> record.time to record.zoneOffset
++        else -> null
++    }
++
++    /** Latest-reading-of-the-day accumulator, plus the newest reading seen across every scale type. */
++    internal class Accumulator {
++        private val byDay = HashMap<String, HashMap<String, Pair<Long, Double>>>()
++
++        var newestAt: Long? = null
++            private set
++        var newestDay: String? = null
++            private set
++
++        fun add(day: String, key: String, epochSecond: Long, value: Double) {
++            val slot = byDay.getOrPut(day) { HashMap() }
++            val previous = slot[key]
++            // Same rule as upstream's weight / body-fat reads (`>=`): a later record at the same second wins.
++            if (previous == null || epochSecond >= previous.first) slot[key] = epochSecond to value
++            seen(day, epochSecond)
++        }
++
++        fun seen(day: String, epochSecond: Long) {
++            val current = newestAt
++            if (current == null || epochSecond > current) {
++                newestAt = epochSecond
++                newestDay = day
++            }
++        }
++
++        /** One row per (day, key), rounded to two places like upstream's body-composition series. */
++        fun rows(deviceId: String): List<MetricSeriesRow> =
++            byDay.entries.sortedBy { it.key }.flatMap { (day, slot) ->
++                slot.entries.sortedBy { it.key }.map { (key, reading) ->
++                    MetricSeriesRow(deviceId, day, key, round(reading.second * 100.0) / 100.0)
++                }
++            }
++    }
++
++    /**
++     * Read the three extra types over the import's [filter], remember the newest reading's time, and
++     * return the rows to append to the import's metricSeries batch (empty when nothing was found or the
++     * category is not selected/granted: [reader] gates that). Never throws: the reader swallows
++     * per-type failures and the preference write is best-effort.
++     */
++    internal suspend fun read(
++        context: Context,
++        deviceId: String,
++        filter: TimeRangeFilter,
++        dayOf: (Instant, ZoneOffset?) -> String,
++        reader: ScaleReader,
++    ): List<MetricSeriesRow> {
++        val acc = Accumulator()
++        for (type in RECORD_TYPES) {
++            reader(erase(type), filter) { r ->
++                val e = entry(r)
++                val at = stamp(r)
++                if (e != null && at != null) {
++                    acc.add(dayOf(at.first, at.second), e.first, at.first.epochSecond, e.second)
++                }
++            }
++        }
++        val now = Instant.now()
++        val recent = TimeRangeFilter.between(now.minus(WEIGH_IN_TIME_WINDOW), now)
++        for (type in WEIGH_IN_TYPES) {
++            reader(erase(type), recent) { r ->
++                stamp(r)?.let { (time, offset) -> acc.seen(dayOf(time, offset), time.epochSecond) }
++            }
++        }
++        val at = acc.newestAt
++        val day = acc.newestDay
++        if (at != null && day != null) {
++            runCatching {
++                prefs(context).edit().putLong(KEY_NEWEST_AT, at).putString(KEY_NEWEST_DAY, day).apply()
++            }
++        }
++        return acc.rows(deviceId)
++    }
++
++    /** The (epoch seconds, local day) of the newest scale reading the last import saw, or null. */
++    fun newestReading(context: Context): Pair<Long, String>? {
++        val p = prefs(context)
++        val day = p.getString(KEY_NEWEST_DAY, null) ?: return null
++        if (!p.contains(KEY_NEWEST_AT)) return null
++        return p.getLong(KEY_NEWEST_AT, 0L) to day
++    }
++
++    /**
++     * The stored scale series (Health Connect source) as a [ScaleBody.Snapshot], or null when there is
++     * none. Each series is read whole; a scale writes at most a point per day per key, so that is small.
++     */
++    suspend fun snapshot(
++        repo: WhoopRepository,
++        newestReading: Pair<Long, String>? = null,
++    ): ScaleBody.Snapshot? {
++        val series = ScaleBody.KEYS.associateWith { key ->
++            runCatching { repo.metricSeries(HealthConnectImporter.HC_DEVICE, key, "0000-01-01", "9999-12-31") }
++                .getOrDefault(emptyList())
++                .map { ScaleBody.Reading(it.day, it.value) }
++        }
++        return ScaleBody.snapshot(series, newestReading)
++    }
++
++    @Suppress("UNCHECKED_CAST")
++    private fun erase(type: KClass<out Record>): KClass<Record> = type as KClass<Record>
++
++    private fun prefs(context: Context) =
++        context.getSharedPreferences(NoopPrefs.NAME, Context.MODE_PRIVATE)
++}
+diff --git a/android/app/src/test/java/com/noop/analytics/ScaleBodyTest.kt b/android/app/src/test/java/com/noop/analytics/ScaleBodyTest.kt
+new file mode 100644
+index 00000000..01ac902b
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/analytics/ScaleBodyTest.kt
+@@ -0,0 +1,105 @@
++package com.noop.analytics
++
++import com.noop.analytics.ScaleBody.Reading
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Test
++
++/** victor:scale — the smart-scale snapshot: newest values, ~7 / ~30 day deltas, the 30-day trend. */
++class ScaleBodyTest {
++
++    private fun r(day: String, v: Double) = Reading(day, v)
++
++    @Test
++    fun noReadingsMeansNoSnapshot() {
++        assertNull(ScaleBody.snapshot(emptyMap()))
++        assertNull(ScaleBody.snapshot(mapOf(ScaleBody.KEY_WEIGHT to emptyList())))
++        // A series nobody reads (not a scale key) does not count either.
++        assertNull(ScaleBody.snapshot(mapOf("steps" to listOf(r("2026-10-15", 9000.0)))))
++    }
++
++    @Test
++    fun newestValuePerMetricAndHeadlineDay() {
++        val s = ScaleBody.snapshot(
++            mapOf(
++                // Unsorted on purpose: the store returns ascending, but nothing here relies on it.
++                ScaleBody.KEY_WEIGHT to listOf(r("2026-10-15", 78.2), r("2026-10-14", 78.5)),
++                ScaleBody.KEY_BODY_FAT to listOf(r("2026-10-12", 18.4)),
++                ScaleBody.KEY_BMR to listOf(r("2026-10-15", 1780.0)),
++            ),
++        )!!
++        assertEquals("2026-10-15", s.day)
++        assertEquals(78.2, s.weight!!.value, 0.0)
++        assertEquals("2026-10-12", s.bodyFat!!.day)   // keeps its own day; the card says "as of"
++        assertEquals(1780.0, s.bmr!!.value, 0.0)
++        assertNull(s.leanMass)
++        assertNull(s.boneMass)
++        assertNull(s.bodyWater)
++        assertNull(s.bmr!!.vs7d)                        // deltas are tracked for weight and body fat only
++    }
++
++    @Test
++    fun deltaUsesTheReadingClosestToTheTargetDay() {
++        val series = listOf(
++            r("2026-09-14", 80.0),   // 31 days back
++            r("2026-09-17", 79.9),   // 28 days back
++            r("2026-10-07", 78.9),   // 8 days back
++            r("2026-10-09", 79.0),   // 6 days back
++            r("2026-10-15", 78.2),
++        )
++        // 7d target 2026-10-08: the 7th and the 9th are both one day off; the tie goes to the OLDER one.
++        assertEquals(78.2 - 78.9, ScaleBody.delta(series, 7, 3)!!, 1e-9)
++        // 30d target 2026-09-15: the 14th (1 day off) beats the 17th (2 days off).
++        assertEquals(78.2 - 80.0, ScaleBody.delta(series, 30, 7)!!, 1e-9)
++    }
++
++    @Test
++    fun deltaIsNullOutsideTheTolerance() {
++        val series = listOf(r("2026-10-01", 80.0), r("2026-10-15", 78.2))   // 14 days back only
++        assertNull(ScaleBody.delta(series, 7, 3))                           // window 10-05..10-11
++        assertNull(ScaleBody.delta(series, 30, 7))                          // window 09-08..09-22
++        assertNull(ScaleBody.delta(listOf(r("2026-10-15", 78.2)), 7, 3))
++        assertNull(ScaleBody.delta(emptyList(), 7, 3))
++    }
++
++    @Test
++    fun snapshotCarriesWeightAndBodyFatDeltas() {
++        val s = ScaleBody.snapshot(
++            mapOf(
++                ScaleBody.KEY_WEIGHT to listOf(r("2026-09-15", 79.6), r("2026-10-08", 78.8), r("2026-10-15", 78.2)),
++                ScaleBody.KEY_BODY_FAT to listOf(r("2026-10-08", 18.4), r("2026-10-15", 18.1)),
++            ),
++        )!!
++        assertEquals(-0.6, s.weight!!.vs7d!!, 1e-9)
++        assertEquals(-1.4, s.weight!!.vs30d!!, 1e-9)
++        assertEquals(-0.3, s.bodyFat!!.vs7d!!, 1e-9)
++        assertNull(s.bodyFat!!.vs30d)
++    }
++
++    @Test
++    fun trendIsTheThirtyDaysEndingAtTheNewestWeighIn() {
++        val series = listOf(
++            r("2026-09-15", 80.0),   // 30 days before the newest: just outside
++            r("2026-09-16", 79.8),   // day 1 of the 30
++            r("2026-10-01", 79.0),
++            r("2026-10-15", 78.2),
++        )
++        assertEquals(listOf(79.8, 79.0, 78.2), ScaleBody.trend(series))
++        assertEquals(emptyList<Double>(), ScaleBody.trend(emptyList()))
++    }
++
++    @Test
++    fun readingTimeOnlyWhenItFallsOnTheHeadlineDay() {
++        val series = mapOf(ScaleBody.KEY_WEIGHT to listOf(r("2026-10-15", 78.2)))
++        assertEquals(1_760_510_000L, ScaleBody.snapshot(series, 1_760_510_000L to "2026-10-15")!!.readingAt)
++        assertNull(ScaleBody.snapshot(series, 1_760_400_000L to "2026-10-14")!!.readingAt)
++        assertNull(ScaleBody.snapshot(series, null)!!.readingAt)
++    }
++
++    @Test
++    fun malformedDaysAreIgnored() {
++        val s = ScaleBody.snapshot(mapOf(ScaleBody.KEY_WEIGHT to listOf(r("garbage", 1.0), r("2026-10-15", 78.2))))!!
++        assertEquals("2026-10-15", s.day)
++        assertEquals(listOf(78.2), s.weightTrend)
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/ingest/ScaleImportTest.kt b/android/app/src/test/java/com/noop/ingest/ScaleImportTest.kt
+new file mode 100644
+index 00000000..c6713513
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/ingest/ScaleImportTest.kt
+@@ -0,0 +1,207 @@
++package com.noop.ingest
++
++import android.content.Context
++import androidx.health.connect.client.permission.HealthPermission
++import androidx.health.connect.client.records.BasalMetabolicRateRecord
++import androidx.health.connect.client.records.BodyFatRecord
++import androidx.health.connect.client.records.BodyWaterMassRecord
++import androidx.health.connect.client.records.BoneMassRecord
++import androidx.health.connect.client.records.Record
++import androidx.health.connect.client.records.WeightRecord
++import androidx.health.connect.client.units.Mass
++import androidx.health.connect.client.units.Percentage
++import androidx.health.connect.client.units.Power
++import com.noop.analytics.ScaleBody
++import com.noop.data.MetricSeriesRow
++import com.noop.ingest.HealthConnectImporter.ImportCategory
++import com.noop.ui.NoopPrefs
++import kotlinx.coroutines.runBlocking
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.robolectric.RobolectricTestRunner
++import org.robolectric.RuntimeEnvironment
++import java.time.Instant
++import java.time.ZoneOffset
++import kotlin.reflect.KClass
++
++/** victor:scale — bone mass / body water / BMR import: consent wiring, record mapping, latest-of-day. */
++@RunWith(RobolectricTestRunner::class)
++class ScaleImportTest {
++
++    private val madrid = ZoneOffset.ofHours(2)
++    private fun at(iso: String): Instant = Instant.parse(iso)
++    private fun dayOf(i: Instant, o: ZoneOffset?): String = HealthConnectImporter.localDayKey(i, o, ZoneOffset.UTC)
++
++    private val scalePermissions = listOf(
++        "android.permission.health.READ_BONE_MASS",
++        "android.permission.health.READ_BODY_WATER_MASS",
++        "android.permission.health.READ_BASAL_METABOLIC_RATE",
++    )
++
++    // MARK: - consent wiring
++
++    @Test
++    fun scaleTypesRideTheBodyCompositionCategoryOnly() {
++        val body = HealthConnectImporter.permissionsFor(setOf(ImportCategory.BODY_COMPOSITION))
++        val others = HealthConnectImporter.permissionsFor(setOf(ImportCategory.RECOVERY, ImportCategory.ACTIVITY))
++        assertEquals(scalePermissions, ScaleImport.RECORD_TYPES.map { HealthPermission.getReadPermission(it) })
++        for (p in scalePermissions) {
++            assertTrue(p, p in body)
++            assertFalse(p, p in others)
++            assertTrue(p, p in HealthConnectImporter.PERMISSIONS)
++        }
++    }
++
++    /** Health Connect silently drops a runtime request for a permission the manifest does not declare (#412). */
++    @Test
++    fun manifestDeclaresEveryScalePermission() {
++        val manifest = read("android/app/src/main/AndroidManifest.xml")
++        for (p in scalePermissions) assertTrue("$p missing from the manifest", "android:name=\"$p\"" in manifest)
++    }
++
++    // MARK: - record -> (key, stored unit)
++
++    @Test
++    fun recordsMapToTheirKeysInStoredUnits() {
++        val t = at("2026-10-15T05:42:00Z")
++        assertEquals(
++            ScaleBody.KEY_BONE_MASS to 3.1,
++            ScaleImport.entry(BoneMassRecord(time = t, zoneOffset = madrid, mass = Mass.kilograms(3.1))),
++        )
++        assertEquals(
++            ScaleBody.KEY_BODY_WATER to 45.2,
++            ScaleImport.entry(BodyWaterMassRecord(time = t, zoneOffset = madrid, mass = Mass.kilograms(45.2))),
++        )
++        val bmr = ScaleImport.entry(
++            BasalMetabolicRateRecord(time = t, zoneOffset = madrid, basalMetabolicRate = Power.kilocaloriesPerDay(1780.0)),
++        )!!
++        assertEquals(ScaleBody.KEY_BMR, bmr.first)
++        assertEquals(1780.0, bmr.second, 1e-6)
++        // Weight stays upstream's: this file only maps the three types it owns.
++        assertNull(ScaleImport.entry(WeightRecord(time = t, zoneOffset = madrid, weight = Mass.kilograms(78.2))))
++    }
++
++    @Test
++    fun stampCarriesTheRecordsOwnOffset() {
++        val t = at("2026-10-15T22:30:00Z")
++        val r = BoneMassRecord(time = t, zoneOffset = madrid, mass = Mass.kilograms(3.0))
++        assertEquals(t to madrid, ScaleImport.stamp(r))
++        // 22:30Z is already the 16th in Madrid: keyed by the record's offset, like upstream's weight.
++        assertEquals("2026-10-16", dayOf(t, madrid))
++    }
++
++    // MARK: - latest reading of the day
++
++    @Test
++    fun latestReadingOfTheDayWins() {
++        val acc = ScaleImport.Accumulator()
++        acc.add("2026-10-15", ScaleBody.KEY_BONE_MASS, 2_000L, 3.2)
++        acc.add("2026-10-15", ScaleBody.KEY_BONE_MASS, 1_000L, 3.0)   // older, read later: ignored
++        acc.add("2026-10-14", ScaleBody.KEY_BONE_MASS, 500L, 2.9)
++        acc.add("2026-10-15", ScaleBody.KEY_BMR, 2_000L, 1780.456)
++        assertEquals(
++            listOf(
++                MetricSeriesRow("health-connect", "2026-10-14", "bone_mass", 2.9),
++                MetricSeriesRow("health-connect", "2026-10-15", "bmr", 1780.46),
++                MetricSeriesRow("health-connect", "2026-10-15", "bone_mass", 3.2),
++            ),
++            acc.rows("health-connect"),
++        )
++    }
++
++    @Test
++    fun sameSecondTieGoesToTheLaterRecordLikeUpstream() {
++        val acc = ScaleImport.Accumulator()
++        acc.add("2026-10-15", ScaleBody.KEY_BODY_WATER, 1_000L, 45.0)
++        acc.add("2026-10-15", ScaleBody.KEY_BODY_WATER, 1_000L, 45.4)
++        assertEquals(45.4, acc.rows("hc").single().value, 0.0)
++    }
++
++    @Test
++    fun newestReadingTracksTheMaxAcrossAddAndSeen() {
++        val acc = ScaleImport.Accumulator()
++        assertNull(acc.newestAt)
++        acc.add("2026-10-14", ScaleBody.KEY_BMR, 1_000L, 1700.0)
++        acc.seen("2026-10-15", 3_000L)
++        acc.seen("2026-10-13", 500L)
++        assertEquals(3_000L, acc.newestAt)
++        assertEquals("2026-10-15", acc.newestDay)
++        assertTrue(ScaleImport.Accumulator().rows("hc").isEmpty())
++    }
++
++    // MARK: - the importer hook, end to end with a fake gated reader
++
++    @Test
++    fun readImportsLatestOfDayAndRemembersTheNewestWeighIn() = runBlocking {
++        val ctx = freshContext()
++        val store: Map<KClass<*>, List<Record>> = mapOf(
++            BoneMassRecord::class to listOf(
++                BoneMassRecord(time = at("2026-10-15T05:40:00Z"), zoneOffset = madrid, mass = Mass.kilograms(3.0)),
++                BoneMassRecord(time = at("2026-10-15T18:10:00Z"), zoneOffset = madrid, mass = Mass.kilograms(3.1)),
++            ),
++            BasalMetabolicRateRecord::class to listOf(
++                BasalMetabolicRateRecord(
++                    time = at("2026-10-14T06:00:00Z"), zoneOffset = madrid,
++                    basalMetabolicRate = Power.kilocaloriesPerDay(1775.0),
++                ),
++            ),
++            // Not present in Health Connect at all: must simply contribute nothing.
++            BodyWaterMassRecord::class to emptyList(),
++            // Weigh-in types are read only for their time; the newest one here is the newest reading.
++            WeightRecord::class to listOf(
++                WeightRecord(time = at("2026-10-15T18:11:00Z"), zoneOffset = madrid, weight = Mass.kilograms(78.2)),
++            ),
++            BodyFatRecord::class to listOf(
++                BodyFatRecord(time = at("2026-10-15T18:11:00Z"), zoneOffset = madrid, percentage = Percentage(18.1)),
++            ),
++        )
++        val touched = mutableListOf<String>()
++        val rows = ScaleImport.read(ctx, "health-connect", anyFilter(), { i, o -> dayOf(i, o).also { touched += it } }) { type, _, cb ->
++            val records = store[type] ?: return@read false
++            records.forEach(cb)
++            true
++        }
++
++        assertEquals(
++            listOf(
++                MetricSeriesRow("health-connect", "2026-10-14", "bmr", 1775.0),
++                MetricSeriesRow("health-connect", "2026-10-15", "bone_mass", 3.1),
++            ),
++            rows,
++        )
++        assertEquals(at("2026-10-15T18:11:00Z").epochSecond to "2026-10-15", ScaleImport.newestReading(ctx))
++        // Every record's day reached the importer's day function (so its bucket exists).
++        assertTrue(touched.containsAll(listOf("2026-10-14", "2026-10-15")))
++    }
++
++    /** Category deselected or permission not granted: the gated reader refuses every type. */
++    @Test
++    fun readIsANoOpWhenNothingIsReadable() = runBlocking {
++        val ctx = freshContext()
++        val rows = ScaleImport.read(ctx, "health-connect", anyFilter(), { i, o -> dayOf(i, o) }) { _, _, _ -> false }
++        assertTrue(rows.isEmpty())
++        assertNull(ScaleImport.newestReading(ctx))
++    }
++
++    private fun freshContext(): Context = RuntimeEnvironment.getApplication().also {
++        it.getSharedPreferences(NoopPrefs.NAME, Context.MODE_PRIVATE).edit().clear().commit()
++    }
++
++    private fun anyFilter() = androidx.health.connect.client.time.TimeRangeFilter.between(
++        at("2016-01-01T00:00:00Z"), at("2026-10-16T00:00:00Z"),
++    )
++
++    private fun read(relative: String): String {
++        var root = java.io.File(System.getProperty("user.dir") ?: ".").canonicalFile
++        repeat(4) {
++            val f = java.io.File(root, relative)
++            if (f.isFile) return f.readText()
++            root = root.parentFile ?: root
++        }
++        throw IllegalStateException("$relative not found from ${System.getProperty("user.dir")}")
++    }
++}
+-- 
+2.54.0
+

@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Fri, 16 Oct 2026 12:44:21 +0200
+Subject: [PATCH] feat: AI Coach sees the smart-scale and photo food-log lines
+
+VictorCoachExtras appends ScaleCoachContext and FoodCoachContext under the
+same consent gate as the strap metrics, in both the chat and the streamed
+chat paths (the morning brief goes through chat). Best-effort: each line is
+absent when there is no data.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../app/src/main/java/com/noop/ai/AiCoach.kt   |  4 ++++
+ .../main/java/com/noop/ai/VictorCoachExtras.kt | 18 ++++++++++++++++++
+ 2 files changed, 22 insertions(+)
+ create mode 100644 android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+
+diff --git a/android/app/src/main/java/com/noop/ai/AiCoach.kt b/android/app/src/main/java/com/noop/ai/AiCoach.kt
+index 10935d2e..81a4ebb4 100644
+--- a/android/app/src/main/java/com/noop/ai/AiCoach.kt
++++ b/android/app/src/main/java/com/noop/ai/AiCoach.kt
+@@ -128,11 +128,13 @@ class AiCoach(
+             // like the blocks around it; a read that throws leaves the day table standing rather than
+             // failing the send. Matches where Swift appends it in `buildFullContext`.
+             val workouts = runCatching { recentWorkoutsBlock(ctx) }.getOrNull()
++            val victorExtras = runCatching { VictorCoachExtras.block(ctx, repo) }.getOrNull()   // victor:coach-extras
+             val full = buildString {
+                 append(buildContext(days))
+                 if (!workouts.isNullOrBlank()) append("\n\n").append(workouts)
+                 if (!stress.isNullOrBlank()) append("\n\n").append(stress)
+                 if (!signals.isNullOrBlank()) append("\n\n").append(signals)
++                if (!victorExtras.isNullOrBlank()) append("\n\n").append(victorExtras)   // victor:coach-extras
+             }
+             injectContext(history, full)
+         } else {
+@@ -210,11 +212,13 @@ class AiCoach(
+             // like the blocks around it; a read that throws leaves the day table standing rather than
+             // failing the send. Matches where Swift appends it in `buildFullContext`.
+             val workouts = runCatching { recentWorkoutsBlock(ctx) }.getOrNull()
++            val victorExtras = runCatching { VictorCoachExtras.block(ctx, repo) }.getOrNull()   // victor:coach-extras
+             val full = buildString {
+                 append(buildContext(days))
+                 if (!workouts.isNullOrBlank()) append("\n\n").append(workouts)
+                 if (!stress.isNullOrBlank()) append("\n\n").append(stress)
+                 if (!signals.isNullOrBlank()) append("\n\n").append(signals)
++                if (!victorExtras.isNullOrBlank()) append("\n\n").append(victorExtras)   // victor:coach-extras
+             }
+             injectContext(history, full)
+         } else {
+diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+new file mode 100644
+index 00000000..c62bd4da
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+@@ -0,0 +1,18 @@
++package com.noop.ai
++
++import android.content.Context
++import com.noop.data.WhoopRepository
++import com.noop.food.FoodCoachContext
++
++/**
++ * victor:coach-extras — fork-only context for the AI Coach: the smart-scale BODY line and the photo
++ * FOOD LOG line. Appended by [AiCoach] under the same `consent` gate as the strap metrics; each line is
++ * best-effort and simply absent when there is no data.
++ */
++internal object VictorCoachExtras {
++    suspend fun block(ctx: Context, repo: WhoopRepository): String? =
++        listOfNotNull(
++            runCatching { ScaleCoachContext.line(repo) }.getOrNull(),
++            runCatching { FoodCoachContext.line(ctx) }.getOrNull(),
++        ).takeIf { it.isNotEmpty() }?.joinToString("\n")
++}
+-- 
+2.54.0
+

@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Fri, 16 Oct 2026 12:19:19 +0200
+Subject: [PATCH] feat: family build defaults the AI Coach to Claude Opus 5.5
+
+AiProvider.fromName falls back to ANTHROPIC instead of OPENAI, and the
+Anthropic default model is claude-opus-5-5, so a fresh coach setup only
+needs the key pasted.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ android/app/src/main/java/com/noop/ai/AiProvider.kt       | 7 ++++---
+ .../src/test/java/com/noop/ai/AnthropicReplyTextTest.kt   | 8 ++++++++
+ 2 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/ai/AiProvider.kt b/android/app/src/main/java/com/noop/ai/AiProvider.kt
+index 6e37baa2..8d9085d7 100644
+--- a/android/app/src/main/java/com/noop/ai/AiProvider.kt
++++ b/android/app/src/main/java/com/noop/ai/AiProvider.kt
+@@ -53,7 +53,7 @@ enum class AiProvider(
+         displayName = "Anthropic",
+         // victor:claude-models — current generation first (2026-10); every claude-3* id that used to be
+         // listed is retired (404). Anything newer arrives through the live /v1/models pull below.
+-        defaultModel = "claude-sonnet-5-5",
++        defaultModel = "claude-opus-5-5",
+         models = listOf(
+             "claude-fable-5-1",
+             "claude-opus-5-5",
+@@ -113,9 +113,10 @@ enum class AiProvider(
+     );
+ 
+     companion object {
+-        /** Resolve a provider by its persisted [name], falling back to [OPENAI]. */
++        /** Resolve a provider by its persisted [name], falling back to [ANTHROPIC]
++         *  (victor:claude-models — the family build's coach runs on Claude; upstream falls back to OPENAI). */
+         fun fromName(name: String?): AiProvider =
+-            entries.firstOrNull { it.name == name } ?: OPENAI
++            entries.firstOrNull { it.name == name } ?: ANTHROPIC
+     }
+ }
+ 
+diff --git a/android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt b/android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt
+index 9bde863d..d7ffed46 100644
+--- a/android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt
++++ b/android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt
+@@ -52,4 +52,12 @@ class AnthropicReplyTextTest {
+         assertFalse(models.any { it.startsWith("claude-3") })
+         assertTrue(AiProvider.ANTHROPIC.modelsEndpoint.endsWith("?limit=1000"))
+     }
++
++    @Test
++    fun familyBuildDefaultsToClaudeOpus55() {
++        assertEquals(AiProvider.ANTHROPIC, AiProvider.fromName(null))
++        assertEquals(AiProvider.ANTHROPIC, AiProvider.fromName("NOT_A_PROVIDER"))
++        assertEquals(AiProvider.OPENAI, AiProvider.fromName("OPENAI"))
++        assertEquals("claude-opus-5-5", AiProvider.ANTHROPIC.defaultModel)
++    }
+ }
+-- 
+2.54.0
+
