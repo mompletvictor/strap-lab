@@ -1,0 +1,293 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Fri, 16 Oct 2026 17:57:00 +0200
+Subject: [PATCH] feat: AI Coach sees the profile, nightly sleep times and
+ vitals, and blood pressure
+
+The coach context gains three fork-only lines under the existing data consent:
+- PROFILE: age, sex, height, weight and max HR (manual override or Tanaka).
+- NIGHTS: last 14 days, bed/wake times plus SpO2, respiration and skin
+  temperature per night (deviation first, absolute wrist C as fallback).
+- BLOOD PRESSURE: Lab Book readings of the last 30 days with the average,
+  no longer behind the second "signals" switch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../java/com/noop/ai/VictorCoachExtras.kt     |  10 +-
+ .../java/com/noop/ai/VictorCoachVitals.kt     | 140 ++++++++++++++++++
+ .../java/com/noop/ai/VictorCoachVitalsTest.kt |  88 +++++++++++
+ 3 files changed, 235 insertions(+), 3 deletions(-)
+ create mode 100644 android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
+ create mode 100644 android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+index 7673cb95..209221a1 100644
+--- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
++++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+@@ -17,16 +17,20 @@ import kotlin.math.roundToInt
+ 
+ /**
+  * victor:coach-extras — fork-only context for the AI Coach, appended by [AiCoach] under the same
+- * `consent` gate as the strap metrics: TODAY (steps, energy out, eaten, balance so far), the smart-scale
+- * BODY line, the photo FOOD LOG line and the wearer's GOALS. Each line is best-effort and simply absent
+- * when there is no data.
++ * `consent` gate as the strap metrics: the PROFILE, TODAY (steps, energy out, eaten, balance so far),
++ * NIGHTS (bed/wake times + in-sleep vitals), BLOOD PRESSURE ([VictorCoachVitals]), the smart-scale BODY
++ * line, the photo FOOD LOG line and the wearer's GOALS. Each line is best-effort and simply absent when
++ * there is no data.
+  */
+ internal object VictorCoachExtras {
+     suspend fun block(ctx: Context, repo: WhoopRepository, strapId: String): String? {
+         val today = LocalDate.now().toString()
+         val scale = runCatching { ScaleImport.snapshot(repo) }.getOrNull()
+         return listOfNotNull(
++            VictorCoachVitals.profileLine(ctx),
+             runCatching { todayLine(ctx, repo, strapId, today) }.getOrNull(),
++            runCatching { VictorCoachVitals.nightsBlock(repo, strapId) }.getOrNull(),
++            runCatching { VictorCoachVitals.bloodPressureLine(repo, strapId) }.getOrNull(),
+             ScaleCoachContext.line(scale),
+             runCatching { FoodCoachContext.line(ctx) }.getOrNull(),
+             runCatching { VictorGoals.coachLine(VictorGoalsStore.load(ctx), scale?.weight?.value) }.getOrNull(),
+diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt b/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
+new file mode 100644
+index 00000000..f0d8a410
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
+@@ -0,0 +1,140 @@
++package com.noop.ai
++
++import android.content.Context
++import com.noop.analytics.HrZones
++import com.noop.analytics.LabBookProjection
++import com.noop.analytics.LabMarkerCategory
++import com.noop.analytics.VitalBands
++import com.noop.data.DailyMetric
++import com.noop.data.LabMarkerRow
++import com.noop.data.SleepSession
++import com.noop.data.WhoopRepository
++import com.noop.ui.ProfileStore
++import java.time.Instant
++import java.time.LocalDate
++import java.time.ZoneId
++import java.time.format.DateTimeFormatter
++import java.util.Locale
++import kotlin.math.roundToInt
++
++/**
++ * victor:coach-vitals — what the AI Coach could not see before: the PROFILE (age, sex, height, weight,
++ * max HR), one line per night with bed/wake times and the in-sleep vitals (SpO₂, respiration, skin
++ * temperature), and BLOOD PRESSURE from the Lab Book. Appended by [VictorCoachExtras] under the same
++ * `consent` gate, so blood pressure no longer needs the second "signals" switch. A missing figure is
++ * omitted, never dashed.
++ */
++internal object VictorCoachVitals {
++
++    private const val NIGHTS = 14
++    private const val BP_WINDOW_DAYS = 30L
++    private const val BP_MAX_READINGS = 10
++
++    /** The Lab Book's own read id ("my-whoop", where Health Connect writes blood pressure). */
++    private const val LAB_DEVICE_ID = WhoopRepository.WHOOP_SOURCE
++
++    fun profileLine(ctx: Context): String? = runCatching {
++        val p = ProfileStore.from(ctx)
++        profileLine(p.age, p.sex, p.heightCm, p.weightKg, p.hrMaxOverride)
++    }.getOrNull()
++
++    /** Pure. [hrMaxOverride] 0 = automatic (Tanaka), the same rule the HR zones use. */
++    internal fun profileLine(age: Int, sex: String, heightCm: Double, weightKg: Double, hrMaxOverride: Int): String {
++        val maxHr = if (hrMaxOverride > 0) "$hrMaxOverride bpm (set by the user)"
++        else "${HrZones.tanakaMaxHR(age.toDouble()).roundToInt()} bpm (age formula)"
++        return "PROFILE (from the app's Settings): age $age, $sex, ${heightCm.roundToInt()} cm, " +
++            "${f1(weightKg)} kg, max HR $maxHr"
++    }
++
++    suspend fun nightsBlock(repo: WhoopRepository, strapId: String): String? {
++        val days = repo.daysMerged(strapId).takeLast(NIGHTS)
++        val now = System.currentTimeMillis() / 1000L
++        val sessions = runCatching {
++            repo.sleepSessionsMerged(strapId, now - (NIGHTS + 1) * 86_400L, now)
++        }.getOrDefault(emptyList())
++        return nightsBlock(days, sessions, ZoneId.systemDefault())
++    }
++
++    /** Pure: newest first, one line per day that has any of the figures; null when none has. */
++    internal fun nightsBlock(days: List<DailyMetric>, sessions: List<SleepSession>, zone: ZoneId): String? {
++        val byWakeDay = sessions.associateBy { localDay(it.endTs, zone) }
++        val lines = days.sortedByDescending { it.day }.mapNotNull { d ->
++            val s = byWakeDay[d.day]
++            val parts = buildList {
++                s?.let {
++                    add("bed ${clock(it.effectiveStartTs, zone)}")
++                    add("up ${clock(it.endTs, zone)}")
++                }
++                d.spo2Pct?.let { add("SpO₂ ${it.roundToInt()}%") }
++                d.respRateBpm?.let { add("resp ${f1(it)}/min") }
++                skinTemp(d)?.let { add(it) }
++            }
++            if (parts.isEmpty()) null else "  ${d.day}: " + parts.joinToString(", ")
++        }
++        if (lines.isEmpty()) return null
++        return "NIGHTS (newest first; bed/up = local sleep and wake times; skin temp ± is vs the user's own baseline):\n" +
++            lines.joinToString("\n")
++    }
++
++    /** The deviation is the illness signal, so it leads; an absolute wrist °C is the fallback. */
++    private fun skinTemp(d: DailyMetric): String? {
++        val raw = d.skinTempDevC
++        val dev = raw?.takeIf { !VitalBands.isAbsoluteSkinTemp(it) }
++        if (dev != null) return "skin temp ${signed(dev)}°C"
++        val abs = d.skinTempC ?: raw
++        return abs?.let { "skin temp ${f1(it)}°C absolute" }
++    }
++
++    suspend fun bloodPressureLine(repo: WhoopRepository, strapId: String): String? {
++        val rows = listOf(LAB_DEVICE_ID, strapId).distinct()
++            .flatMap { repo.labMarkersByCategory(it, LabMarkerCategory.BLOOD_PRESSURE.raw) }
++            .distinctBy { it.id }
++        return bloodPressureLine(rows, LocalDate.now(), ZoneId.systemDefault())
++    }
++
++    /**
++     * Pure. Pairs systolic + diastolic rows taken at the same instant (how both the Health Connect import
++     * and the manual editor write a reading); a resting-pulse row at that instant rides along.
++     */
++    internal fun bloodPressureLine(rows: List<LabMarkerRow>, today: LocalDate, zone: ZoneId): String? {
++        val readings = rows.groupBy { it.takenAt }.mapNotNull { (ts, group) ->
++            val sys = group.firstOrNull { it.markerKey == LabBookProjection.BP_SYSTOLIC_KEY }?.value
++            val dia = group.firstOrNull { it.markerKey == LabBookProjection.BP_DIASTOLIC_KEY }?.value
++            if (sys == null || dia == null) return@mapNotNull null
++            Bp(ts, sys, dia, group.firstOrNull { it.markerKey == "resting_pulse" }?.value)
++        }.sortedByDescending { it.ts }
++        if (readings.isEmpty()) return null
++
++        val from = today.minusDays(BP_WINDOW_DAYS).atStartOfDay(zone).toEpochSecond()
++        val recent = readings.filter { it.ts >= from }
++        if (recent.isEmpty()) {
++            return "BLOOD PRESSURE (the user's own cuff readings): latest ${format(readings.first(), zone)}; " +
++                "none in the last $BP_WINDOW_DAYS days"
++        }
++        val sb = StringBuilder("BLOOD PRESSURE (the user's own cuff readings, last $BP_WINDOW_DAYS days, newest first): ")
++        sb.append(recent.take(BP_MAX_READINGS).joinToString("; ") { format(it, zone) })
++        if (recent.size > 1) {
++            sb.append("; ${BP_WINDOW_DAYS}-day avg ${recent.map { it.sys }.average().roundToInt()}/" +
++                "${recent.map { it.dia }.average().roundToInt()} mmHg over ${recent.size} readings")
++        }
++        return sb.toString()
++    }
++
++    private data class Bp(val ts: Long, val sys: Double, val dia: Double, val pulse: Double?)
++
++    private fun format(r: Bp, zone: ZoneId): String {
++        val pulse = r.pulse?.let { ", pulse ${it.roundToInt()}" }.orEmpty()
++        return "${localDay(r.ts, zone)} ${clock(r.ts, zone)} ${r.sys.roundToInt()}/${r.dia.roundToInt()} mmHg$pulse"
++    }
++
++    private val HHMM = DateTimeFormatter.ofPattern("HH:mm")
++    private fun localDay(ts: Long, zone: ZoneId) = LocalDate.ofInstant(Instant.ofEpochSecond(ts), zone).toString()
++    private fun clock(ts: Long, zone: ZoneId) = Instant.ofEpochSecond(ts).atZone(zone).format(HHMM)
++    private fun f1(v: Double) = String.format(Locale.ROOT, "%.1f", v)
++
++    /** "+0.3" / "-0.4"; a change that rounds to zero reads "+0.0", never "-0.0". */
++    private fun signed(v: Double): String {
++        val s = String.format(Locale.ROOT, "%+.1f", v)
++        return if (s == "-0.0") "+0.0" else s
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
+new file mode 100644
+index 00000000..828e79b5
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
+@@ -0,0 +1,88 @@
++package com.noop.ai
++
++import com.noop.data.DailyMetric
++import com.noop.data.LabMarkerRow
++import com.noop.data.SleepSession
++import java.time.LocalDate
++import java.time.LocalDateTime
++import java.time.ZoneId
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Test
++
++/** victor:coach-vitals — PROFILE, NIGHTS and BLOOD PRESSURE lines for the AI Coach. */
++class VictorCoachVitalsTest {
++    private val zone: ZoneId = ZoneId.of("Europe/Madrid")
++    private fun ts(y: Int, mo: Int, d: Int, h: Int, mi: Int) =
++        LocalDateTime.of(y, mo, d, h, mi).atZone(zone).toEpochSecond()
++
++    @Test
++    fun profileUsesTheAgeFormulaUnlessOverridden() {
++        assertEquals(
++            "PROFILE (from the app's Settings): age 26, male, 178 cm, 75.0 kg, max HR 190 bpm (age formula)",
++            VictorCoachVitals.profileLine(26, "male", 178.0, 75.0, 0),
++        )
++        assertEquals(
++            "PROFILE (from the app's Settings): age 26, male, 178 cm, 75.0 kg, max HR 198 bpm (set by the user)",
++            VictorCoachVitals.profileLine(26, "male", 178.0, 75.0, 198),
++        )
++    }
++
++    @Test
++    fun nightsJoinSleepTimesAndVitalsNewestFirst() {
++        val days = listOf(
++            DailyMetric("my-whoop", "2026-10-14", spo2Pct = 95.6, respRateBpm = 15.04, skinTempDevC = -0.04),
++            DailyMetric("my-whoop", "2026-10-15", spo2Pct = 96.2, respRateBpm = 14.8, skinTempDevC = 0.34),
++            DailyMetric("my-whoop", "2026-10-16", skinTempDevC = 33.71),   // an import's absolute wrist °C
++            DailyMetric("my-whoop", "2026-10-13"),                         // nothing → no line
++        )
++        val sessions = listOf(
++            SleepSession("my-whoop", ts(2026, 10, 14, 23, 41), ts(2026, 10, 15, 7, 26)),
++            SleepSession("my-whoop", ts(2026, 10, 14, 1, 0), ts(2026, 10, 14, 8, 0), startTsAdjusted = ts(2026, 10, 14, 0, 30)),
++        )
++        assertEquals(
++            "NIGHTS (newest first; bed/up = local sleep and wake times; skin temp ± is vs the user's own baseline):\n" +
++                "  2026-10-16: skin temp 33.7°C absolute\n" +
++                "  2026-10-15: bed 23:41, up 07:26, SpO₂ 96%, resp 14.8/min, skin temp +0.3°C\n" +
++                "  2026-10-14: bed 00:30, up 08:00, SpO₂ 96%, resp 15.0/min, skin temp +0.0°C",
++            VictorCoachVitals.nightsBlock(days, sessions, zone),
++        )
++    }
++
++    @Test
++    fun noFiguresMeansNoNightsBlock() {
++        assertNull(VictorCoachVitals.nightsBlock(listOf(DailyMetric("my-whoop", "2026-10-15")), emptyList(), zone))
++    }
++
++    private fun bp(key: String, value: Double, at: Long) = LabMarkerRow(
++        id = "$key-$at", deviceId = "my-whoop", markerKey = key, category = "bloodPressure",
++        day = "", takenAt = at, value = value, unit = "mmHg", source = "hc",
++    )
++
++    private fun reading(sys: Double, dia: Double, at: Long) =
++        listOf(bp("bp_systolic", sys, at), bp("bp_diastolic", dia, at))
++
++    @Test
++    fun bloodPressurePairsReadingsAndAverages() {
++        val rows = reading(128.0, 82.0, ts(2026, 10, 15, 8, 10)) +
++            reading(124.0, 79.0, ts(2026, 10, 10, 21, 5)) +
++            bp("resting_pulse", 64.0, ts(2026, 10, 10, 21, 5)) +
++            bp("bp_systolic", 140.0, ts(2026, 10, 12, 9, 0)) +       // no diastolic → not a reading
++            reading(150.0, 95.0, ts(2026, 8, 1, 9, 0))                // outside the 30-day window
++        assertEquals(
++            "BLOOD PRESSURE (the user's own cuff readings, last 30 days, newest first): " +
++                "2026-10-15 08:10 128/82 mmHg; 2026-10-10 21:05 124/79 mmHg, pulse 64; " +
++                "30-day avg 126/81 mmHg over 2 readings",
++            VictorCoachVitals.bloodPressureLine(rows, LocalDate.of(2026, 10, 16), zone),
++        )
++    }
++
++    @Test
++    fun onlyOldBloodPressureSaysSo() {
++        assertEquals(
++            "BLOOD PRESSURE (the user's own cuff readings): latest 2026-08-01 09:00 150/95 mmHg; none in the last 30 days",
++            VictorCoachVitals.bloodPressureLine(reading(150.0, 95.0, ts(2026, 8, 1, 9, 0)), LocalDate.of(2026, 10, 16), zone),
++        )
++        assertNull(VictorCoachVitals.bloodPressureLine(emptyList(), LocalDate.of(2026, 10, 16), zone))
++    }
++}
+-- 
+2.54.0
+
