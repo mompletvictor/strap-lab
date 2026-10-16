@@ -1,0 +1,569 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Fri, 16 Oct 2026 14:07:51 +0200
+Subject: [PATCH] feat(food): Food tab in the bottom bar, Today card and energy
+ balance
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Bottom bar: Today · Trends · Sleep · Food · Coach · More. The slot is added
+  by withVictorTabs() at the bar's single binding, so upstream's tab lists and
+  their iOS-parity tests stay untouched; Food leaves the More sheet (a bar tab
+  must not also be a drawer row).
+- Today: a Food card (intake, macros, balance, "Add a meal" into the Food tab)
+  anchored above Workouts on today, without a new TodaySection (upstream's
+  section tests pin the exact list).
+- FoodEnergy: one resolver for energy out (activity like the Today Calories
+  card + the phone's basal, else the scale BMR prorated for today) shared by
+  the Food tab and the Today card via FoodDayCard, so both show the same
+  balance. No balance is shown when the resting half is unknown.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../main/java/com/noop/food/FoodDayCard.kt    | 124 ++++++++++++++++++
+ .../src/main/java/com/noop/food/FoodEnergy.kt |  59 +++++++++
+ .../src/main/java/com/noop/food/FoodScreen.kt |  67 +---------
+ .../java/com/noop/food/TodayFoodSection.kt    |  36 +++++
+ .../app/src/main/java/com/noop/ui/AppRoot.kt  |   4 +-
+ .../src/main/java/com/noop/ui/TodayScreen.kt  |   2 +
+ .../main/java/com/noop/ui/VictorBarTabs.kt    |  14 ++
+ .../res/values-es/strings_victor_food.xml     |   7 +-
+ .../main/res/values/strings_victor_food.xml   |   7 +-
+ .../test/java/com/noop/food/FoodEnergyTest.kt |  46 +++++++
+ .../java/com/noop/ui/VictorBarTabsTest.kt     |  28 ++++
+ 11 files changed, 326 insertions(+), 68 deletions(-)
+ create mode 100644 android/app/src/main/java/com/noop/food/FoodDayCard.kt
+ create mode 100644 android/app/src/main/java/com/noop/food/FoodEnergy.kt
+ create mode 100644 android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+ create mode 100644 android/app/src/main/java/com/noop/ui/VictorBarTabs.kt
+ create mode 100644 android/app/src/test/java/com/noop/food/FoodEnergyTest.kt
+ create mode 100644 android/app/src/test/java/com/noop/ui/VictorBarTabsTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/food/FoodDayCard.kt b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
+new file mode 100644
+index 00000000..cf7e5ebe
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
+@@ -0,0 +1,124 @@
++package com.noop.food
++
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.padding
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.filled.Add
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import com.noop.R
++import com.noop.ui.Metrics
++import com.noop.ui.NoopButton
++import com.noop.ui.NoopButtonKind
++import com.noop.ui.NoopCard
++import com.noop.ui.NoopType
++import com.noop.ui.Overline
++import com.noop.ui.Palette
++import com.noop.ui.uiPlural
++import com.noop.ui.uiString
++import kotlin.math.abs
++
++/**
++ * victor:food — one day's intake card: kcal, macros and the energy balance. Shared by the Food screen and
++ * the Today section so both show the same numbers from the same resolver ([FoodEnergy]). [onAdd] adds a
++ * button that opens the Food screen (Today only).
++ */
++@Composable
++internal fun FoodDayCard(
++    totals: FoodTotals,
++    meals: Int,
++    energy: FoodEnergy?,
++    title: String = uiString(R.string.victor_food_today),
++    onAdd: (() -> Unit)? = null,
++) {
++    NoopCard(tint = Palette.accent) {
++        Column(verticalArrangement = Arrangement.spacedBy(Metrics.space12)) {
++            Row(verticalAlignment = Alignment.CenterVertically) {
++                Overline(title)
++                Spacer(Modifier.weight(1f))
++                if (meals > 0) {
++                    Text(
++                        uiPlural(R.plurals.victor_food_meals, meals, meals),
++                        style = NoopType.caption,
++                        color = Palette.textSecondary,
++                    )
++                }
++            }
++            Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(Metrics.space6)) {
++                Text(whole(totals.kcal), style = NoopType.display(48f), color = Palette.textPrimary)
++                Text(
++                    uiString(R.string.victor_food_kcal),
++                    style = NoopType.headline,
++                    color = Palette.textSecondary,
++                    modifier = Modifier.padding(bottom = Metrics.space8),
++                )
++            }
++            Row(Modifier.fillMaxWidth()) {
++                MacroStat(uiString(R.string.victor_food_protein), totals.proteinG, Palette.metricCyan, Modifier.weight(1f))
++                MacroStat(uiString(R.string.victor_food_carbs), totals.carbsG, Palette.metricAmber, Modifier.weight(1f))
++                MacroStat(uiString(R.string.victor_food_fat), totals.fatG, Palette.metricRose, Modifier.weight(1f))
++            }
++            EnergyLines(totals.kcal, energy)
++            if (onAdd != null) {
++                NoopButton(
++                    text = uiString(R.string.victor_food_add_meal),
++                    leadingIcon = Icons.Filled.Add,
++                    kind = NoopButtonKind.Primary,
++                    fullWidth = true,
++                    onClick = onAdd,
++                )
++            }
++        }
++    }
++}
++
++/** Burned so far (basal + activity) and the balance; just the activity when the basal half is unknown. */
++@Composable
++private fun EnergyLines(intakeKcal: Double, energy: FoodEnergy?) {
++    val total = energy?.totalKcal
++    when {
++        total != null -> {
++            val balance = energy.balance(intakeKcal) ?: return
++            Column(verticalArrangement = Arrangement.spacedBy(Metrics.space2)) {
++                Text(
++                    uiString(R.string.victor_food_burned_total, whole(total), whole(energy.basalKcal ?: 0.0), whole(energy.activeKcal ?: 0.0)),
++                    style = NoopType.subhead,
++                    color = Palette.textSecondary,
++                )
++                Text(
++                    uiString(
++                        if (balance < 0) R.string.victor_food_balance_deficit else R.string.victor_food_balance_surplus,
++                        whole(abs(balance)),
++                    ),
++                    style = NoopType.headline,
++                    color = if (balance < 0) Palette.chargeColor else Palette.metricAmber,
++                )
++                if (energy.basalFromScale) {
++                    Text(uiString(R.string.victor_food_basal_from_scale), style = NoopType.caption, color = Palette.textTertiary)
++                }
++            }
++        }
++        energy?.activeKcal != null ->
++            Text(
++                uiString(R.string.victor_food_burned_active_only, whole(energy.activeKcal)),
++                style = NoopType.subhead,
++                color = Palette.textSecondary,
++            )
++        else -> Unit
++    }
++}
++
++@Composable
++private fun MacroStat(label: String, grams: Double, accent: Color, modifier: Modifier) {
++    Column(modifier, verticalArrangement = Arrangement.spacedBy(Metrics.space2)) {
++        Text(label, style = NoopType.caption, color = accent)
++        Text(uiString(R.string.victor_food_grams, whole(grams)), style = NoopType.chartValue, color = Palette.textPrimary)
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/food/FoodEnergy.kt b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
+new file mode 100644
+index 00000000..7188bca7
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
+@@ -0,0 +1,59 @@
++package com.noop.food
++
++import com.noop.ingest.ScaleImport
++import com.noop.ui.AppViewModel
++import java.time.LocalDate
++import java.time.LocalTime
++import java.time.ZoneId
++
++/**
++ * victor:food — energy OUT for one day, so the food log can show a balance (eaten − burned). One
++ * resolver for every surface that shows it (the Food screen and the Today section), so the two can
++ * never disagree.
++ *
++ * [activeKcal] is resolved exactly like the Today "Calories" card (#616). [basalKcal] is the phone's own
++ * basal for the day (Samsung Health / Apple total − active, imported by Health Connect / Apple Health)
++ * when present, else the smart scale's BMR — prorated by how much of the day has passed when the day is
++ * today, so "so far" figures compare like with like.
++ */
++internal data class FoodEnergy(
++    val activeKcal: Double?,
++    val basalKcal: Double?,
++    val basalFromScale: Boolean,
++) {
++    /** Total burned, only when both halves are known (active alone would overstate any deficit). */
++    val totalKcal: Double? get() = if (activeKcal != null && basalKcal != null) activeKcal + basalKcal else null
++
++    /** Eaten minus burned; negative is a deficit. Null without a total. */
++    fun balance(intakeKcal: Double): Double? = totalKcal?.let { intakeKcal - it }
++
++    companion object {
++        /** Pure: combine the reads. [dayFraction] is 1.0 for a past day, the elapsed share of today otherwise. */
++        fun resolve(activeKcal: Double?, phoneBasalKcal: Double?, scaleBmr: Double?, dayFraction: Double): FoodEnergy {
++            val active = activeKcal?.takeIf { it > 0 }
++            val phoneBasal = phoneBasalKcal?.takeIf { it > 0 }
++            val scaleBasal = scaleBmr?.takeIf { it > 0 }?.let { it * dayFraction.coerceIn(0.0, 1.0) }
++            return FoodEnergy(active, phoneBasal ?: scaleBasal, basalFromScale = phoneBasal == null && scaleBasal != null)
++        }
++
++        /** Share of [day] elapsed at [now]: 1.0 for any past day. */
++        fun dayFraction(day: String, now: LocalDate = LocalDate.now(), time: LocalTime = LocalTime.now()): Double =
++            if (day < now.toString()) 1.0 else time.toSecondOfDay() / 86_400.0
++
++        /** Read the day's energy from the repository. Best-effort: any failed read just leaves its half null. */
++        suspend fun load(vm: AppViewModel, day: String): FoodEnergy {
++            val repo = vm.repo
++            val phoneRows = runCatching {
++                repo.appleDaily("apple-health", day, day) + repo.appleDaily("health-connect", day, day)
++            }.getOrDefault(emptyList())
++            val active = phoneRows.firstNotNullOfOrNull { r -> r.activeKcal?.takeIf { it > 0 } }
++                ?: runCatching {
++                    repo.resolvedSeries("active_kcal", "my-whoop", day, day, strapDeviceId = vm.activeStrapId)
++                        .points.firstOrNull()?.value?.takeIf { it > 0 }
++                }.getOrNull()
++            val phoneBasal = phoneRows.firstNotNullOfOrNull { r -> r.basalKcal?.takeIf { it > 0 } }
++            val scaleBmr = runCatching { ScaleImport.snapshot(repo)?.bmr?.value }.getOrNull()
++            return resolve(active, phoneBasal, scaleBmr, dayFraction(day, LocalDate.now(ZoneId.systemDefault())))
++        }
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+index 14ebed8f..9e89e3a5 100644
+--- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
++++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+@@ -103,8 +103,8 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+     val previous = grouped.filter { it.first != today }
+     val todayTotals = FoodTotals.ofEntries(todayEntries)
+ 
+-    val burned by produceState<Double?>(null, today) {
+-        value = withContext(Dispatchers.IO) { runCatching { burnedOn(vm, today) }.getOrNull() }
++    val energy by produceState<FoodEnergy?>(null, today, entries) {
++        value = withContext(Dispatchers.IO) { runCatching { FoodEnergy.load(vm, today) }.getOrNull() }
+     }
+ 
+     LaunchedEffect(notice) {
+@@ -148,7 +148,7 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+         title = uiString(R.string.victor_food_title),
+         subtitle = uiString(R.string.victor_food_subtitle),
+     ) {
+-        item { TodayCard(todayTotals, todayEntries.size, burned) }
++        item { FoodDayCard(todayTotals, todayEntries.size, energy) }
+         item {
+             Row(horizontalArrangement = Arrangement.spacedBy(Metrics.space12)) {
+                 NoopButton(
+@@ -230,54 +230,6 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+     }
+ }
+ 
+-@Composable
+-private fun TodayCard(totals: FoodTotals, meals: Int, burned: Double?) {
+-    NoopCard(tint = Palette.accent) {
+-        Column(verticalArrangement = Arrangement.spacedBy(Metrics.space12)) {
+-            Row(verticalAlignment = Alignment.CenterVertically) {
+-                Overline(uiString(R.string.victor_food_today))
+-                Spacer(Modifier.weight(1f))
+-                if (meals > 0) {
+-                    Text(
+-                        uiPlural(R.plurals.victor_food_meals, meals, meals),
+-                        style = NoopType.caption,
+-                        color = Palette.textSecondary,
+-                    )
+-                }
+-            }
+-            Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(Metrics.space6)) {
+-                Text(whole(totals.kcal), style = NoopType.display(48f), color = Palette.textPrimary)
+-                Text(
+-                    uiString(R.string.victor_food_kcal),
+-                    style = NoopType.headline,
+-                    color = Palette.textSecondary,
+-                    modifier = Modifier.padding(bottom = Metrics.space8),
+-                )
+-            }
+-            Row(Modifier.fillMaxWidth()) {
+-                MacroStat(uiString(R.string.victor_food_protein), totals.proteinG, Palette.metricCyan, Modifier.weight(1f))
+-                MacroStat(uiString(R.string.victor_food_carbs), totals.carbsG, Palette.metricAmber, Modifier.weight(1f))
+-                MacroStat(uiString(R.string.victor_food_fat), totals.fatG, Palette.metricRose, Modifier.weight(1f))
+-            }
+-            if (burned != null) {
+-                Text(
+-                    uiString(R.string.victor_food_burned, whole(burned)),
+-                    style = NoopType.subhead,
+-                    color = Palette.textSecondary,
+-                )
+-            }
+-        }
+-    }
+-}
+-
+-@Composable
+-private fun MacroStat(label: String, grams: Double, accent: Color, modifier: Modifier) {
+-    Column(modifier, verticalArrangement = Arrangement.spacedBy(Metrics.space2)) {
+-        Text(label, style = NoopType.caption, color = accent)
+-        Text(uiString(R.string.victor_food_grams, whole(grams)), style = NoopType.chartValue, color = Palette.textPrimary)
+-    }
+-}
+-
+ @Composable
+ private fun DayCard(label: String, entries: List<FoodEntry>, onEdit: (FoodEntry) -> Unit, onDelete: (FoodEntry) -> Unit) {
+     val t = FoodTotals.ofEntries(entries)
+@@ -387,16 +339,3 @@ private fun dayLabel(day: String, today: String, locale: Locale): String {
+     return d.format(DateTimeFormatter.ofPattern(pattern, locale)).replaceFirstChar { it.titlecase(locale) }
+ }
+ 
+-/**
+- * Today's burned calories, resolved exactly like the Today "Calories" card (#616): the phone's imported
+- * active energy first (Apple Health / Health Connect), else NOOP's on-device strap estimate. Null when
+- * neither has the day.
+- */
+-private suspend fun burnedOn(vm: AppViewModel, day: String): Double? {
+-    val repo = vm.repo
+-    val imported = (repo.appleDaily("apple-health", day, day) + repo.appleDaily("health-connect", day, day))
+-        .firstNotNullOfOrNull { r -> r.activeKcal?.takeIf { it > 0 } }
+-    if (imported != null) return imported
+-    return repo.resolvedSeries("active_kcal", "my-whoop", day, day, strapDeviceId = vm.activeStrapId)
+-        .points.firstOrNull()?.value?.takeIf { it > 0 }
+-}
+diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+new file mode 100644
+index 00000000..de5411b9
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+@@ -0,0 +1,36 @@
++package com.noop.food
++
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.produceState
++import androidx.compose.ui.platform.LocalContext
++import com.noop.R
++import com.noop.ui.AppViewModel
++import com.noop.ui.uiString
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++
++/**
++ * victor:food — the Today Food card (anchored above Workouts): today's intake and energy balance, the same
++ * [FoodDayCard] the Food tab shows, plus a button into the Food tab. Re-reads the log each time Today is
++ * composed, so a meal saved on the Food tab is here when the wearer comes back.
++ */
++@Composable
++internal fun TodayFoodSection(vm: AppViewModel, onOpenFood: () -> Unit) {
++    val ctx = LocalContext.current
++    val today = FoodDays.today()
++    val entries by produceState(emptyList<FoodEntry>(), today) {
++        value = runCatching { FoodStore.load(ctx) }.getOrDefault(emptyList())
++    }
++    val energy by produceState<FoodEnergy?>(null, today, entries) {
++        value = withContext(Dispatchers.IO) { runCatching { FoodEnergy.load(vm, today) }.getOrNull() }
++    }
++    val todays = entries.filter { it.day == today }
++    FoodDayCard(
++        totals = FoodTotals.ofEntries(todays),
++        meals = todays.size,
++        energy = energy,
++        title = uiString(R.string.victor_food_nav),
++        onAdd = onOpenFood,
++    )
++}
+diff --git a/android/app/src/main/java/com/noop/ui/AppRoot.kt b/android/app/src/main/java/com/noop/ui/AppRoot.kt
+index 84634483..af0006ab 100644
+--- a/android/app/src/main/java/com/noop/ui/AppRoot.kt
++++ b/android/app/src/main/java/com/noop/ui/AppRoot.kt
+@@ -246,7 +246,6 @@ internal val drawerGroups: List<DrawerGroup> = listOf(
+         Destination.Live, Destination.Workouts, Destination.Health, Destination.VitalSigns,
+         Destination.LabBook, Destination.Stress, Destination.Breathe, Destination.Intervals,
+         Destination.Rhythm,
+-        Destination.Food, // victor:food
+     ), defaultExpanded = true),
+     DrawerGroup("Data", R.string.more_group_data, listOf(
+         Destination.FusedRecord, Destination.AppleHealth, Destination.DataSources,
+@@ -644,6 +643,7 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
+                         // The opt-in Hydration card (only shown when Hydration tracking is on) pushes its
+                         // detail. A normal push so the back-stack returns to Today.
+                         onOpenHydration = { nav.navigate(Destination.Hydration.route) },
++                        onOpenFood = { nav.navigateTopLevel(Destination.Food.route) },   // victor:food
+                         // #706/#684: the dashboard cards draw a tappable chevron; wire each to its detail,
+                         // matching iOS. Stress + the vitals are pushes; Sleep is a top-level tab switch.
+                         onOpenStress = { nav.navigate(Destination.Stress.route) },
+@@ -1147,7 +1147,7 @@ private fun GlassBottomBar(
+     // One binding, used by BOTH the slots and the More-lit predicate below. #2218's note applies here
+     // twice over: a second copy of "which tabs exist" is what let Coach light two slots at once, and a
+     // conditional tab makes that failure available again to anyone who filters in one place only.
+-    val visibleTrailing = barTrailingTabsFor(BottomBarStyleStore.coachEnabled)
++    val visibleTrailing = withVictorTabs(barTrailingTabsFor(BottomBarStyleStore.coachEnabled))   // victor:food
+     val barShape = RoundedCornerShape(50)
+     Box(
+         modifier = modifier
+diff --git a/android/app/src/main/java/com/noop/ui/TodayScreen.kt b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
+index 857d1a03..6615b4f5 100644
+--- a/android/app/src/main/java/com/noop/ui/TodayScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
+@@ -300,6 +300,7 @@ fun TodayScreen(
+     onOpenUpdates: () -> Unit = {},
+     onOpenSettings: () -> Unit = {},
+     onOpenHydration: () -> Unit = {},
++    onOpenFood: () -> Unit = {},   // victor:food
+     // #706/#684: the "Your cards" dashboard rows are tappable on iOS but only Hydration navigated on Android.
+     // These push each card's detail (Stress card -> Stress; Sleep -> Sleep), matching the iOS pinnedCardRow
+     // destinations. Defaulted to no-ops so the call site stays compiling; AppRoot binds them to nav.navigate(...)
+@@ -1669,6 +1670,7 @@ fun TodayScreen(
+                     selectedDayOffset == 0 && enabledHostedCards.isNotEmpty()
+                 else -> true
+             }
++            if (section == TodaySection.WORKOUTS && selectedDayOffset == 0) item(key = "victor:food") { com.noop.food.TodayFoodSection(viewModel, onOpenFood) }   // victor:food
+             if (!sectionVisible) return@forEach
+             item(key = TODAY_SECTION_KEY_PREFIX + section.raw) {
+                 TodayReorderableSection(
+diff --git a/android/app/src/main/java/com/noop/ui/VictorBarTabs.kt b/android/app/src/main/java/com/noop/ui/VictorBarTabs.kt
+new file mode 100644
+index 00000000..d9762ecb
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/ui/VictorBarTabs.kt
+@@ -0,0 +1,14 @@
++package com.noop.ui
++
++import com.noop.R
++import com.noop.food.foodNavIcon
++
++/** victor:food — the fork's extra bottom-bar slot (Food), kept out of upstream's tab lists and their tests. */
++internal val victorFoodTab = BarTab(Destination.Food, foodNavIcon, R.string.victor_food_nav)
++
++/** Insert [victorFoodTab] right after Sleep (Today · Trends · Sleep · Food · Coach · More). */
++internal fun withVictorTabs(trailing: List<BarTab>): List<BarTab> {
++    val sleep = trailing.indexOfFirst { it.dest == Destination.Sleep }
++    return if (sleep < 0) trailing + victorFoodTab
++    else trailing.take(sleep + 1) + victorFoodTab + trailing.drop(sleep + 1)
++}
+diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
+index 12c780da..e635bf42 100644
+--- a/android/app/src/main/res/values-es/strings_victor_food.xml
++++ b/android/app/src/main/res/values-es/strings_victor_food.xml
+@@ -18,7 +18,12 @@
+         <item quantity="one">%d comida</item>
+         <item quantity="other">%d comidas</item>
+     </plurals>
+-    <string name="victor_food_burned">Gastadas hoy: %1$s kcal</string>
++    <string name="victor_food_burned_total">Gastadas hasta ahora: %1$s kcal (reposo %2$s + actividad %3$s)</string>
++    <string name="victor_food_burned_active_only">Actividad: %1$s kcal (falta el gasto en reposo para el balance)</string>
++    <string name="victor_food_balance_deficit">Déficit: %1$s kcal</string>
++    <string name="victor_food_balance_surplus">Superávit: %1$s kcal</string>
++    <string name="victor_food_basal_from_scale">Gasto en reposo estimado con el metabolismo basal de tu báscula.</string>
++    <string name="victor_food_add_meal">Añadir comida</string>
+     <string name="victor_food_photo">Foto</string>
+     <string name="victor_food_gallery">Galería</string>
+     <string name="victor_food_today_empty">Hoy no hay nada apuntado. Haz una foto de tu próxima comida.</string>
+diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
+index 9e9a0af8..0e8aefcd 100644
+--- a/android/app/src/main/res/values/strings_victor_food.xml
++++ b/android/app/src/main/res/values/strings_victor_food.xml
+@@ -18,7 +18,12 @@
+         <item quantity="one">%d meal</item>
+         <item quantity="other">%d meals</item>
+     </plurals>
+-    <string name="victor_food_burned">Burned today: %1$s kcal</string>
++    <string name="victor_food_burned_total">Burned so far: %1$s kcal (resting %2$s + activity %3$s)</string>
++    <string name="victor_food_burned_active_only">Activity: %1$s kcal (resting energy unknown, no balance yet)</string>
++    <string name="victor_food_balance_deficit">Deficit: %1$s kcal</string>
++    <string name="victor_food_balance_surplus">Surplus: %1$s kcal</string>
++    <string name="victor_food_basal_from_scale">Resting energy estimated from your smart scale BMR.</string>
++    <string name="victor_food_add_meal">Add a meal</string>
+     <string name="victor_food_photo">Photo</string>
+     <string name="victor_food_gallery">Gallery</string>
+     <string name="victor_food_today_empty">Nothing logged today. Take a photo of your next meal.</string>
+diff --git a/android/app/src/test/java/com/noop/food/FoodEnergyTest.kt b/android/app/src/test/java/com/noop/food/FoodEnergyTest.kt
+new file mode 100644
+index 00000000..3b253043
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/food/FoodEnergyTest.kt
+@@ -0,0 +1,46 @@
++package com.noop.food
++
++import java.time.LocalDate
++import java.time.LocalTime
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/** victor:food — the energy-out resolver behind the Food screen's and Today's balance. */
++class FoodEnergyTest {
++
++    @Test
++    fun phoneBasalWinsOverTheScaleBmr() {
++        val e = FoodEnergy.resolve(activeKcal = 600.0, phoneBasalKcal = 1500.0, scaleBmr = 1800.0, dayFraction = 0.5)
++        assertEquals(2100.0, e.totalKcal!!, 0.0)
++        assertFalse(e.basalFromScale)
++        assertEquals(-250.0, e.balance(1850.0)!!, 0.0)
++    }
++
++    @Test
++    fun scaleBmrIsProratedToTheShareOfTheDayGone() {
++        val e = FoodEnergy.resolve(activeKcal = 400.0, phoneBasalKcal = null, scaleBmr = 1800.0, dayFraction = 0.5)
++        assertEquals(900.0, e.basalKcal!!, 0.0)
++        assertEquals(1300.0, e.totalKcal!!, 0.0)
++        assertTrue(e.basalFromScale)
++    }
++
++    @Test
++    fun noBalanceWithoutBothHalves() {
++        val activeOnly = FoodEnergy.resolve(activeKcal = 500.0, phoneBasalKcal = null, scaleBmr = null, dayFraction = 1.0)
++        assertNull(activeOnly.totalKcal)
++        assertNull(activeOnly.balance(2000.0))
++        val zeroes = FoodEnergy.resolve(activeKcal = 0.0, phoneBasalKcal = 0.0, scaleBmr = 0.0, dayFraction = 1.0)
++        assertNull(zeroes.activeKcal)
++        assertNull(zeroes.basalKcal)
++    }
++
++    @Test
++    fun dayFractionIsWholeForPastDaysAndElapsedForToday() {
++        val today = LocalDate.of(2026, 10, 16)
++        assertEquals(1.0, FoodEnergy.dayFraction("2026-10-15", today, LocalTime.NOON), 0.0)
++        assertEquals(0.5, FoodEnergy.dayFraction("2026-10-16", today, LocalTime.NOON), 0.0)
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/ui/VictorBarTabsTest.kt b/android/app/src/test/java/com/noop/ui/VictorBarTabsTest.kt
+new file mode 100644
+index 00000000..dbf511c8
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/ui/VictorBarTabsTest.kt
+@@ -0,0 +1,28 @@
++package com.noop.ui
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Test
++
++/** victor:food — the Food slot the fork adds to the bottom bar, under the same rules upstream's tabs obey. */
++class VictorBarTabsTest {
++
++    @Test
++    fun foodSitsRightAfterSleep() {
++        assertEquals(
++            listOf(Destination.Sleep, Destination.Food, Destination.Coach),
++            withVictorTabs(barTrailingTabsFor(coachEnabled = true)).map { it.dest },
++        )
++        assertEquals(
++            listOf(Destination.Sleep, Destination.Food),
++            withVictorTabs(barTrailingTabsFor(coachEnabled = false)).map { it.dest },
++        )
++    }
++
++    @Test
++    fun foodIsNotAlsoInTheMoreSheetAndNoSlotRepeats() {
++        assertFalse(drawerGroups.flatMap { it.items }.contains(Destination.Food))
++        val bar = (barLeadingTabs + withVictorTabs(barTrailingTabs)).map { it.dest }
++        assertEquals(bar.distinct(), bar)
++    }
++}
+-- 
+2.54.0
+
