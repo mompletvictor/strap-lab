@@ -119,7 +119,7 @@ index 00000000..9b2ca37b
 +FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 +OTHER DEALINGS IN THE FONT SOFTWARE.
 diff --git a/android/app/src/main/java/com/noop/ui/Theme.kt b/android/app/src/main/java/com/noop/ui/Theme.kt
-index afe44b88..10e4abda 100644
+index abafff64..b45d74c4 100644
 --- a/android/app/src/main/java/com/noop/ui/Theme.kt
 +++ b/android/app/src/main/java/com/noop/ui/Theme.kt
 @@ -23,8 +23,10 @@ import androidx.compose.ui.platform.LocalView
@@ -133,7 +133,7 @@ index afe44b88..10e4abda 100644
  import androidx.compose.ui.unit.dp
  import androidx.compose.ui.unit.sp
  
-@@ -432,9 +434,14 @@ object Metrics {
+@@ -465,9 +467,14 @@ object Metrics {
  // values don't reflow; Monospace is reserved for the `mono` raw/log style only.
  
  object NoopType {

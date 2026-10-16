@@ -11,32 +11,32 @@ any non-dark set as light. Launcher vectors re-skinned to the fork's blue
 tile + white loop mark (Navy alias untouched).
 ---
  .../src/main/java/com/noop/ui/MainActivity.kt |  1 +
- .../main/java/com/noop/ui/PorcelainTokens.kt  | 81 +++++++++++++++++++
+ .../main/java/com/noop/ui/PorcelainTokens.kt  | 82 +++++++++++++++++++
  .../main/java/com/noop/ui/SettingsScreen.kt   | 12 +++
  .../app/src/main/java/com/noop/ui/Theme.kt    |  4 +-
  .../res/drawable/ic_launcher_background.xml   |  4 +-
  .../res/drawable/ic_launcher_foreground.xml   |  6 +-
- 6 files changed, 101 insertions(+), 7 deletions(-)
+ 6 files changed, 102 insertions(+), 7 deletions(-)
  create mode 100644 android/app/src/main/java/com/noop/ui/PorcelainTokens.kt
 
 diff --git a/android/app/src/main/java/com/noop/ui/MainActivity.kt b/android/app/src/main/java/com/noop/ui/MainActivity.kt
-index cc7be49c..85151d61 100644
+index bf197a8a..f1f032e2 100644
 --- a/android/app/src/main/java/com/noop/ui/MainActivity.kt
 +++ b/android/app/src/main/java/com/noop/ui/MainActivity.kt
-@@ -91,6 +91,7 @@ class MainActivity : ComponentActivity() {
-         // and chart ramps are correct from the very first frame (no flash).
+@@ -142,6 +142,7 @@ class MainActivity : ComponentActivity() {
          AppearancePrefs.load(this)
          ChartStylePrefs.load(this)
+         AccentPrefs.load(this)   // chrome accent colour (mint / WHOOP blue / custom), live snapshot state
 +        LightStylePrefs.load(this)
          // Decode the optional on-device profile photo (if set) before first composition so the Today
          // header + Settings avatars show it from the first frame. No-op when no photo is set.
          ProfileAvatarStore.load(this)
 diff --git a/android/app/src/main/java/com/noop/ui/PorcelainTokens.kt b/android/app/src/main/java/com/noop/ui/PorcelainTokens.kt
 new file mode 100644
-index 00000000..89778839
+index 00000000..f37237b1
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/ui/PorcelainTokens.kt
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,82 @@
 +package com.noop.ui
 +
 +import android.content.Context
@@ -73,6 +73,7 @@ index 00000000..89778839
 +    stressColor = Color(0xFFD9730D), stressDeep = Color(0xFF3D82DC), stressBright = Color(0xFFD14A12), stressGlow = Color(0xFFFF9500),
 +    scenicCenter = Color(0xFFFFFFFF), scenicEdge = Color(0xFFEFEFF4), scenicStar = Color(0xFFC9C9D1),
 +    cardFillTop = Color(0xFFFFFFFF), cardFillBottom = Color(0xFFF9F9FC),
++    heroFill = Color(0xD9FFFFFF), heroBorder = Color(0x1A000000),
 +    gold = Color(0xFF0B63CE), goldLight = Color(0xFF5EA0F0), goldDeep = Color(0xFF0A4DA0),
 +    goldDeepText = Color(0xFFFFFFFF), signalYellow = Color(0xFFE8A800),
 +    titaniumTop = Color(0xFFE8EAEE), titaniumMid = Color(0xFFC6CBD2), titaniumLow = Color(0xFF9AA1AA), titaniumDeep = Color(0xFF6E757E),
@@ -119,18 +120,18 @@ index 00000000..89778839
 +fun resolvedLightTokens(): PaletteTokens =
 +    if (LightStylePrefs.style == LightStyle.PORCELAIN) PorcelainTokens else LightTokens
 diff --git a/android/app/src/main/java/com/noop/ui/SettingsScreen.kt b/android/app/src/main/java/com/noop/ui/SettingsScreen.kt
-index 469a2f73..a632f42f 100644
+index 5329b464..2938993d 100644
 --- a/android/app/src/main/java/com/noop/ui/SettingsScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/SettingsScreen.kt
-@@ -1055,6 +1055,18 @@ fun SettingsScreen(
+@@ -1582,6 +1582,18 @@ fun SettingsScreen(
                      },
                  )
              }
-+            RowDivider()
++            SettingsRowDivider()
 +            // victor:light-style — fork-added: which palette the LIGHT scheme resolves to (upstream's
 +            // Warm Paper or the cool Porcelain set in PorcelainTokens.kt). Reads/writes LightStylePrefs
 +            // (snapshot state), so the pill stays live without a local remember var.
-+            FormRow(label = "Light style") {
++            SettingsFormRow(label = "Light style") {
 +                SegmentedPillControl(
 +                    items = listOf(LightStyle.PAPER, LightStyle.PORCELAIN),
 +                    selection = LightStylePrefs.style,
@@ -138,11 +139,11 @@ index 469a2f73..a632f42f 100644
 +                    onSelect = { style -> LightStylePrefs.set(context, style) },
 +                )
 +            }
-             RowDivider()   // #79 parity: the hairline every other section has between FormRows (Android rows
+             SettingsRowDivider()   // #79 parity: the hairline every other section has between FormRows (Android rows
                             // were already 16dp-spaced, unlike iOS where they touched — this matches both)
-             FormRow(label = uiString(R.string.l10n_settings_screen_chart_colours_525f4a37)) {
+             SettingsFormRow(label = uiString(R.string.l10n_settings_screen_chart_colours_525f4a37)) {
 diff --git a/android/app/src/main/java/com/noop/ui/Theme.kt b/android/app/src/main/java/com/noop/ui/Theme.kt
-index 04406982..afe44b88 100644
+index 1293fe52..abafff64 100644
 --- a/android/app/src/main/java/com/noop/ui/Theme.kt
 +++ b/android/app/src/main/java/com/noop/ui/Theme.kt
 @@ -47,7 +47,7 @@ object Palette {
@@ -154,7 +155,7 @@ index 04406982..afe44b88 100644
  
      // Chart style — when CLASSIC, the DATA accessors below return the throwback red→green ramps
      // (light/dark tuned). Reads ChartStylePrefs.style (snapshot state) so a flip re-colours live.
-@@ -547,7 +547,7 @@ fun NoopTheme(content: @Composable () -> Unit) {
+@@ -582,7 +582,7 @@ fun NoopTheme(content: @Composable () -> Unit) {
          AppearanceMode.DARK -> true
          AppearanceMode.SYSTEM -> isSystemInDarkTheme()
      }

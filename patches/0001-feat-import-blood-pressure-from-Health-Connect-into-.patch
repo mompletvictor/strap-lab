@@ -16,10 +16,10 @@ HealthConnectImporter.bloodPressureRows().
  create mode 100644 android/app/src/test/java/com/noop/ingest/BloodPressureImportTest.kt
 
 diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
-index 090b20a9..25e4b1b8 100644
+index c3f1222a..274ae96a 100644
 --- a/android/app/src/main/AndroidManifest.xml
 +++ b/android/app/src/main/AndroidManifest.xml
-@@ -120,6 +120,7 @@
+@@ -136,6 +136,7 @@
           bottle don't have to be entered twice. Read-only; NOOP never writes water back. MUST be
           declared or Health Connect silently drops the runtime request (same trap as #412 above). -->
      <uses-permission android:name="android.permission.health.READ_HYDRATION" />
@@ -28,7 +28,7 @@ index 090b20a9..25e4b1b8 100644
      <!-- Resolve the Health Connect provider on Android 14+ (platform) and earlier (app). -->
      <queries>
 diff --git a/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt b/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt
-index dc77c116..50e9f59d 100644
+index 5893bd8c..b620aa73 100644
 --- a/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt
 +++ b/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt
 @@ -4,6 +4,7 @@ import android.content.Context
@@ -38,13 +38,14 @@ index dc77c116..50e9f59d 100644
 +import androidx.health.connect.client.records.BloodPressureRecord
  import androidx.health.connect.client.records.BodyFatRecord
  import androidx.health.connect.client.records.DistanceRecord
- import androidx.health.connect.client.records.ExerciseSessionRecord
-@@ -24,9 +25,12 @@ import androidx.health.connect.client.request.ReadRecordsRequest
+ import androidx.health.connect.client.records.ExerciseRouteResult
+@@ -25,10 +26,13 @@ import androidx.health.connect.client.request.ReadRecordsRequest
  import androidx.health.connect.client.time.TimeRangeFilter
  import com.noop.analytics.FitnessAgeEngine
  import com.noop.analytics.HydrationStore
 +import com.noop.analytics.LabBookProjection
 +import com.noop.analytics.LabMarkerCategory
+ import com.noop.analytics.RouteMath
  import com.noop.data.AppleDaily
  import com.noop.data.DailyMetric
  import com.noop.data.ImportSummary
@@ -52,15 +53,15 @@ index dc77c116..50e9f59d 100644
  import com.noop.data.MetricSeriesRow
  import com.noop.data.SleepSession
  import com.noop.data.WhoopRepository
-@@ -107,6 +111,7 @@ object HealthConnectImporter {
-         WeightRecord::class,
-         BodyFatRecord::class,
-         LeanBodyMassRecord::class,
-+        BloodPressureRecord::class,
-         ExerciseSessionRecord::class,
-         DistanceRecord::class,
-         HydrationRecord::class,
-@@ -252,6 +257,9 @@ object HealthConnectImporter {
+@@ -115,6 +119,7 @@ object HealthConnectImporter {
+                 OxygenSaturationRecord::class,
+                 RespiratoryRateRecord::class,
+                 HydrationRecord::class,
++                BloodPressureRecord::class,
+             ),
+         ),
+         ACTIVITY(
+@@ -405,6 +410,9 @@ object HealthConnectImporter {
          // screen (which reads repo.sleepSessions) fell to its empty state. Keep each night's bounds +
          // per-stage minutes here, paired with its wake day for the coveredDays gate at write-out.
          val hcSleepSessions = ArrayList<Pair<String, SleepSession>>()
@@ -70,12 +71,12 @@ index dc77c116..50e9f59d 100644
  
          try {
              // --- Steps ---
-@@ -375,6 +383,14 @@ object HealthConnectImporter {
+@@ -528,6 +536,14 @@ object HealthConnectImporter {
                      b.leanMassTs = r.time.epochSecond
                  }
              }
 +            // --- Blood pressure (mmHg) -> Lab Book systolic+diastolic pair per reading ---
-+            readAll(client, BloodPressureRecord::class, filter, selfPackage) { r ->
++            readSelected(BloodPressureRecord::class) { r ->
 +                bpRows += bloodPressureRows(
 +                    r.systolic.inMillimetersOfMercury,
 +                    r.diastolic.inMillimetersOfMercury,
@@ -83,18 +84,18 @@ index dc77c116..50e9f59d 100644
 +                )
 +            }
              // --- Exercise sessions -> WorkoutRow(source="health-connect") ---
-             readAll(client, ExerciseSessionRecord::class, filter, selfPackage) { r ->
+             readSelected(ExerciseSessionRecord::class) { r ->
                  val startS = r.startTime.epochSecond
-@@ -558,7 +574,7 @@ object HealthConnectImporter {
+@@ -726,7 +742,7 @@ object HealthConnectImporter {
              }
          }
  
 -        if (acc.isEmpty() && workouts.isEmpty()) {
 +        if (acc.isEmpty() && workouts.isEmpty() && bpRows.isEmpty()) {
-             return ImportSummary(
-                 source = SOURCE,
-                 counts = emptyMap(),
-@@ -682,6 +698,9 @@ object HealthConnectImporter {
+         // #1735: record that an import RAN and what it brought. "Hours after a ride it still is not
+         // there" cannot be told from "Health Connect never imported it" without this: the log had per-source
+         // row counts but nothing about WHEN they last moved. Mirrors the sync.lastWriteOkAt pattern the
+@@ -859,6 +875,9 @@ object HealthConnectImporter {
              if (workouts.isNotEmpty()) {
                  repo.upsertWorkouts(workouts)
              }
@@ -104,7 +105,7 @@ index dc77c116..50e9f59d 100644
          } catch (e: Exception) {
              return ImportSummary.failure(SOURCE, "Saving Health Connect data failed: ${e.message}")
          }
-@@ -690,6 +709,7 @@ object HealthConnectImporter {
+@@ -877,6 +896,7 @@ object HealthConnectImporter {
              if (appleRows.isNotEmpty()) put("appleDaily", appleRows.size)
              if (dailyRows.isNotEmpty()) put("dailyMetric", dailyRows.size)
              if (workouts.isNotEmpty()) put("workout", workouts.size)
@@ -112,7 +113,7 @@ index dc77c116..50e9f59d 100644
          }
  
          // Day range across everything we touched (aggregates + workout start days).
-@@ -697,6 +717,7 @@ object HealthConnectImporter {
+@@ -884,6 +904,7 @@ object HealthConnectImporter {
              addAll(appleRows.map { it.day })
              addAll(dailyRows.map { it.day })
              addAll(workoutDays)   // #1002: same keys the workouts were bucketed under
@@ -120,7 +121,7 @@ index dc77c116..50e9f59d 100644
          }
          val firstDay = touchedDays.firstOrNull()
          val lastDay = touchedDays.lastOrNull()
-@@ -1003,6 +1024,39 @@ object HealthConnectImporter {
+@@ -1196,6 +1217,39 @@ object HealthConnectImporter {
          return round2(FitnessAgeEngine.bmi(w, heightCm))
      }
  
