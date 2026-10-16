@@ -1,11 +1,13 @@
 # Companion de pulsera — build familiar
 
 Build personal (uso familiar, no comercial) de una app open source de datos de pulsera deportiva,
-con dos extras propios y firma propia estable:
+con extras propios y firma propia estable:
 
 - **Tema "Porcelana"**: estilo claro adicional (Ajustes → Appearance → Light style → Porcelain).
 - **Tensión arterial**: las lecturas de un tensiómetro real guardadas en Health Connect se importan
   al Lab Book de la app (Data Sources → Health Connect → Sync).
+- **Tasker**: Tasker puede hacer vibrar la pulsera (con token) y recibe un aviso al acabar cada
+  sincronización (Automations → Tasker; apagado de serie).
 - **Auto-actualización**: cada versión nueva del proyecto original se reconstruye y firma aquí
   automáticamente. Si el build falla, no se publica nada — el móvil se queda en la última buena.
 

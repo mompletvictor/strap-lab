@@ -1,0 +1,434 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Fri, 16 Oct 2026 10:28:33 +0200
+Subject: [PATCH] =?UTF-8?q?feat:=20Tasker=20bridge=20=E2=80=94=20buzz=20th?=
+ =?UTF-8?q?e=20strap=20on=20request,=20announce=20each=20finished=20sync?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Opt-in (off by default) Automations card. An exported receiver accepts
+com.noop.whoop.tasker.BUZZ addressed to this package, gated by a per-install
+token (constant-time compare) and a cooldown, and repeats the hardware-confirmed
+one-shot buzz 1-5 times. After every successful offload the app broadcasts
+com.noop.whoop.tasker.SYNC_FINISHED with only synced_at and the strap battery,
+no health data. Hooks: one line in the offload sink, one manifest receiver,
+one Automations item; strings live in fork-only strings_victor.xml files.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ android/app/src/main/AndroidManifest.xml      |  10 ++
+ .../src/main/java/com/noop/NoopApplication.kt |   1 +
+ .../main/java/com/noop/tasker/TaskerBridge.kt | 119 ++++++++++++++++++
+ .../com/noop/tasker/TaskerBuzzReceiver.kt     |  17 +++
+ .../java/com/noop/ui/AutomationsScreen.kt     |   3 +
+ .../main/java/com/noop/ui/TaskerSection.kt    |  90 +++++++++++++
+ .../src/main/res/values-es/strings_victor.xml |  15 +++
+ .../src/main/res/values/strings_victor.xml    |  15 +++
+ .../java/com/noop/tasker/TaskerBridgeTest.kt  |  56 +++++++++
+ 9 files changed, 326 insertions(+)
+ create mode 100644 android/app/src/main/java/com/noop/tasker/TaskerBridge.kt
+ create mode 100644 android/app/src/main/java/com/noop/tasker/TaskerBuzzReceiver.kt
+ create mode 100644 android/app/src/main/java/com/noop/ui/TaskerSection.kt
+ create mode 100644 android/app/src/main/res/values-es/strings_victor.xml
+ create mode 100644 android/app/src/main/res/values/strings_victor.xml
+ create mode 100644 android/app/src/test/java/com/noop/tasker/TaskerBridgeTest.kt
+
+diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
+index 274ae96a..7d91c7ba 100644
+--- a/android/app/src/main/AndroidManifest.xml
++++ b/android/app/src/main/AndroidManifest.xml
+@@ -345,6 +345,16 @@
+             </intent-filter>
+         </receiver>
+ 
++        <!-- victor:tasker — fork-added: lets Tasker buzz the strap. Exported on purpose; opt-in and
++             token-gated in TaskerBridge, so other apps can't buzz the wrist. -->
++        <receiver
++            android:name="com.noop.tasker.TaskerBuzzReceiver"
++            android:exported="true">
++            <intent-filter>
++                <action android:name="com.noop.whoop.tasker.BUZZ" />
++            </intent-filter>
++        </receiver>
++
+         <!-- Smart alarm (#207): the guaranteed wake. AlarmManager fires this receiver at the latest
+              edge of the window (or earlier if the light-sleep watcher advanced it); it raises a
+              full-screen alarm notification with sound + vibration. Not exported — only our own
+diff --git a/android/app/src/main/java/com/noop/NoopApplication.kt b/android/app/src/main/java/com/noop/NoopApplication.kt
+index 11706b06..9f1ee809 100644
+--- a/android/app/src/main/java/com/noop/NoopApplication.kt
++++ b/android/app/src/main/java/com/noop/NoopApplication.kt
+@@ -133,6 +133,7 @@ class NoopApplication : Application() {
+             deviceId = startupId,
+             successfulOffloadSink = {
+                 SelfHostedPushScheduler.enqueueAfterSuccessfulOffload(applicationContext)
++                com.noop.tasker.TaskerBridge.notifySyncFinished(applicationContext)   // victor:tasker
+             },
+         ).apply {
+             // #1881: the same fact seeds the connect gate, closing the launch race where the radio can
+diff --git a/android/app/src/main/java/com/noop/tasker/TaskerBridge.kt b/android/app/src/main/java/com/noop/tasker/TaskerBridge.kt
+new file mode 100644
+index 00000000..e768d058
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/tasker/TaskerBridge.kt
+@@ -0,0 +1,119 @@
++package com.noop.tasker
++
++import android.content.Context
++import android.content.Intent
++import android.content.SharedPreferences
++import android.os.Handler
++import android.os.Looper
++import android.util.Log
++import com.noop.NoopApplication
++import java.security.MessageDigest
++import java.security.SecureRandom
++import kotlin.math.roundToInt
++
++/**
++ * victor:tasker — fork-added bridge so Tasker (or any automation app) can buzz the strap and hear when
++ * a history sync finishes. Opt-in (OFF by default) and token-gated: [TaskerBuzzReceiver] is exported,
++ * so without a shared secret any installed app could buzz the wrist.
++ *
++ *  - In:  a broadcast of [ACTION_BUZZ] to this package with extra [EXTRA_TOKEN] (and optional
++ *         [EXTRA_COUNT], 1..[MAX_COUNT] repeats of the hardware-confirmed one-shot buzz).
++ *  - Out: [ACTION_SYNC_FINISHED] after every successful offload, extras [EXTRA_SYNCED_AT] (epoch s) and
++ *         [EXTRA_BATTERY] (strap %, -1 when unknown). No health data rides it: any app can listen.
++ */
++object TaskerBridge {
++    const val ACTION_BUZZ = "com.noop.whoop.tasker.BUZZ"
++    const val ACTION_SYNC_FINISHED = "com.noop.whoop.tasker.SYNC_FINISHED"
++    const val EXTRA_TOKEN = "token"
++    const val EXTRA_COUNT = "count"
++    const val EXTRA_SYNCED_AT = "synced_at"
++    const val EXTRA_BATTERY = "battery"
++
++    const val MAX_COUNT = 5
++    /** Gap between repeated buzzes: the 5/MG one-shot is short, 2 s keeps each pulse distinct. */
++    internal const val REPEAT_GAP_MS = 2_000L
++    /** Quiet time after a sequence before another is accepted, so a looping task can't drain the strap. */
++    internal const val COOLDOWN_MS = 3_000L
++
++    private const val FILE = "noop_prefs"
++    private const val KEY_ENABLED = "victor.tasker.enabled"
++    private const val KEY_TOKEN = "victor.tasker.token"
++    private const val TAG = "NoopTasker"
++
++    // Lazy so the pure helpers below stay usable from JVM unit tests (no main Looper there).
++    private val handler by lazy { Handler(Looper.getMainLooper()) }
++    @Volatile private var busyUntilMs = 0L
++
++    private fun prefs(ctx: Context): SharedPreferences =
++        ctx.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
++
++    fun enabled(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_ENABLED, false)
++
++    fun token(ctx: Context): String? = prefs(ctx).getString(KEY_TOKEN, null)
++
++    /** Turning the bridge on mints a token the first time, so it is never on without a secret. */
++    fun setEnabled(ctx: Context, on: Boolean) {
++        val edit = prefs(ctx).edit().putBoolean(KEY_ENABLED, on)
++        if (on && token(ctx).isNullOrEmpty()) edit.putString(KEY_TOKEN, newToken())
++        edit.apply()
++    }
++
++    /** New secret; every Tasker task holding the old one stops working (the point of rotating it). */
++    fun regenerateToken(ctx: Context): String =
++        newToken().also { prefs(ctx).edit().putString(KEY_TOKEN, it).apply() }
++
++    internal fun newToken(random: SecureRandom = SecureRandom()): String =
++        ByteArray(12).also(random::nextBytes).joinToString("") { "%02x".format(it) }
++
++    /** Bridge on, a token configured, and the caller's token matches (constant-time compare). */
++    internal fun authorized(enabled: Boolean, expected: String?, given: String?): Boolean {
++        if (!enabled || expected.isNullOrEmpty() || given.isNullOrEmpty()) return false
++        return MessageDigest.isEqual(expected.toByteArray(), given.toByteArray())
++    }
++
++    /** Tasker sends `count:3` as an int or a string depending on how it was typed; accept both, clamp. */
++    internal fun parseCount(raw: Any?): Int {
++        val n = when (raw) {
++            is Number -> raw.toLong().coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt()
++            is String -> raw.trim().toIntOrNull()
++            else -> null
++        } ?: 1
++        return n.coerceIn(1, MAX_COUNT)
++    }
++
++    /** When the strap is free again after a [count]-buzz sequence starting at [nowMs]. */
++    internal fun busyUntil(nowMs: Long, count: Int): Long = nowMs + (count - 1) * REPEAT_GAP_MS + COOLDOWN_MS
++
++    internal fun handleBuzz(context: Context, intent: Intent) {
++        val app = context.applicationContext
++        if (!authorized(enabled(app), token(app), intent.getStringExtra(EXTRA_TOKEN))) {
++            Log.w(TAG, "Buzz rejected: bridge off or wrong token")
++            return
++        }
++        val now = System.currentTimeMillis()
++        if (now < busyUntilMs) {
++            Log.i(TAG, "Buzz ignored: previous request still running")
++            return
++        }
++        val ble = (app as? NoopApplication)?.ble ?: return
++        @Suppress("DEPRECATION")
++        val count = parseCount(intent.extras?.get(EXTRA_COUNT))
++        busyUntilMs = busyUntil(now, count)
++        Log.i(TAG, "Buzz accepted x$count")
++        repeat(count) { i -> handler.postDelayed({ ble.buzzStrapOnce() }, i * REPEAT_GAP_MS) }
++    }
++
++    /** Wired to WhoopBleClient's successfulOffloadSink in NoopApplication. Best-effort, never throws. */
++    fun notifySyncFinished(context: Context) {
++        val app = context.applicationContext
++        if (!enabled(app)) return
++        val battery = (app as? NoopApplication)?.ble?.state?.value?.batteryPct
++        runCatching {
++            app.sendBroadcast(
++                Intent(ACTION_SYNC_FINISHED)
++                    .putExtra(EXTRA_SYNCED_AT, System.currentTimeMillis() / 1000L)
++                    .putExtra(EXTRA_BATTERY, battery?.roundToInt() ?: -1),
++            )
++        }.onFailure { Log.w(TAG, "Sync broadcast failed", it) }
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/tasker/TaskerBuzzReceiver.kt b/android/app/src/main/java/com/noop/tasker/TaskerBuzzReceiver.kt
+new file mode 100644
+index 00000000..7a1a4b4f
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/tasker/TaskerBuzzReceiver.kt
+@@ -0,0 +1,17 @@
++package com.noop.tasker
++
++import android.content.BroadcastReceiver
++import android.content.Context
++import android.content.Intent
++
++/**
++ * victor:tasker — exported entry point for [TaskerBridge.ACTION_BUZZ]. Tasker must address it to this
++ * package (Android 8+ drops implicit broadcasts to manifest receivers). All gating (opt-in, token,
++ * cooldown) lives in [TaskerBridge.handleBuzz].
++ */
++class TaskerBuzzReceiver : BroadcastReceiver() {
++    override fun onReceive(context: Context, intent: Intent) {
++        if (intent.action != TaskerBridge.ACTION_BUZZ) return
++        TaskerBridge.handleBuzz(context, intent)
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt b/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt
+index 729f90e8..d77d799e 100644
+--- a/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt
+@@ -369,6 +369,9 @@ fun AutomationsScreen(viewModel: AppViewModel) {
+             }
+         }
+         }
++
++        // victor:tasker — fork-added card (TaskerSection.kt).
++        item { TaskerSection() }
+     }
+ }
+ 
+diff --git a/android/app/src/main/java/com/noop/ui/TaskerSection.kt b/android/app/src/main/java/com/noop/ui/TaskerSection.kt
+new file mode 100644
+index 00000000..fb4d8d85
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/ui/TaskerSection.kt
+@@ -0,0 +1,90 @@
++package com.noop.ui
++
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.width
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.filled.Bolt
++import androidx.compose.material3.ButtonDefaults
++import androidx.compose.material3.Icon
++import androidx.compose.material3.OutlinedButton
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalClipboardManager
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.text.AnnotatedString
++import androidx.compose.ui.unit.dp
++import com.noop.R
++import com.noop.tasker.TaskerBridge
++
++/**
++ * victor:tasker — fork-added Automations card for [TaskerBridge]: the opt-in switch, the shared token
++ * (copy / rotate) and the two Tasker recipes with this build's real package name filled in.
++ */
++@Composable
++internal fun TaskerSection() {
++    val ctx = LocalContext.current
++    val clipboard = LocalClipboardManager.current
++    var enabled by remember { mutableStateOf(TaskerBridge.enabled(ctx)) }
++    var token by remember { mutableStateOf(TaskerBridge.token(ctx).orEmpty()) }
++
++    NoopCard(padding = 20.dp, tint = Palette.accent) {
++        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
++            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
++                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
++                    Overline(uiString(R.string.victor_tasker_overline))
++                    if (enabled) Overline(uiString(R.string.victor_tasker_on), color = Palette.accent)
++                }
++                Row(verticalAlignment = Alignment.CenterVertically) {
++                    Icon(Icons.Filled.Bolt, contentDescription = null, tint = if (enabled) Palette.accent else Palette.textSecondary)
++                    Spacer(Modifier.width(10.dp))
++                    Text(uiString(R.string.victor_tasker_title), style = NoopType.title2, color = Palette.textPrimary)
++                }
++            }
++            Text(uiString(R.string.victor_tasker_blurb), style = NoopType.subhead, color = Palette.textSecondary)
++            SettingsToggleRow(
++                title = uiString(R.string.victor_tasker_toggle),
++                detail = uiString(R.string.victor_tasker_toggle_detail),
++                checked = enabled,
++                onCheckedChange = { on ->
++                    TaskerBridge.setEnabled(ctx, on)
++                    enabled = on
++                    token = TaskerBridge.token(ctx).orEmpty()
++                },
++            )
++            if (enabled) {
++                SettingsRowDivider()
++                Text(uiString(R.string.victor_tasker_token_label), style = NoopType.subhead, color = Palette.textPrimary)
++                Text(token, style = NoopType.mono, color = Palette.textPrimary)
++                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
++                    OutlinedButton(
++                        onClick = { clipboard.setText(AnnotatedString(token)) },
++                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Palette.accent),
++                    ) { Text(uiString(R.string.victor_tasker_copy)) }
++                    OutlinedButton(
++                        onClick = { token = TaskerBridge.regenerateToken(ctx) },
++                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Palette.textSecondary),
++                    ) { Text(uiString(R.string.victor_tasker_rotate)) }
++                }
++                Text(
++                    uiString(R.string.victor_tasker_howto_buzz, TaskerBridge.ACTION_BUZZ, ctx.packageName, TaskerBridge.MAX_COUNT),
++                    style = NoopType.footnote,
++                    color = Palette.textTertiary,
++                )
++                Text(
++                    uiString(R.string.victor_tasker_howto_sync, TaskerBridge.ACTION_SYNC_FINISHED),
++                    style = NoopType.footnote,
++                    color = Palette.textTertiary,
++                )
++            }
++        }
++    }
++}
+diff --git a/android/app/src/main/res/values-es/strings_victor.xml b/android/app/src/main/res/values-es/strings_victor.xml
+new file mode 100644
+index 00000000..c9386c2a
+--- /dev/null
++++ b/android/app/src/main/res/values-es/strings_victor.xml
+@@ -0,0 +1,15 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- victor:tasker — textos propios del fork, fuera del strings.xml de upstream para que el parche no choque. -->
++<resources>
++    <string name="victor_tasker_overline">Automatización</string>
++    <string name="victor_tasker_on">ACTIVA</string>
++    <string name="victor_tasker_title">Tasker</string>
++    <string name="victor_tasker_blurb">Deja que Tasker (u otra app de automatización) haga vibrar la pulsera y reciba un aviso cada vez que termina una sincronización.</string>
++    <string name="victor_tasker_toggle">Permitir Tasker</string>
++    <string name="victor_tasker_toggle_detail">Apagado de serie. Para vibrar hay que enviar el token de abajo; el aviso de sincronización solo lleva la hora y la batería de la pulsera.</string>
++    <string name="victor_tasker_token_label">Token</string>
++    <string name="victor_tasker_copy">Copiar</string>
++    <string name="victor_tasker_rotate">Token nuevo</string>
++    <string name="victor_tasker_howto_buzz">Vibrar: Enviar intent → Acción %1$s · Paquete %2$s · Extra token:&lt;token&gt; · Extra opcional count:1–%3$d · Destino Broadcast Receiver.</string>
++    <string name="victor_tasker_howto_sync">Fin de sincronización: Evento → Intent recibido → Acción %1$s. Variables %%synced_at (hora Unix) y %%battery (%% de batería, −1 si no se sabe).</string>
++</resources>
+diff --git a/android/app/src/main/res/values/strings_victor.xml b/android/app/src/main/res/values/strings_victor.xml
+new file mode 100644
+index 00000000..600d168f
+--- /dev/null
++++ b/android/app/src/main/res/values/strings_victor.xml
+@@ -0,0 +1,15 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- victor:tasker — fork-only strings, kept out of upstream's strings.xml so the patch never conflicts. -->
++<resources>
++    <string name="victor_tasker_overline">Automation</string>
++    <string name="victor_tasker_on">ON</string>
++    <string name="victor_tasker_title">Tasker</string>
++    <string name="victor_tasker_blurb">Let Tasker (or any automation app) buzz the strap, and get a signal every time a sync finishes.</string>
++    <string name="victor_tasker_toggle">Allow Tasker</string>
++    <string name="victor_tasker_toggle_detail">Off by default. Buzz requests must carry the token below; the sync signal carries only the time and the strap battery.</string>
++    <string name="victor_tasker_token_label">Token</string>
++    <string name="victor_tasker_copy">Copy</string>
++    <string name="victor_tasker_rotate">New token</string>
++    <string name="victor_tasker_howto_buzz">Buzz: Send Intent → Action %1$s · Package %2$s · Extra token:&lt;token&gt; · optional Extra count:1–%3$d · Target Broadcast Receiver.</string>
++    <string name="victor_tasker_howto_sync">Sync finished: Event → Intent Received → Action %1$s. Variables %%synced_at (Unix time) and %%battery (strap %%, −1 if unknown).</string>
++</resources>
+diff --git a/android/app/src/test/java/com/noop/tasker/TaskerBridgeTest.kt b/android/app/src/test/java/com/noop/tasker/TaskerBridgeTest.kt
+new file mode 100644
+index 00000000..0adc8813
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/tasker/TaskerBridgeTest.kt
+@@ -0,0 +1,56 @@
++package com.noop.tasker
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNotEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.security.SecureRandom
++
++/** victor:tasker — the gating of the exported buzz receiver, without a device. */
++class TaskerBridgeTest {
++
++    @Test
++    fun buzzNeedsTheBridgeOnAndTheExactToken() {
++        assertTrue(TaskerBridge.authorized(enabled = true, expected = "abc123", given = "abc123"))
++        assertFalse(TaskerBridge.authorized(enabled = false, expected = "abc123", given = "abc123"))
++        assertFalse(TaskerBridge.authorized(enabled = true, expected = "abc123", given = "abc124"))
++        assertFalse(TaskerBridge.authorized(enabled = true, expected = "abc123", given = "abc12"))
++        assertFalse(TaskerBridge.authorized(enabled = true, expected = "abc123", given = null))
++        assertFalse(TaskerBridge.authorized(enabled = true, expected = "abc123", given = ""))
++        // A bridge switched on with no token stored must not accept an empty one.
++        assertFalse(TaskerBridge.authorized(enabled = true, expected = null, given = ""))
++        assertFalse(TaskerBridge.authorized(enabled = true, expected = "", given = ""))
++    }
++
++    @Test
++    fun countAcceptsIntsAndStringsAndIsClamped() {
++        assertEquals(1, TaskerBridge.parseCount(null))
++        assertEquals(3, TaskerBridge.parseCount(3))
++        assertEquals(3, TaskerBridge.parseCount(3L))
++        assertEquals(4, TaskerBridge.parseCount(" 4 "))
++        assertEquals(1, TaskerBridge.parseCount("lots"))
++        assertEquals(1, TaskerBridge.parseCount(0))
++        assertEquals(1, TaskerBridge.parseCount(-7))
++        assertEquals(TaskerBridge.MAX_COUNT, TaskerBridge.parseCount(99))
++        assertEquals(TaskerBridge.MAX_COUNT, TaskerBridge.parseCount(Long.MAX_VALUE))
++    }
++
++    @Test
++    fun cooldownCoversTheWholeSequence() {
++        assertEquals(1_000L + TaskerBridge.COOLDOWN_MS, TaskerBridge.busyUntil(1_000L, 1))
++        assertEquals(
++            1_000L + 4 * TaskerBridge.REPEAT_GAP_MS + TaskerBridge.COOLDOWN_MS,
++            TaskerBridge.busyUntil(1_000L, 5),
++        )
++    }
++
++    @Test
++    fun tokensAreLongHexAndDoNotRepeat() {
++        val rng = SecureRandom()
++        val a = TaskerBridge.newToken(rng)
++        val b = TaskerBridge.newToken(rng)
++        assertTrue(a.matches(Regex("[0-9a-f]{24}")))
++        assertNotEquals(a, b)
++    }
++}
+-- 
+2.54.0
+
