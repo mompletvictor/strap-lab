@@ -1,0 +1,649 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Fri, 16 Oct 2026 14:29:35 +0200
+Subject: [PATCH] feat: goals and today's energy balance reach the AI Coach
+
+- Goals (com.noop.goals): main goal, target weight, daily kcal target and a
+  free note, edited in a "Your goals" card in the Coach settings (one hook)
+  and stored in noop_prefs. The Food card shows the daily target and what is
+  left; the coach gets a GOALS line with the distance to the target weight.
+- TODAY line for the coach: steps (resolved like the Today Steps card),
+  energy burned (resting + activity via FoodEnergy), eaten and the balance so
+  far. FoodEnergy.load now also takes (repo, strapId) for the coach.
+- VictorCoachExtras reads the scale snapshot once for BODY and GOALS.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../app/src/main/java/com/noop/ai/AiCoach.kt  |   4 +-
+ .../java/com/noop/ai/VictorCoachExtras.kt     |  61 +++++++-
+ .../main/java/com/noop/food/FoodDayCard.kt    |  18 ++-
+ .../src/main/java/com/noop/food/FoodEnergy.kt |   9 +-
+ .../src/main/java/com/noop/food/FoodScreen.kt |   3 +-
+ .../src/main/java/com/noop/food/FoodSheet.kt  |   2 +-
+ .../java/com/noop/food/TodayFoodSection.kt    |   2 +
+ .../main/java/com/noop/goals/VictorGoals.kt   |  93 +++++++++++++
+ .../java/com/noop/goals/VictorGoalsCard.kt    | 130 ++++++++++++++++++
+ .../java/com/noop/ui/CoachSettingsScreen.kt   |   1 +
+ .../res/values-es/strings_victor_goals.xml    |  16 +++
+ .../main/res/values/strings_victor_goals.xml  |  16 +++
+ .../java/com/noop/ai/VictorCoachExtrasTest.kt |  37 +++++
+ .../java/com/noop/goals/VictorGoalsTest.kt    |  42 ++++++
+ 14 files changed, 419 insertions(+), 15 deletions(-)
+ create mode 100644 android/app/src/main/java/com/noop/goals/VictorGoals.kt
+ create mode 100644 android/app/src/main/java/com/noop/goals/VictorGoalsCard.kt
+ create mode 100644 android/app/src/main/res/values-es/strings_victor_goals.xml
+ create mode 100644 android/app/src/main/res/values/strings_victor_goals.xml
+ create mode 100644 android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
+ create mode 100644 android/app/src/test/java/com/noop/goals/VictorGoalsTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/ai/AiCoach.kt b/android/app/src/main/java/com/noop/ai/AiCoach.kt
+index 81a4ebb4..2f73785c 100644
+--- a/android/app/src/main/java/com/noop/ai/AiCoach.kt
++++ b/android/app/src/main/java/com/noop/ai/AiCoach.kt
+@@ -128,7 +128,7 @@ class AiCoach(
+             // like the blocks around it; a read that throws leaves the day table standing rather than
+             // failing the send. Matches where Swift appends it in `buildFullContext`.
+             val workouts = runCatching { recentWorkoutsBlock(ctx) }.getOrNull()
+-            val victorExtras = runCatching { VictorCoachExtras.block(ctx, repo) }.getOrNull()   // victor:coach-extras
++            val victorExtras = runCatching { VictorCoachExtras.block(ctx, repo, activeStrapId()) }.getOrNull()   // victor:coach-extras
+             val full = buildString {
+                 append(buildContext(days))
+                 if (!workouts.isNullOrBlank()) append("\n\n").append(workouts)
+@@ -212,7 +212,7 @@ class AiCoach(
+             // like the blocks around it; a read that throws leaves the day table standing rather than
+             // failing the send. Matches where Swift appends it in `buildFullContext`.
+             val workouts = runCatching { recentWorkoutsBlock(ctx) }.getOrNull()
+-            val victorExtras = runCatching { VictorCoachExtras.block(ctx, repo) }.getOrNull()   // victor:coach-extras
++            val victorExtras = runCatching { VictorCoachExtras.block(ctx, repo, activeStrapId()) }.getOrNull()   // victor:coach-extras
+             val full = buildString {
+                 append(buildContext(days))
+                 if (!workouts.isNullOrBlank()) append("\n\n").append(workouts)
+diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+index c62bd4da..7673cb95 100644
+--- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
++++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+@@ -3,16 +3,65 @@ package com.noop.ai
+ import android.content.Context
+ import com.noop.data.WhoopRepository
+ import com.noop.food.FoodCoachContext
++import com.noop.food.FoodDays
++import com.noop.food.FoodEnergy
++import com.noop.food.FoodStore
++import com.noop.goals.VictorGoals
++import com.noop.goals.VictorGoalsStore
++import com.noop.ingest.ScaleImport
++import com.noop.ui.stepsForDay
++import java.time.LocalDate
++import java.time.LocalTime
++import java.time.format.DateTimeFormatter
++import kotlin.math.roundToInt
+ 
+ /**
+- * victor:coach-extras — fork-only context for the AI Coach: the smart-scale BODY line and the photo
+- * FOOD LOG line. Appended by [AiCoach] under the same `consent` gate as the strap metrics; each line is
+- * best-effort and simply absent when there is no data.
++ * victor:coach-extras — fork-only context for the AI Coach, appended by [AiCoach] under the same
++ * `consent` gate as the strap metrics: TODAY (steps, energy out, eaten, balance so far), the smart-scale
++ * BODY line, the photo FOOD LOG line and the wearer's GOALS. Each line is best-effort and simply absent
++ * when there is no data.
+  */
+ internal object VictorCoachExtras {
+-    suspend fun block(ctx: Context, repo: WhoopRepository): String? =
+-        listOfNotNull(
+-            runCatching { ScaleCoachContext.line(repo) }.getOrNull(),
++    suspend fun block(ctx: Context, repo: WhoopRepository, strapId: String): String? {
++        val today = LocalDate.now().toString()
++        val scale = runCatching { ScaleImport.snapshot(repo) }.getOrNull()
++        return listOfNotNull(
++            runCatching { todayLine(ctx, repo, strapId, today) }.getOrNull(),
++            ScaleCoachContext.line(scale),
+             runCatching { FoodCoachContext.line(ctx) }.getOrNull(),
++            runCatching { VictorGoals.coachLine(VictorGoalsStore.load(ctx), scale?.weight?.value) }.getOrNull(),
+         ).takeIf { it.isNotEmpty() }?.joinToString("\n")
++    }
++
++    private suspend fun todayLine(ctx: Context, repo: WhoopRepository, strapId: String, today: String): String? {
++        // Steps resolved like the Today Steps card: the phone's imported count first, else the strap day.
++        val steps = runCatching {
++            stepsForDay(repo.appleDaily("apple-health", today, today), repo.appleDaily("health-connect", today, today), today)
++        }.getOrNull() ?: runCatching { repo.daysMerged(strapId).lastOrNull { it.day == today }?.steps }.getOrNull()
++        val energy = FoodEnergy.load(repo, strapId, today)
++        val eaten = runCatching { FoodDays.totalsFor(FoodStore.load(ctx), today)?.kcal }.getOrNull()
++        return todayLine(today, LocalTime.now(), steps, energy, eaten)
++    }
++
++    /** Pure: the TODAY line, or null when nothing about today is known yet. */
++    internal fun todayLine(day: String, time: LocalTime, steps: Int?, energy: FoodEnergy, eatenKcal: Double?): String? {
++        val parts = buildList {
++            steps?.let { add("steps $it") }
++            val total = energy.totalKcal
++            if (total != null) {
++                add("energy burned ${r(total)} kcal (resting ${r(energy.basalKcal ?: 0.0)} + activity ${r(energy.activeKcal ?: 0.0)})")
++            } else {
++                energy.activeKcal?.let { add("activity energy ${r(it)} kcal (resting energy unknown)") }
++            }
++            if (eatenKcal != null) {
++                add("eaten ${r(eatenKcal)} kcal (photo food log)")
++                energy.balance(eatenKcal)?.let { b -> add(if (b < 0) "deficit ${r(-b)} kcal" else "surplus ${r(b)} kcal") }
++            }
++        }
++        if (parts.isEmpty()) return null
++        return "TODAY so far ($day, ${time.format(HHMM)}): " + parts.joinToString("; ")
++    }
++
++    private val HHMM = DateTimeFormatter.ofPattern("HH:mm")
++    private fun r(v: Double) = v.roundToInt()
+ }
+diff --git a/android/app/src/main/java/com/noop/food/FoodDayCard.kt b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
+index cf7e5ebe..373efe5d 100644
+--- a/android/app/src/main/java/com/noop/food/FoodDayCard.kt
++++ b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
+@@ -27,8 +27,9 @@ import kotlin.math.abs
+ 
+ /**
+  * victor:food — one day's intake card: kcal, macros and the energy balance. Shared by the Food screen and
+- * the Today section so both show the same numbers from the same resolver ([FoodEnergy]). [onAdd] adds a
+- * button that opens the Food screen (Today only).
++ * the Today section so both show the same numbers from the same resolver ([FoodEnergy]). [kcalTarget] is
++ * the daily target from the wearer's goals (VictorGoals). [onAdd] adds a button that opens the Food screen
++ * (Today only).
+  */
+ @Composable
+ internal fun FoodDayCard(
+@@ -36,6 +37,7 @@ internal fun FoodDayCard(
+     meals: Int,
+     energy: FoodEnergy?,
+     title: String = uiString(R.string.victor_food_today),
++    kcalTarget: Int? = null,
+     onAdd: (() -> Unit)? = null,
+ ) {
+     NoopCard(tint = Palette.accent) {
+@@ -65,6 +67,18 @@ internal fun FoodDayCard(
+                 MacroStat(uiString(R.string.victor_food_carbs), totals.carbsG, Palette.metricAmber, Modifier.weight(1f))
+                 MacroStat(uiString(R.string.victor_food_fat), totals.fatG, Palette.metricRose, Modifier.weight(1f))
+             }
++            if (kcalTarget != null) {
++                val left = kcalTarget - totals.kcal
++                Text(
++                    uiString(
++                        if (left >= 0) R.string.victor_food_target_left else R.string.victor_food_target_over,
++                        kcalTarget.toString(),
++                        whole(abs(left)),
++                    ),
++                    style = NoopType.subhead,
++                    color = if (left >= 0) Palette.textSecondary else Palette.metricAmber,
++                )
++            }
+             EnergyLines(totals.kcal, energy)
+             if (onAdd != null) {
+                 NoopButton(
+diff --git a/android/app/src/main/java/com/noop/food/FoodEnergy.kt b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
+index 7188bca7..d0599d91 100644
+--- a/android/app/src/main/java/com/noop/food/FoodEnergy.kt
++++ b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
+@@ -1,5 +1,6 @@
+ package com.noop.food
+ 
++import com.noop.data.WhoopRepository
+ import com.noop.ingest.ScaleImport
+ import com.noop.ui.AppViewModel
+ import java.time.LocalDate
+@@ -41,14 +42,16 @@ internal data class FoodEnergy(
+             if (day < now.toString()) 1.0 else time.toSecondOfDay() / 86_400.0
+ 
+         /** Read the day's energy from the repository. Best-effort: any failed read just leaves its half null. */
+-        suspend fun load(vm: AppViewModel, day: String): FoodEnergy {
+-            val repo = vm.repo
++        suspend fun load(vm: AppViewModel, day: String): FoodEnergy = load(vm.repo, vm.activeStrapId, day)
++
++        /** Same read without a ViewModel (the AI Coach has the repository and the strap id only). */
++        suspend fun load(repo: WhoopRepository, strapId: String, day: String): FoodEnergy {
+             val phoneRows = runCatching {
+                 repo.appleDaily("apple-health", day, day) + repo.appleDaily("health-connect", day, day)
+             }.getOrDefault(emptyList())
+             val active = phoneRows.firstNotNullOfOrNull { r -> r.activeKcal?.takeIf { it > 0 } }
+                 ?: runCatching {
+-                    repo.resolvedSeries("active_kcal", "my-whoop", day, day, strapDeviceId = vm.activeStrapId)
++                    repo.resolvedSeries("active_kcal", "my-whoop", day, day, strapDeviceId = strapId)
+                         .points.firstOrNull()?.value?.takeIf { it > 0 }
+                 }.getOrNull()
+             val phoneBasal = phoneRows.firstNotNullOfOrNull { r -> r.basalKcal?.takeIf { it > 0 } }
+diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+index 9e89e3a5..60c3c1dc 100644
+--- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
++++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+@@ -56,6 +56,7 @@ import androidx.core.content.FileProvider
+ import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import androidx.lifecycle.viewmodel.compose.viewModel
+ import com.noop.R
++import com.noop.goals.VictorGoalsStore
+ import com.noop.ui.AppViewModel
+ import com.noop.ui.LazyScreenScaffold
+ import com.noop.ui.Metrics
+@@ -148,7 +149,7 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+         title = uiString(R.string.victor_food_title),
+         subtitle = uiString(R.string.victor_food_subtitle),
+     ) {
+-        item { FoodDayCard(todayTotals, todayEntries.size, energy) }
++        item { FoodDayCard(todayTotals, todayEntries.size, energy, kcalTarget = VictorGoalsStore.load(ctx).dailyKcalTarget) }
+         item {
+             Row(horizontalArrangement = Arrangement.spacedBy(Metrics.space12)) {
+                 NoopButton(
+diff --git a/android/app/src/main/java/com/noop/food/FoodSheet.kt b/android/app/src/main/java/com/noop/food/FoodSheet.kt
+index 5fa25345..36a67e42 100644
+--- a/android/app/src/main/java/com/noop/food/FoodSheet.kt
++++ b/android/app/src/main/java/com/noop/food/FoodSheet.kt
+@@ -309,7 +309,7 @@ private fun confidenceLabel(confidence: String?) = when (confidence) {
+ }
+ 
+ @Composable
+-private fun foodFieldColors() = OutlinedTextFieldDefaults.colors(
++internal fun foodFieldColors() = OutlinedTextFieldDefaults.colors(
+     focusedTextColor = Palette.textPrimary,
+     unfocusedTextColor = Palette.textPrimary,
+     disabledTextColor = Palette.textTertiary,
+diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+index de5411b9..131cacdb 100644
+--- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
++++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+@@ -5,6 +5,7 @@ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.produceState
+ import androidx.compose.ui.platform.LocalContext
+ import com.noop.R
++import com.noop.goals.VictorGoalsStore
+ import com.noop.ui.AppViewModel
+ import com.noop.ui.uiString
+ import kotlinx.coroutines.Dispatchers
+@@ -31,6 +32,7 @@ internal fun TodayFoodSection(vm: AppViewModel, onOpenFood: () -> Unit) {
+         meals = todays.size,
+         energy = energy,
+         title = uiString(R.string.victor_food_nav),
++        kcalTarget = VictorGoalsStore.load(ctx).dailyKcalTarget,
+         onAdd = onOpenFood,
+     )
+ }
+diff --git a/android/app/src/main/java/com/noop/goals/VictorGoals.kt b/android/app/src/main/java/com/noop/goals/VictorGoals.kt
+new file mode 100644
+index 00000000..965e6e6c
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/goals/VictorGoals.kt
+@@ -0,0 +1,93 @@
++package com.noop.goals
++
++import android.content.Context
++import android.content.SharedPreferences
++import java.util.Locale
++
++/**
++ * victor:goals — the wearer's own goals, so the AI Coach (and the Food card's daily target) can plan
++ * against them instead of guessing. Fork-owned, stored in SharedPreferences; every field is optional.
++ */
++data class VictorGoals(
++    val goal: Goal = Goal.NONE,
++    val targetWeightKg: Double? = null,
++    val dailyKcalTarget: Int? = null,
++    val note: String = "",
++) {
++    enum class Goal(val raw: String, val coachText: String) {
++        NONE("none", ""),
++        LOSE_FAT("loseFat", "lose body fat"),
++        MAINTAIN("maintain", "maintain weight and body composition"),
++        GAIN_MUSCLE("gainMuscle", "gain muscle"),
++        PERFORMANCE("performance", "improve sports performance");
++
++        companion object {
++            fun fromRaw(raw: String?): Goal = entries.firstOrNull { it.raw == raw } ?: NONE
++        }
++    }
++
++    val isEmpty: Boolean get() = goal == Goal.NONE && targetWeightKg == null && dailyKcalTarget == null && note.isBlank()
++
++    companion object {
++        const val MAX_NOTE = 400
++
++        /**
++         * Pure: the GOALS line for the coach, or null when nothing is set. [currentWeightKg] (latest scale
++         * weigh-in) adds the distance to the target weight.
++         */
++        fun coachLine(g: VictorGoals, currentWeightKg: Double?): String? {
++            if (g.isEmpty) return null
++            val parts = buildList {
++                if (g.goal != Goal.NONE) add("main goal: ${g.goal.coachText}")
++                g.targetWeightKg?.let { t ->
++                    val now = currentWeightKg?.let { c ->
++                        " (now ${fmt(c)} kg, ${fmt(kotlin.math.abs(c - t))} kg to ${if (c > t) "lose" else "gain"})"
++                    }.orEmpty()
++                    add("target weight ${fmt(t)} kg$now")
++                }
++                g.dailyKcalTarget?.let { add("daily intake target $it kcal") }
++                g.note.trim().takeIf { it.isNotEmpty() }?.let { add("in their own words: \"${it.take(MAX_NOTE)}\"") }
++            }
++            return "GOALS (set by the user; plan advice against them): " + parts.joinToString("; ")
++        }
++
++        private fun fmt(v: Double) = String.format(Locale.ROOT, "%.1f", v)
++    }
++}
++
++/** Persistence for [VictorGoals] in the app's `noop_prefs`. */
++object VictorGoalsStore {
++    private const val FILE = "noop_prefs"
++    private const val K_GOAL = "victor.goals.goal"
++    private const val K_WEIGHT = "victor.goals.targetWeightKg"
++    private const val K_KCAL = "victor.goals.dailyKcal"
++    private const val K_NOTE = "victor.goals.note"
++
++    private fun prefs(ctx: Context): SharedPreferences =
++        ctx.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
++
++    fun load(ctx: Context): VictorGoals {
++        val p = prefs(ctx)
++        return VictorGoals(
++            goal = VictorGoals.Goal.fromRaw(p.getString(K_GOAL, null)),
++            targetWeightKg = p.getString(K_WEIGHT, null)?.toDoubleOrNull(),
++            dailyKcalTarget = p.getString(K_KCAL, null)?.toIntOrNull(),
++            note = p.getString(K_NOTE, null).orEmpty(),
++        )
++    }
++
++    fun save(ctx: Context, g: VictorGoals) {
++        prefs(ctx).edit()
++            .putString(K_GOAL, g.goal.raw)
++            .putString(K_WEIGHT, g.targetWeightKg?.toString())
++            .putString(K_KCAL, g.dailyKcalTarget?.toString())
++            .putString(K_NOTE, g.note.take(VictorGoals.MAX_NOTE))
++            .apply()
++    }
++
++    /** Lenient number parsing for the form fields ("75,5" and "75.5" both work); out-of-range → null. */
++    internal fun parseWeight(text: String): Double? =
++        text.trim().replace(',', '.').toDoubleOrNull()?.takeIf { it in 30.0..300.0 }
++
++    internal fun parseKcal(text: String): Int? = text.trim().toIntOrNull()?.takeIf { it in 800..8000 }
++}
+diff --git a/android/app/src/main/java/com/noop/goals/VictorGoalsCard.kt b/android/app/src/main/java/com/noop/goals/VictorGoalsCard.kt
+new file mode 100644
+index 00000000..ede3f23a
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/goals/VictorGoalsCard.kt
+@@ -0,0 +1,130 @@
++package com.noop.goals
++
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.ExperimentalLayoutApi
++import androidx.compose.foundation.layout.FlowRow
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.foundation.text.KeyboardOptions
++import androidx.compose.material3.OutlinedTextField
++import androidx.compose.material3.Surface
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.text.input.KeyboardType
++import androidx.compose.ui.unit.dp
++import com.noop.R
++import com.noop.food.foodFieldColors
++import com.noop.ui.NoopCard
++import com.noop.ui.NoopType
++import com.noop.ui.Overline
++import com.noop.ui.Palette
++import com.noop.ui.uiString
++
++/**
++ * victor:goals — "Your goals" card in the Coach settings: main goal, target weight, daily intake target
++ * and a free note. Saved on every edit; read by the coach (GOALS line) and by the Food card's target.
++ */
++@OptIn(ExperimentalLayoutApi::class)
++@Composable
++internal fun VictorGoalsCard() {
++    val ctx = LocalContext.current
++    var goals by remember { mutableStateOf(VictorGoalsStore.load(ctx)) }
++    var weightText by remember { mutableStateOf(goals.targetWeightKg?.let { trimNumber(it) }.orEmpty()) }
++    var kcalText by remember { mutableStateOf(goals.dailyKcalTarget?.toString().orEmpty()) }
++    fun update(g: VictorGoals) {
++        goals = g
++        VictorGoalsStore.save(ctx, g)
++    }
++
++    NoopCard(padding = 14.dp, tint = Palette.chargeColor) {
++        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
++            Overline(uiString(R.string.victor_goals_title))
++            Text(uiString(R.string.victor_goals_blurb), style = NoopType.footnote, color = Palette.textSecondary)
++            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
++                VictorGoals.Goal.entries.filter { it != VictorGoals.Goal.NONE }.forEach { g ->
++                    GoalChip(
++                        label = uiString(goalLabel(g)),
++                        selected = goals.goal == g,
++                        // Tapping the chosen goal again clears it.
++                        onClick = { update(goals.copy(goal = if (goals.goal == g) VictorGoals.Goal.NONE else g)) },
++                    )
++                }
++            }
++            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
++                OutlinedTextField(
++                    value = weightText,
++                    onValueChange = { v ->
++                        if (v.length <= 5 && v.all { it.isDigit() || it == '.' || it == ',' }) {
++                            weightText = v
++                            update(goals.copy(targetWeightKg = VictorGoalsStore.parseWeight(v)))
++                        }
++                    },
++                    label = { Text(uiString(R.string.victor_goals_target_weight)) },
++                    singleLine = true,
++                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
++                    colors = foodFieldColors(),
++                    modifier = Modifier.weight(1f),
++                )
++                OutlinedTextField(
++                    value = kcalText,
++                    onValueChange = { v ->
++                        if (v.length <= 4 && v.all { it.isDigit() }) {
++                            kcalText = v
++                            update(goals.copy(dailyKcalTarget = VictorGoalsStore.parseKcal(v)))
++                        }
++                    },
++                    label = { Text(uiString(R.string.victor_goals_daily_kcal)) },
++                    singleLine = true,
++                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
++                    colors = foodFieldColors(),
++                    modifier = Modifier.weight(1f),
++                )
++            }
++            OutlinedTextField(
++                value = goals.note,
++                onValueChange = { v -> update(goals.copy(note = v.take(VictorGoals.MAX_NOTE))) },
++                label = { Text(uiString(R.string.victor_goals_note)) },
++                placeholder = { Text(uiString(R.string.victor_goals_note_hint)) },
++                maxLines = 4,
++                colors = foodFieldColors(),
++                modifier = Modifier.fillMaxWidth(),
++            )
++        }
++    }
++}
++
++@Composable
++private fun GoalChip(label: String, selected: Boolean, onClick: () -> Unit) {
++    Surface(
++        shape = RoundedCornerShape(50),
++        color = if (selected) Palette.accent else Palette.surfaceInset,
++        modifier = Modifier.clickable(onClick = onClick),
++    ) {
++        Text(
++            label,
++            style = NoopType.subhead,
++            color = if (selected) Palette.surfaceBase else Palette.textPrimary,
++            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
++        )
++    }
++}
++
++private fun goalLabel(g: VictorGoals.Goal): Int = when (g) {
++    VictorGoals.Goal.LOSE_FAT -> R.string.victor_goals_lose_fat
++    VictorGoals.Goal.MAINTAIN -> R.string.victor_goals_maintain
++    VictorGoals.Goal.GAIN_MUSCLE -> R.string.victor_goals_gain_muscle
++    VictorGoals.Goal.PERFORMANCE -> R.string.victor_goals_performance
++    VictorGoals.Goal.NONE -> R.string.victor_goals_title
++}
++
++private fun trimNumber(v: Double): String = if (v % 1.0 == 0.0) v.toInt().toString() else v.toString()
+diff --git a/android/app/src/main/java/com/noop/ui/CoachSettingsScreen.kt b/android/app/src/main/java/com/noop/ui/CoachSettingsScreen.kt
+index 4cff263b..82dc6efa 100644
+--- a/android/app/src/main/java/com/noop/ui/CoachSettingsScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/CoachSettingsScreen.kt
+@@ -85,6 +85,7 @@ fun CoachSettingsScreen(vm: CoachViewModel) {
+         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+             CoachModelCard(vm = vm)
+             CoachConsentCard(vm = vm)
++            com.noop.goals.VictorGoalsCard()   // victor:goals
+             CoachInstructions(vm = vm)
+             MorningBriefCard(vm = vm)
+         }
+diff --git a/android/app/src/main/res/values-es/strings_victor_goals.xml b/android/app/src/main/res/values-es/strings_victor_goals.xml
+new file mode 100644
+index 00000000..bb3c8c93
+--- /dev/null
++++ b/android/app/src/main/res/values-es/strings_victor_goals.xml
+@@ -0,0 +1,16 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- victor:goals — textos propios del fork, fuera del strings.xml de upstream para que el parche no choque. -->
++<resources>
++    <string name="victor_goals_title">Tus objetivos</string>
++    <string name="victor_goals_blurb">El coach planifica sus consejos según esto, y la tarjeta Comida muestra tu objetivo diario. Todo es opcional.</string>
++    <string name="victor_goals_lose_fat">Perder grasa</string>
++    <string name="victor_goals_maintain">Mantener</string>
++    <string name="victor_goals_gain_muscle">Ganar músculo</string>
++    <string name="victor_goals_performance">Rendimiento</string>
++    <string name="victor_goals_target_weight">Peso objetivo (kg)</string>
++    <string name="victor_goals_daily_kcal">Objetivo kcal/día</string>
++    <string name="victor_goals_note">Con tus palabras</string>
++    <string name="victor_goals_note_hint">p. ej. 75 kg para Navidad, fuerza 4 días por semana, no cenar después de las 22:00</string>
++    <string name="victor_food_target_left">Objetivo %1$s kcal · quedan %2$s</string>
++    <string name="victor_food_target_over">Objetivo %1$s kcal · te pasas %2$s</string>
++</resources>
+diff --git a/android/app/src/main/res/values/strings_victor_goals.xml b/android/app/src/main/res/values/strings_victor_goals.xml
+new file mode 100644
+index 00000000..e96ce791
+--- /dev/null
++++ b/android/app/src/main/res/values/strings_victor_goals.xml
+@@ -0,0 +1,16 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- victor:goals — fork-only strings, kept out of upstream's strings.xml so the patch never conflicts. -->
++<resources>
++    <string name="victor_goals_title">Your goals</string>
++    <string name="victor_goals_blurb">The coach plans its advice against these, and the Food card shows your daily target. Everything is optional.</string>
++    <string name="victor_goals_lose_fat">Lose fat</string>
++    <string name="victor_goals_maintain">Maintain</string>
++    <string name="victor_goals_gain_muscle">Gain muscle</string>
++    <string name="victor_goals_performance">Performance</string>
++    <string name="victor_goals_target_weight">Target weight (kg)</string>
++    <string name="victor_goals_daily_kcal">Daily kcal target</string>
++    <string name="victor_goals_note">In your own words</string>
++    <string name="victor_goals_note_hint">e.g. 75 kg by Christmas, strength 4 days a week, no dinners after 22:00</string>
++    <string name="victor_food_target_left">Target %1$s kcal · %2$s left</string>
++    <string name="victor_food_target_over">Target %1$s kcal · %2$s over</string>
++</resources>
+diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
+new file mode 100644
+index 00000000..478e3ebf
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
+@@ -0,0 +1,37 @@
++package com.noop.ai
++
++import com.noop.food.FoodEnergy
++import java.time.LocalTime
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Test
++
++/** victor:coach-extras — the TODAY line: steps, energy out, eaten and the balance so far. */
++class VictorCoachExtrasTest {
++    private val noon = LocalTime.of(14, 5)
++
++    @Test
++    fun fullDay() {
++        val energy = FoodEnergy.resolve(activeKcal = 600.0, phoneBasalKcal = 1050.0, scaleBmr = null, dayFraction = 0.6)
++        assertEquals(
++            "TODAY so far (2026-10-16, 14:05): steps 6240; energy burned 1650 kcal (resting 1050 + activity 600); " +
++                "eaten 1850 kcal (photo food log); surplus 200 kcal",
++            VictorCoachExtras.todayLine("2026-10-16", noon, 6240, energy, 1850.0),
++        )
++    }
++
++    @Test
++    fun noRestingEnergyMeansNoBalance() {
++        val energy = FoodEnergy.resolve(activeKcal = 500.0, phoneBasalKcal = null, scaleBmr = null, dayFraction = 0.6)
++        assertEquals(
++            "TODAY so far (2026-10-16, 14:05): activity energy 500 kcal (resting energy unknown); eaten 900 kcal (photo food log)",
++            VictorCoachExtras.todayLine("2026-10-16", noon, null, energy, 900.0),
++        )
++    }
++
++    @Test
++    fun nothingKnownMeansNoLine() {
++        val energy = FoodEnergy.resolve(null, null, null, 0.6)
++        assertNull(VictorCoachExtras.todayLine("2026-10-16", noon, null, energy, null))
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/goals/VictorGoalsTest.kt b/android/app/src/test/java/com/noop/goals/VictorGoalsTest.kt
+new file mode 100644
+index 00000000..ac389f32
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/goals/VictorGoalsTest.kt
+@@ -0,0 +1,42 @@
++package com.noop.goals
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/** victor:goals — the GOALS line the coach reads, and the lenient form parsing. */
++class VictorGoalsTest {
++
++    @Test
++    fun nothingSetMeansNoLine() {
++        assertNull(VictorGoals.coachLine(VictorGoals(), currentWeightKg = 80.0))
++    }
++
++    @Test
++    fun fullGoalsWithDistanceToTargetWeight() {
++        val g = VictorGoals(VictorGoals.Goal.LOSE_FAT, targetWeightKg = 75.0, dailyKcalTarget = 2200, note = "  fuerza 4 días ")
++        assertEquals(
++            "GOALS (set by the user; plan advice against them): main goal: lose body fat; " +
++                "target weight 75.0 kg (now 78.2 kg, 3.2 kg to lose); daily intake target 2200 kcal; " +
++                "in their own words: \"fuerza 4 días\"",
++            VictorGoals.coachLine(g, currentWeightKg = 78.2),
++        )
++    }
++
++    @Test
++    fun targetWeightWithoutAScaleReadingOmitsTheDistance() {
++        val line = VictorGoals.coachLine(VictorGoals(targetWeightKg = 82.0), currentWeightKg = null)!!
++        assertTrue(line.endsWith("target weight 82.0 kg"))
++    }
++
++    @Test
++    fun formParsingIsLenientAndBounded() {
++        assertEquals(75.5, VictorGoalsStore.parseWeight("75,5")!!, 0.0)
++        assertEquals(75.5, VictorGoalsStore.parseWeight(" 75.5 ")!!, 0.0)
++        assertNull(VictorGoalsStore.parseWeight("7"))
++        assertNull(VictorGoalsStore.parseWeight(""))
++        assertEquals(2200, VictorGoalsStore.parseKcal("2200"))
++        assertNull(VictorGoalsStore.parseKcal("50"))
++    }
++}
+-- 
+2.54.0
+

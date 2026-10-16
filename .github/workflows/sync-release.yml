@@ -150,7 +150,7 @@ jobs:
           cp "$APK" "noop-${OURS}.apk"
           gh release create "$OURS" "noop-${OURS}.apk" -R "$GITHUB_REPOSITORY" \
             --title "Build ${OURS#v}" \
-            --notes "Base upstream: ${TAG} + tema Porcelana + tensión arterial (Health Connect) + Tasker + coach Claude Opus 5.5 + báscula + comida por foto (pestaña, Hoy y balance). Tests en verde; firmado con la clave de la familia."
+            --notes "Base upstream: ${TAG} + tema Porcelana + tensión arterial (Health Connect) + Tasker + coach Claude Opus 5.5 + báscula + comida por foto (pestaña, Hoy y balance) + objetivos para el coach. Tests en verde; firmado con la clave de la familia."
 
   notify-failure:
     needs: [check, build-release]
