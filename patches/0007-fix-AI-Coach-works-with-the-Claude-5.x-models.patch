@@ -1,0 +1,196 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Fri, 16 Oct 2026 10:53:08 +0200
+Subject: [PATCH] fix: AI Coach works with the Claude 5.x models
+
+- Curated Anthropic list moves to the current generation (Fable 5.1, Opus 5.5,
+  Sonnet 5.5, Haiku 5.5, plus Fable 5 / Opus 5 / Sonnet 5 / Opus 4.8 /
+  Sonnet 4.6 / Haiku 4.5); every claude-3* id is retired and 404s. Default
+  becomes claude-sonnet-5-5 (same tier as before).
+- The live catalogue pull asks /v1/models for limit=1000 (it pages at 20).
+- Non-streamed replies read every `text` block instead of content[0]: Claude
+  5.x thinks by default, so the first block is `thinking` and the reply came
+  back as "empty". A `refusal` stop reason is now named as such.
+- max_tokens 4096 -> 16000 on both Anthropic calls, since thinking counts
+  toward the cap.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../app/src/main/java/com/noop/ai/AiCoach.kt  | 39 ++++++++++---
+ .../src/main/java/com/noop/ai/AiProvider.kt   | 20 ++++---
+ .../com/noop/ai/AnthropicReplyTextTest.kt     | 55 +++++++++++++++++++
+ 3 files changed, 100 insertions(+), 14 deletions(-)
+ create mode 100644 android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/ai/AiCoach.kt b/android/app/src/main/java/com/noop/ai/AiCoach.kt
+index 8a4667f1..6f0b80fb 100644
+--- a/android/app/src/main/java/com/noop/ai/AiCoach.kt
++++ b/android/app/src/main/java/com/noop/ai/AiCoach.kt
+@@ -848,7 +848,9 @@ class AiCoach(
+ 
+         val body = JSONObject()
+             .put("model", model)
+-            .put("max_tokens", 4096)   // #1074: 900 truncated detailed replies; a cap, not a target
++            // #1074: 900 truncated detailed replies; a cap, not a target. victor:claude-models — 16000:
++            // Claude 5.x models think by default and the thinking counts toward this cap.
++            .put("max_tokens", ANTHROPIC_MAX_TOKENS)
+             .put("system", systemPrompt)
+             .put("messages", messages)
+             .toString()
+@@ -865,12 +867,9 @@ class AiCoach(
+         if (code !in 200..299) throw httpError(provider, code, text)
+ 
+         val json = parse(text)
+-        val content = json.optJSONArray("content")
+-            ?.optJSONObject(0)
+-            ?.optString("text")
+-            ?.trim()
++        val content = anthropicReplyText(json)
+ 
+-        if (content.isNullOrEmpty()) throw Exception(emptyReplyMessage(text))
++        if (content.isEmpty()) throw Exception(anthropicEmptyReplyMessage(json, text))
+         return content
+     }
+ 
+@@ -985,7 +984,7 @@ class AiCoach(
+ 
+         val body = JSONObject()
+             .put("model", model)
+-            .put("max_tokens", 4096)
++            .put("max_tokens", ANTHROPIC_MAX_TOKENS)
+             .put("system", systemPrompt)
+             .put("messages", messages)
+             .put("stream", true)
+@@ -1231,6 +1230,32 @@ class AiCoach(
+          * Pure + `internal` so it is unit-testable without a network. Same `{"error":{"message":…}}`
+          * shape [extractApiErrorMessage] reads.
+          */
++        /** victor:claude-models — reply cap for both Anthropic calls (see [callAnthropic]). */
++        internal const val ANTHROPIC_MAX_TOKENS = 16000
++
++        /**
++         * victor:claude-models — the reply text of a Messages API response: every `text` block, in
++         * order. Claude 5.x models think by default, so `content[0]` is a `thinking` block (no `text`
++         * field) and the old "first block" read came back empty on every one of them.
++         */
++        internal fun anthropicReplyText(json: JSONObject): String {
++            val blocks = json.optJSONArray("content") ?: return ""
++            val sb = StringBuilder()
++            for (i in 0 until blocks.length()) {
++                val block = blocks.optJSONObject(i) ?: continue
++                if (block.optString("type") == "text") sb.append(block.optString("text"))
++            }
++            return sb.toString().trim()
++        }
++
++        /** victor:claude-models — name a safety refusal instead of reporting an "empty reply". */
++        internal fun anthropicEmptyReplyMessage(json: JSONObject, body: String): String =
++            if (json.optString("stop_reason") == "refusal") {
++                "Claude declined to answer this request (safety filter). Rephrase it or pick another model."
++            } else {
++                emptyReplyMessage(body)
++            }
++
+         internal fun emptyReplyMessage(body: String): String {
+             val providerError = runCatching {
+                 JSONObject(body).optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() }
+diff --git a/android/app/src/main/java/com/noop/ai/AiProvider.kt b/android/app/src/main/java/com/noop/ai/AiProvider.kt
+index 9158a97d..6e37baa2 100644
+--- a/android/app/src/main/java/com/noop/ai/AiProvider.kt
++++ b/android/app/src/main/java/com/noop/ai/AiProvider.kt
+@@ -51,18 +51,24 @@ enum class AiProvider(
+     ),
+     ANTHROPIC(
+         displayName = "Anthropic",
+-        defaultModel = "claude-sonnet-4-6",
++        // victor:claude-models — current generation first (2026-10); every claude-3* id that used to be
++        // listed is retired (404). Anything newer arrives through the live /v1/models pull below.
++        defaultModel = "claude-sonnet-5-5",
+         models = listOf(
++            "claude-fable-5-1",
++            "claude-opus-5-5",
++            "claude-sonnet-5-5",
++            "claude-haiku-5-5",
++            "claude-fable-5",
++            "claude-opus-5",
++            "claude-sonnet-5",
+             "claude-opus-4-8",
+             "claude-sonnet-4-6",
+-            "claude-haiku-4-5-20251001",
+-            "claude-3-7-sonnet-latest",
+-            "claude-3-5-sonnet-latest",
+-            "claude-3-5-haiku-latest",
+-            "claude-3-opus-latest",
++            "claude-haiku-4-5",
+         ),
+         endpoint = "https://api.anthropic.com/v1/messages",
+-        modelsEndpoint = "https://api.anthropic.com/v1/models",
++        // victor:claude-models — the endpoint pages at 20 by default; ask for the whole catalogue.
++        modelsEndpoint = "https://api.anthropic.com/v1/models?limit=1000",
+     ),
+ 
+     /**
+diff --git a/android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt b/android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt
+new file mode 100644
+index 00000000..9bde863d
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt
+@@ -0,0 +1,55 @@
++package com.noop.ai
++
++import org.json.JSONObject
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/** victor:claude-models — reading Messages API replies from Claude 5.x (thinking on by default). */
++class AnthropicReplyTextTest {
++
++    @Test
++    fun skipsTheThinkingBlockThatClaude5PutsFirst() {
++        val reply = JSONObject(
++            """{"content":[{"type":"thinking","thinking":"","signature":"abc"},
++               {"type":"text","text":"  Duerme más hoy.  "}],"stop_reason":"end_turn"}""",
++        )
++        assertEquals("Duerme más hoy.", AiCoach.anthropicReplyText(reply))
++    }
++
++    @Test
++    fun joinsEveryTextBlockInOrder() {
++        val reply = JSONObject(
++            """{"content":[{"type":"text","text":"Uno. "},{"type":"thinking","thinking":""},
++               {"type":"text","text":"Dos."}]}""",
++        )
++        assertEquals("Uno. Dos.", AiCoach.anthropicReplyText(reply))
++    }
++
++    @Test
++    fun olderModelsWithASingleTextBlockStillWork() {
++        val reply = JSONObject("""{"content":[{"type":"text","text":"Hola"}]}""")
++        assertEquals("Hola", AiCoach.anthropicReplyText(reply))
++    }
++
++    @Test
++    fun refusalIsNamedInsteadOfEmptyReply() {
++        val body = """{"content":[],"stop_reason":"refusal"}"""
++        val msg = AiCoach.anthropicEmptyReplyMessage(JSONObject(body), body)
++        assertEquals("", AiCoach.anthropicReplyText(JSONObject(body)))
++        assertTrue(msg.contains("declined"))
++        val other = """{"content":[],"stop_reason":"end_turn"}"""
++        assertFalse(AiCoach.anthropicEmptyReplyMessage(JSONObject(other), other).contains("declined"))
++    }
++
++    @Test
++    fun curatedListHasTheCurrentGenerationAndNoRetiredModels() {
++        val models = AiProvider.ANTHROPIC.models
++        assertTrue("claude-opus-5-5" in models)
++        assertTrue("claude-fable-5-1" in models)
++        assertTrue(AiProvider.ANTHROPIC.defaultModel in models)
++        assertFalse(models.any { it.startsWith("claude-3") })
++        assertTrue(AiProvider.ANTHROPIC.modelsEndpoint.endsWith("?limit=1000"))
++    }
++}
+-- 
+2.54.0
+
