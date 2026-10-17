@@ -1,0 +1,296 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Sat, 17 Oct 2026 19:48:51 +0200
+Subject: [PATCH] feat(food): history ranges up to a year in weekly averages,
+ and a switch for the burn line
+
+- Ranges Week / Month / 3 / 6 months / 1 year; past a month the charts plot
+  one point per week (locale's first weekday) with the averages of its
+  logged days, today left out.
+- Tapping "Burned" in the calories legend hides or shows its line.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../main/java/com/noop/food/FoodHistory.kt    | 96 +++++++++++++++----
+ .../res/values-es/strings_victor_food.xml     |  9 +-
+ .../main/res/values/strings_victor_food.xml   |  9 +-
+ .../java/com/noop/food/FoodHistoryTest.kt     | 24 +++++
+ 4 files changed, 111 insertions(+), 27 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/food/FoodHistory.kt b/android/app/src/main/java/com/noop/food/FoodHistory.kt
+index 56b4587f..4579f5ce 100644
+--- a/android/app/src/main/java/com/noop/food/FoodHistory.kt
++++ b/android/app/src/main/java/com/noop/food/FoodHistory.kt
+@@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.graphics.PathEffect
+ import androidx.compose.ui.graphics.drawscope.DrawScope
+ import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
+ import androidx.compose.ui.platform.LocalConfiguration
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.unit.dp
+@@ -45,6 +46,8 @@ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.withContext
+ import java.time.LocalDate
+ import java.time.format.DateTimeFormatter
++import java.time.temporal.TemporalAdjusters
++import java.time.temporal.WeekFields
+ import java.util.Locale
+ import kotlin.math.max
+ 
+@@ -57,7 +60,43 @@ internal data class HistorySummary(val loggedDays: Int, val avgKcal: Double?, va
+ /** victor:food — the Food tab's history: how intake (and its balance) moved, and where it comes from. */
+ internal object FoodHistory {
+ 
+-    enum class Range(val days: Int) { WEEK(7), MONTH(30), QUARTER(90) }
++    /** How far back the history goes; past a month the charts plot weekly averages ([weekly]). */
++    enum class Range(val days: Int, val weekly: Boolean) {
++        WEEK(7, false),
++        MONTH(30, false),
++        QUARTER(91, true),
++        HALF(182, true),
++        YEAR(364, true),
++    }
++
++    /**
++     * Pure. What the charts plot: the days themselves, or for a long [Range.weekly] range one point per
++     * week (starting on the locale's first weekday) holding the averages of its logged days. Today stays
++     * out of a weekly average: half a day would drag the current week down.
++     */
++    fun points(days: List<HistoryDay>, weekly: Boolean, today: LocalDate, locale: Locale): List<HistoryDay> {
++        if (!weekly) return days
++        val first = WeekFields.of(locale).firstDayOfWeek
++        return days.filter { it.day != today }
++            .groupBy { it.day.with(TemporalAdjusters.previousOrSame(first)) }
++            .toSortedMap()
++            .map { (start, week) ->
++                val eaten = week.mapNotNull { it.eaten }
++                val burned = week.mapNotNull { it.burnedKcal }
++                HistoryDay(
++                    start,
++                    eaten.takeIf { it.isNotEmpty() }?.let { list ->
++                        FoodTotals(
++                            list.map { it.kcal }.average(),
++                            list.map { it.proteinG }.average(),
++                            list.map { it.carbsG }.average(),
++                            list.map { it.fatG }.average(),
++                        ).rounded()
++                    },
++                    burned.takeIf { it.isNotEmpty() }?.average(),
++                )
++            }
++    }
+ 
+     /** Pure. The [range] days ending today, oldest first; burn only where it means something (see below). */
+     fun days(entries: List<FoodEntry>, energy: Map<String, FoodEnergy>, today: LocalDate, range: Range): List<HistoryDay> {
+@@ -106,6 +145,8 @@ internal fun FoodHistorySection(vm: AppViewModel, entries: List<FoodEntry>, kcal
+     val ctx = LocalContext.current
+     val today = FoodDays.today().let { LocalDate.parse(it) }
+     var range by rememberSaveable { mutableStateOf(FoodHistory.Range.MONTH) }
++    var showBurned by rememberSaveable { mutableStateOf(true) }
++    val locale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
+     val from = today.minusDays(range.days.toLong() - 1)
+     val energy by produceState(emptyMap<String, FoodEnergy>(), range, entries) {
+         value = withContext(Dispatchers.IO) {
+@@ -114,6 +155,7 @@ internal fun FoodHistorySection(vm: AppViewModel, entries: List<FoodEntry>, kcal
+     }
+     val days = FoodHistory.days(entries, energy, today, range)
+     val summary = FoodHistory.summary(days, today)
++    val points = FoodHistory.points(days, range.weekly, today, locale)
+ 
+     Column(verticalArrangement = Arrangement.spacedBy(Metrics.space16)) {
+         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+@@ -137,26 +179,28 @@ internal fun FoodHistorySection(vm: AppViewModel, entries: List<FoodEntry>, kcal
+             Text(uiString(R.string.victor_food_history_empty), style = NoopType.subhead, color = Palette.textSecondary)
+             return@Column
+         }
+-        ChartCard(uiString(R.string.victor_food_history_kcal_title)) {
+-            KcalChart(days, kcalTarget)
++        val perWeek = if (range.weekly) " · " + uiString(R.string.victor_food_history_per_week) else ""
++        ChartCard(uiString(R.string.victor_food_history_kcal_title) + perWeek) {
++            KcalChart(points, kcalTarget, showBurned)
+             Legend(
+                 listOf(
+-                    Palette.accent to uiString(R.string.victor_food_history_eaten),
+-                    Palette.textSecondary to uiString(R.string.victor_food_history_burned),
+-                ) + listOfNotNull(kcalTarget?.let { Palette.chargeColor to uiString(R.string.victor_food_history_goal) }),
++                    LegendItem(Palette.accent, uiString(R.string.victor_food_history_eaten)),
++                    // Tapping "Burned" hides or shows its line.
++                    LegendItem(Palette.textSecondary, uiString(R.string.victor_food_history_burned), on = showBurned) { showBurned = !showBurned },
++                ) + listOfNotNull(kcalTarget?.let { LegendItem(Palette.chargeColor, uiString(R.string.victor_food_history_goal)) }),
+             )
+-            AxisDates(days)
++            AxisDates(points)
+         }
+-        ChartCard(uiString(R.string.victor_food_history_macros_title)) {
+-            MacroChart(days)
++        ChartCard(uiString(R.string.victor_food_history_macros_title) + perWeek) {
++            MacroChart(points)
+             Legend(
+                 listOf(
+-                    Palette.metricCyan to uiString(R.string.victor_food_protein),
+-                    Palette.metricAmber to uiString(R.string.victor_food_carbs),
+-                    Palette.metricRose to uiString(R.string.victor_food_fat),
++                    LegendItem(Palette.metricCyan, uiString(R.string.victor_food_protein)),
++                    LegendItem(Palette.metricAmber, uiString(R.string.victor_food_carbs)),
++                    LegendItem(Palette.metricRose, uiString(R.string.victor_food_fat)),
+                 ),
+             )
+-            AxisDates(days)
++            AxisDates(points)
+         }
+         val meals = FoodHistory.mealAverages(entries, from, today)
+         if (meals.isNotEmpty()) {
+@@ -169,6 +213,8 @@ private fun rangeLabel(r: FoodHistory.Range): Int = when (r) {
+     FoodHistory.Range.WEEK -> R.string.victor_food_history_week
+     FoodHistory.Range.MONTH -> R.string.victor_food_history_month
+     FoodHistory.Range.QUARTER -> R.string.victor_food_history_quarter
++    FoodHistory.Range.HALF -> R.string.victor_food_history_half
++    FoodHistory.Range.YEAR -> R.string.victor_food_history_year
+ }
+ 
+ @Composable
+@@ -191,9 +237,9 @@ private fun ChartCard(title: String, content: @Composable () -> Unit) {
+ 
+ private val ChartHeight = 170.dp
+ 
+-/** Bars: eaten per day; dots + line: burned; dashed line: the daily goal. */
++/** Bars: eaten per day (or week); dots + line: burned, when [showBurned]; dashed line: the daily goal. */
+ @Composable
+-private fun KcalChart(days: List<HistoryDay>, target: Int?) {
++private fun KcalChart(days: List<HistoryDay>, target: Int?, showBurned: Boolean) {
+     val eatenColor = Palette.accent
+     val burnColor = Palette.textSecondary
+     val goalColor = Palette.chargeColor
+@@ -212,7 +258,7 @@ private fun KcalChart(days: List<HistoryDay>, target: Int?) {
+             drawRoundRect(eatenColor, Offset(i * slot + (slot - barW) / 2, size.height - h), Size(barW, h), CornerRadius(barW / 3))
+         }
+         var prev: Offset? = null
+-        days.forEachIndexed { i, d ->
++        if (showBurned) days.forEachIndexed { i, d ->
+             val b = d.burnedKcal ?: run { prev = null; return@forEachIndexed }
+             val p = Offset(i * slot + slot / 2, size.height - (b / top * size.height).toFloat())
+             prev?.let { drawLine(burnColor, it, p, strokeWidth = 2.dp.toPx()) }
+@@ -279,14 +325,22 @@ private fun MealBars(meals: List<Pair<MealType, Double>>) {
+     }
+ }
+ 
++/** A legend entry; with [onToggle] it switches its series, drawn faded while [on] is false. */
++private class LegendItem(val color: Color, val label: String, val on: Boolean = true, val onToggle: (() -> Unit)? = null)
++
+ @OptIn(ExperimentalLayoutApi::class)
+ @Composable
+-private fun Legend(items: List<Pair<Color, String>>) {
++private fun Legend(items: List<LegendItem>) {
+     FlowRow(horizontalArrangement = Arrangement.spacedBy(Metrics.space12)) {
+-        items.forEach { (c, label) ->
+-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space4)) {
+-                Box(Modifier.size(10.dp).clip(RoundedCornerShape(50)).background(c))
+-                Text(label, style = NoopType.caption, color = Palette.textSecondary)
++        items.forEach { item ->
++            val alpha = if (item.on) 1f else 0.35f
++            Row(
++                verticalAlignment = Alignment.CenterVertically,
++                horizontalArrangement = Arrangement.spacedBy(Metrics.space4),
++                modifier = item.onToggle?.let { Modifier.clip(RoundedCornerShape(50)).clickable(onClick = it) } ?: Modifier,
++            ) {
++                Box(Modifier.size(10.dp).clip(RoundedCornerShape(50)).background(item.color.copy(alpha = item.color.alpha * alpha)))
++                Text(item.label, style = NoopType.caption, color = Palette.textSecondary.copy(alpha = Palette.textSecondary.alpha * alpha))
+             }
+         }
+     }
+diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
+index 5337b5c2..4a7cef24 100644
+--- a/android/app/src/main/res/values-es/strings_victor_food.xml
++++ b/android/app/src/main/res/values-es/strings_victor_food.xml
+@@ -108,9 +108,9 @@
+     <string name="victor_food_adaptive_building">Se calcula con 3 semanas que tengan 14 días de comidas y 6 pesajes. Llevas %1$d/14 días de comidas y %2$d/6 pesajes.</string>
+ 
+     <string name="victor_food_history">Historial</string>
+-    <string name="victor_food_history_week">7 días</string>
+-    <string name="victor_food_history_month">30 días</string>
+-    <string name="victor_food_history_quarter">90 días</string>
++    <string name="victor_food_history_week">Semana</string>
++    <string name="victor_food_history_month">Mes</string>
++    <string name="victor_food_history_quarter">3 meses</string>
+     <string name="victor_food_history_avg">Media al día</string>
+     <string name="victor_food_history_balance">Balance medio</string>
+     <string name="victor_food_history_empty">Aún no hay nada apuntado en estos días.</string>
+@@ -120,4 +120,7 @@
+     <string name="victor_food_history_goal">Objetivo</string>
+     <string name="victor_food_history_macros_title">Macros (g)</string>
+     <string name="victor_food_history_meals_title">Media por comida (kcal)</string>
++    <string name="victor_food_history_half">6 meses</string>
++    <string name="victor_food_history_year">1 año</string>
++    <string name="victor_food_history_per_week">media por semana</string>
+ </resources>
+diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
+index 441607c9..fc039a2f 100644
+--- a/android/app/src/main/res/values/strings_victor_food.xml
++++ b/android/app/src/main/res/values/strings_victor_food.xml
+@@ -108,9 +108,9 @@
+     <string name="victor_food_adaptive_building">Needs 3 weeks with 14 days of meals and 6 weigh-ins. So far: %1$d/14 days of meals, %2$d/6 weigh-ins.</string>
+ 
+     <string name="victor_food_history">History</string>
+-    <string name="victor_food_history_week">7 days</string>
+-    <string name="victor_food_history_month">30 days</string>
+-    <string name="victor_food_history_quarter">90 days</string>
++    <string name="victor_food_history_week">Week</string>
++    <string name="victor_food_history_month">Month</string>
++    <string name="victor_food_history_quarter">3 months</string>
+     <string name="victor_food_history_avg">Daily average</string>
+     <string name="victor_food_history_balance">Average balance</string>
+     <string name="victor_food_history_empty">Nothing logged in these days yet.</string>
+@@ -120,4 +120,7 @@
+     <string name="victor_food_history_goal">Goal</string>
+     <string name="victor_food_history_macros_title">Macros (g)</string>
+     <string name="victor_food_history_meals_title">Average by meal (kcal)</string>
++    <string name="victor_food_history_half">6 months</string>
++    <string name="victor_food_history_year">1 year</string>
++    <string name="victor_food_history_per_week">weekly average</string>
+ </resources>
+diff --git a/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt b/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt
+index e2ef2887..c09c8612 100644
+--- a/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt
++++ b/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt
+@@ -2,6 +2,7 @@ package com.noop.food
+ 
+ import org.junit.Assert.assertEquals
+ import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
+ import org.junit.Test
+ import java.time.LocalDate
+ 
+@@ -34,6 +35,29 @@ class FoodHistoryTest {
+         assertEquals(1800.0, FoodHistory.days(listOf(meal(today.minusDays(1), 900.0)), restOnly, today, FoodHistory.Range.WEEK)[5].burnedKcal!!, 0.0)
+     }
+ 
++    @Test
++    fun longRangesPlotMondayWeeksOfLoggedDayAveragesWithoutToday() {
++        val es = java.util.Locale("es", "ES")
++        // Saturday 17 Oct 2026. Week of Mon 5 Oct: two logged days; week of Mon 12: one day plus today.
++        val entries = listOf(
++            meal(LocalDate.of(2026, 10, 5), 2000.0, p = 100.0),
++            meal(LocalDate.of(2026, 10, 7), 2400.0, p = 140.0),
++            meal(LocalDate.of(2026, 10, 13), 1800.0),
++            meal(today, 300.0),
++        )
++        val energy = mapOf(burned(LocalDate.of(2026, 10, 5), 2500.0), burned(LocalDate.of(2026, 10, 6), 2700.0))
++        val days = FoodHistory.days(entries, energy, today, FoodHistory.Range.QUARTER)
++        val weeks = FoodHistory.points(days, weekly = true, today = today, locale = es)
++        assertEquals(LocalDate.of(2026, 10, 12), weeks.last().day)
++        assertEquals(1800.0, weeks.last().eaten!!.kcal, 0.0) // today's 300 left out
++        val w5 = weeks.first { it.day == LocalDate.of(2026, 10, 5) }
++        assertEquals(2200.0, w5.eaten!!.kcal, 0.0)
++        assertEquals(120.0, w5.eaten!!.proteinG, 0.0)
++        assertEquals(2600.0, w5.burnedKcal!!, 0.0)
++        assertTrue(weeks.all { it.day.dayOfWeek == java.time.DayOfWeek.MONDAY })
++        assertEquals(days, FoodHistory.points(days, weekly = false, today = today, locale = es))
++    }
++
+     @Test
+     fun averagesLeaveTodayOut() {
+         val entries = listOf(
+-- 
+2.54.0
+
