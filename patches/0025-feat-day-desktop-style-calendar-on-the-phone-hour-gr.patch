@@ -1,0 +1,669 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Sat, 17 Oct 2026 20:14:02 +0200
+Subject: [PATCH] =?UTF-8?q?feat(day):=20desktop-style=20calendar=20on=20th?=
+ =?UTF-8?q?e=20phone=20=E2=80=94=20hour=20grid=20for=20Day/Week,=20events?=
+ =?UTF-8?q?=20inside=20Month?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Day and Week show the hours side by side (scrolls inside the card, opens an
+  hour before now): each timed event a block in its calendar's colour,
+  overlaps split into lanes (DayAgendaSource.layoutDay), a line at the
+  current time; all-day events and the day's Google Tasks (circle, like a
+  reminder) sit in a strip above.
+- Week has a header of day names and numbers (today circled); Month lists
+  the first events and tasks inside each day with "+N"; tapping a day opens
+  it in the Day view.
+- Events carry their DISPLAY_COLOR from the calendar store.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/main/java/com/noop/day/DayAgenda.kt   |  49 +++-
+ .../java/com/noop/day/DayCalendarViews.kt     | 250 +++++++++++++++---
+ .../java/com/noop/day/TodayMyDaySection.kt    | 145 +++-------
+ .../test/java/com/noop/day/DayCalendarTest.kt |  27 ++
+ 4 files changed, 321 insertions(+), 150 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/day/DayAgenda.kt b/android/app/src/main/java/com/noop/day/DayAgenda.kt
+index 7f5114c2..6d824e61 100644
+--- a/android/app/src/main/java/com/noop/day/DayAgenda.kt
++++ b/android/app/src/main/java/com/noop/day/DayAgenda.kt
+@@ -12,8 +12,11 @@ import java.time.LocalDate
+ import java.time.ZoneId
+ import java.time.ZoneOffset
+ 
+-/** victor:day — one calendar entry of today. [begin]/[end] are epoch ms; all-day ones are UTC midnights. */
+-data class AgendaEvent(val title: String, val begin: Long, val end: Long, val allDay: Boolean)
++/**
++ * victor:day — one calendar entry. [begin]/[end] are epoch ms; all-day ones are UTC midnights. [color] is
++ * the event's display colour (its calendar's, ARGB) as the calendar app shows it.
++ */
++data class AgendaEvent(val title: String, val begin: Long, val end: Long, val allDay: Boolean, val color: Int? = null)
+ 
+ /**
+  * victor:day — today's agenda from the phone's own calendar store (CalendarContract): every calendar the
+@@ -46,6 +49,7 @@ object DayAgendaSource {
+                 CalendarContract.Instances.BEGIN,
+                 CalendarContract.Instances.END,
+                 CalendarContract.Instances.ALL_DAY,
++                CalendarContract.Instances.DISPLAY_COLOR,
+             )
+             val selection = "${CalendarContract.Instances.VISIBLE} = 1 AND " +
+                 "${CalendarContract.Instances.SELF_ATTENDEE_STATUS} != ${CalendarContract.Attendees.ATTENDEE_STATUS_DECLINED}"
+@@ -58,6 +62,7 @@ object DayAgendaSource {
+                             begin = c.getLong(1),
+                             end = c.getLong(2),
+                             allDay = c.getInt(3) == 1,
++                            color = if (c.isNull(4)) null else c.getInt(4),
+                         )
+                     }
+                 }
+@@ -93,6 +98,46 @@ object DayAgendaSource {
+         return e.begin < end && (e.end > start || e.begin >= start)
+     }
+ 
++    /** One timed event placed in a day's column: minutes from midnight, and its side-by-side lane. */
++    internal data class Placed(val event: AgendaEvent, val startMin: Int, val endMin: Int, val lane: Int, val lanes: Int)
++
++    /**
++     * Pure. The timed events of [day] laid out for a time grid: clipped to the day, at least
++     * [minMinutes] tall so a short one stays tappable, and overlapping ones side by side (each cluster of
++     * overlaps shares its width equally).
++     */
++    internal fun layoutDay(events: List<AgendaEvent>, day: LocalDate, zone: ZoneId, minMinutes: Int = 20): List<Placed> {
++        val dayStart = day.atStartOfDay(zone).toInstant().toEpochMilli()
++        val spans = events.filter { !it.allDay && isOnDay(it, day, zone) }
++            .map { e ->
++                val s = ((maxOf(e.begin, dayStart) - dayStart) / 60_000L).toInt().coerceIn(0, 24 * 60)
++                val end = ((minOf(e.end, dayStart + 86_400_000L) - dayStart) / 60_000L).toInt().coerceIn(0, 24 * 60)
++                Triple(e, s, maxOf(end, minOf(s + minMinutes, 24 * 60)))
++            }
++            .sortedWith(compareBy<Triple<AgendaEvent, Int, Int>> { it.second }.thenByDescending { it.third })
++        val out = ArrayList<Placed>(spans.size)
++        var cluster = ArrayList<Pair<Triple<AgendaEvent, Int, Int>, Int>>()
++        var clusterEnd = -1
++        fun flush() {
++            val lanes = (cluster.maxOfOrNull { it.second } ?: -1) + 1
++            cluster.forEach { (t, lane) -> out += Placed(t.first, t.second, t.third, lane, lanes) }
++            cluster = ArrayList()
++        }
++        val laneEnds = ArrayList<Int>()
++        for (t in spans) {
++            if (t.second >= clusterEnd) {
++                flush()
++                laneEnds.clear()
++            }
++            val lane = laneEnds.indexOfFirst { it <= t.second }.takeIf { it >= 0 } ?: laneEnds.size.also { laneEnds += 0 }
++            laneEnds[lane] = t.third
++            cluster += t to lane
++            clusterEnd = maxOf(clusterEnd, t.third)
++        }
++        flush()
++        return out
++    }
++
+     /** Pure. All-day entries first, then by start time; untitled ones keep their place. */
+     internal fun inDayOrder(events: List<AgendaEvent>): List<AgendaEvent> =
+         events.sortedWith(compareBy<AgendaEvent> { !it.allDay }.thenBy { it.begin }.thenBy { it.title })
+diff --git a/android/app/src/main/java/com/noop/day/DayCalendarViews.kt b/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
+index 852e20da..39f3b1e9 100644
+--- a/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
++++ b/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
+@@ -1,7 +1,30 @@
+ package com.noop.day
+ 
++import android.text.format.DateFormat
++import androidx.compose.foundation.Canvas
+ import androidx.compose.foundation.background
++import androidx.compose.foundation.border
+ import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.BoxWithConstraints
++import androidx.compose.foundation.layout.IntrinsicSize
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxHeight
++import androidx.compose.foundation.layout.heightIn
++import androidx.compose.foundation.layout.offset
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.rememberScrollState
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.foundation.verticalScroll
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.remember
++import androidx.compose.ui.draw.drawBehind
++import androidx.compose.ui.geometry.Offset
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.platform.LocalDensity
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.Dp
++import androidx.compose.ui.unit.sp
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+@@ -31,6 +54,8 @@ import com.noop.ui.NoopType
+ import com.noop.ui.Palette
+ import com.noop.ui.uiString
+ import java.time.LocalDate
++import java.time.LocalTime
++import java.time.ZoneId
+ import java.time.YearMonth
+ import java.time.format.TextStyle
+ import java.util.Locale
+@@ -56,38 +81,207 @@ internal fun PeriodBar(label: String, atToday: Boolean, onPrevious: () -> Unit,
+     }
+ }
+ 
++/** victor:day — tiny text for chips inside week columns and month cells. */
++private val ChipText = NoopType.footnote.copy(fontSize = 10.sp, lineHeight = 12.sp)
++
++/** The event's own calendar colour, or the accent when the calendar has none. */
++@Composable
++internal fun eventColor(e: AgendaEvent): Color = e.color?.let { Color(it) } ?: Palette.accent
++
++/** A one-line chip: a calendar event (its colour) or a task (an empty circle, like a reminder). */
++@Composable
++internal fun CalendarChip(text: String, color: Color?, task: Boolean, tiny: Boolean, modifier: Modifier = Modifier) {
++    Row(
++        verticalAlignment = Alignment.CenterVertically,
++        horizontalArrangement = Arrangement.spacedBy(3.dp),
++        modifier = modifier
++            .fillMaxWidth()
++            .clip(RoundedCornerShape(4.dp))
++            .background(if (task) Palette.surfaceInset else (color ?: Palette.accent).copy(alpha = 0.28f))
++            .padding(horizontal = 3.dp, vertical = if (tiny) 1.dp else 3.dp),
++    ) {
++        if (task) {
++            Box(Modifier.size(if (tiny) 7.dp else 10.dp).border(1.5.dp, Palette.statusWarning, CircleShape))
++        }
++        Text(
++            text,
++            style = if (tiny) ChipText else NoopType.subhead,
++            color = Palette.textPrimary,
++            maxLines = 1,
++            overflow = if (tiny) TextOverflow.Clip else TextOverflow.Ellipsis,
++        )
++    }
++}
++
++/** The all-day row of a day: all-day events, then the day's tasks. [limit] keeps a week column short. */
++@Composable
++internal fun AllDayChips(events: List<AgendaEvent>, tasks: List<DayTask>, tiny: Boolean, limit: Int, today: LocalDate) {
++    val items = events.filter { it.allDay }.map { Triple(it.title, eventColor(it), false) } +
++        tasks.map { t -> Triple(t.title, null, true) }
++    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
++        items.take(limit).forEach { (title, color, task) -> CalendarChip(title, color, task, tiny) }
++        if (items.size > limit) Text("+${items.size - limit}", style = ChipText, color = Palette.textSecondary)
++    }
++}
++
++private val HourHeight = 44.dp
++internal val HourLabelWidth = 38.dp
++
+ /**
+- * victor:day — the month at a glance: a dot under a day with calendar events (accent) and one for tasks
+- * due (warning). Tapping a day shows its list underneath.
++ * victor:day — the hours of one or several days side by side, like a desktop calendar: each timed event
++ * a block in its calendar's colour, overlaps split side by side, and a line at the current time in
++ * today's column. Scrolls inside [height], opening an hour before now.
++ */
++@Composable
++internal fun TimeGrid(days: List<LocalDate>, events: Map<LocalDate, List<AgendaEvent>>, today: LocalDate, height: Dp, onDayClick: (LocalDate) -> Unit) {
++    val ctx = LocalContext.current
++    val density = LocalDensity.current
++    val scroll = rememberScrollState()
++    val zone = ZoneId.systemDefault()
++    val is24 = remember { DateFormat.is24HourFormat(ctx) }
++    LaunchedEffect(days.first()) {
++        val h = (LocalTime.now().hour - 1).coerceIn(0, 23)
++        scroll.scrollTo(with(density) { (HourHeight * h).roundToPx() })
++    }
++    val lineColor = Palette.hairline
++    Box(Modifier.fillMaxWidth().height(height).verticalScroll(scroll)) {
++        Row(Modifier.fillMaxWidth().height(HourHeight * 24)) {
++            Column(Modifier.width(HourLabelWidth)) {
++                for (h in 0 until 24) {
++                    Box(Modifier.height(HourHeight)) {
++                        Text(
++                            if (is24) "%02d:00".format(h) else LocalTime.of(h, 0).format(java.time.format.DateTimeFormatter.ofPattern("h a")),
++                            style = NoopType.footnote,
++                            color = Palette.textTertiary,
++                        )
++                    }
++                }
++            }
++            days.forEach { day ->
++                val placed = remember(events[day], day) { DayAgendaSource.layoutDay(events[day].orEmpty(), day, zone) }
++                BoxWithConstraints(Modifier.weight(1f).fillMaxHeight().clickable { onDayClick(day) }) {
++                    val colW = maxWidth
++                    Canvas(Modifier.matchParentSize()) {
++                        val hh = HourHeight.toPx()
++                        for (h in 0..24) drawLine(lineColor, Offset(0f, h * hh), Offset(size.width, h * hh), strokeWidth = 1f)
++                        drawLine(lineColor, Offset(0f, 0f), Offset(0f, size.height), strokeWidth = 1f)
++                    }
++                    placed.forEach { p ->
++                        val w = colW / p.lanes
++                        val top = HourHeight * (p.startMin / 60f)
++                        val h = HourHeight * ((p.endMin - p.startMin) / 60f)
++                        val c = eventColor(p.event)
++                        Box(
++                            Modifier
++                                .offset(x = w * p.lane, y = top)
++                                .width(w)
++                                .height(h)
++                                .padding(1.dp)
++                                .clip(RoundedCornerShape(4.dp))
++                                .background(c.copy(alpha = 0.30f))
++                                .border(width = 0.dp, color = c, shape = RoundedCornerShape(4.dp)),
++                        ) {
++                            Box(Modifier.width(3.dp).fillMaxHeight().background(c))
++                            Text(
++                                p.event.title.ifBlank { "—" },
++                                style = if (days.size > 1) ChipText else NoopType.subhead,
++                                color = Palette.textPrimary,
++                                overflow = TextOverflow.Clip,
++                                modifier = Modifier.padding(start = 5.dp, top = 1.dp, end = 2.dp),
++                            )
++                        }
++                    }
++                    if (day == today) {
++                        val now = LocalTime.now()
++                        Box(
++                            Modifier
++                                .offset(y = HourHeight * ((now.hour * 60 + now.minute) / 60f))
++                                .fillMaxWidth()
++                                .height(2.dp)
++                                .background(Palette.statusCritical),
++                        )
++                    }
++                }
++            }
++        }
++    }
++}
++
++/** victor:day — the week's day names and numbers over its columns; today circled, tap to open the day. */
++@Composable
++internal fun WeekHeader(days: List<LocalDate>, today: LocalDate, locale: Locale, onDayClick: (LocalDate) -> Unit) {
++    Row(Modifier.fillMaxWidth()) {
++        Spacer(Modifier.width(HourLabelWidth))
++        days.forEach { d ->
++            Column(
++                horizontalAlignment = Alignment.CenterHorizontally,
++                modifier = Modifier.weight(1f).clickable { onDayClick(d) },
++            ) {
++                Text(d.dayOfWeek.getDisplayName(TextStyle.SHORT, locale), style = NoopType.footnote, color = Palette.textSecondary, maxLines = 1)
++                DayNumber(d.dayOfMonth, d == today)
++            }
++        }
++    }
++}
++
++@Composable
++private fun DayNumber(n: Int, isToday: Boolean) {
++    Box(
++        Modifier.size(26.dp).clip(CircleShape).background(if (isToday) Palette.accent else Color.Transparent),
++        contentAlignment = Alignment.Center,
++    ) {
++        Text(n.toString(), style = NoopType.subhead, color = if (isToday) Palette.surfaceBase else Palette.textPrimary)
++    }
++}
++
++/**
++ * victor:day — the month like a desktop calendar, sized for a phone: each day lists its first events (in
++ * their calendar colour) and tasks, with "+N" for the rest. Tapping a day opens it in the Day view.
+  */
+ @Composable
+ internal fun MonthGrid(
+     month: YearMonth,
+     today: LocalDate,
+-    selected: LocalDate,
+-    hasEvents: (LocalDate) -> Boolean,
+-    hasTasks: (LocalDate) -> Boolean,
++    events: (LocalDate) -> List<AgendaEvent>,
++    tasks: (LocalDate) -> List<DayTask>,
+     locale: Locale,
+-    onSelect: (LocalDate) -> Unit,
++    onDayClick: (LocalDate) -> Unit,
+ ) {
+     val first = DayCalendar.firstDayOfWeek(locale)
+-    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space4)) {
++    val lineColor = Palette.hairline
++    Column {
+         Row(Modifier.fillMaxWidth()) {
+             (0L until 7L).map { first.plus(it) }.forEach { dow ->
+                 Text(
+-                    dow.getDisplayName(TextStyle.NARROW, locale).uppercase(locale),
+-                    style = NoopType.caption,
++                    dow.getDisplayName(TextStyle.SHORT, locale),
++                    style = NoopType.footnote,
+                     color = Palette.textTertiary,
+                     textAlign = TextAlign.Center,
++                    maxLines = 1,
+                     modifier = Modifier.weight(1f),
+                 )
+             }
+         }
+         DayCalendar.monthCells(month, locale).chunked(7).forEach { week ->
+-            Row(Modifier.fillMaxWidth()) {
++            Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+                 week.forEach { day ->
+-                    Box(Modifier.weight(1f).height(44.dp), contentAlignment = Alignment.Center) {
+-                        if (day != null) DayCell(day, day == today, day == selected, hasEvents(day), hasTasks(day)) { onSelect(day) }
++                    Column(
++                        horizontalAlignment = Alignment.CenterHorizontally,
++                        verticalArrangement = Arrangement.spacedBy(2.dp),
++                        modifier = Modifier
++                            .weight(1f)
++                            .heightIn(min = 76.dp)
++                            .drawBehind { drawLine(lineColor, Offset(0f, 0f), Offset(size.width, 0f), strokeWidth = 1f) }
++                            .then(if (day != null) Modifier.clickable { onDayClick(day) } else Modifier)
++                            .padding(horizontal = 1.dp, vertical = 2.dp),
++                    ) {
++                        if (day != null) {
++                            DayNumber(day.dayOfMonth, day == today)
++                            val ev = events(day)
++                            val items = ev.map { Triple(it.title, eventColor(it), false) } + tasks(day).map { Triple(it.title, null, true) }
++                            items.take(MONTH_CHIPS).forEach { (title, color, task) -> CalendarChip(title, color, task, tiny = true) }
++                            if (items.size > MONTH_CHIPS) Text("+${items.size - MONTH_CHIPS}", style = ChipText, color = Palette.textSecondary)
++                        }
+                     }
+                 }
+             }
+@@ -95,37 +289,7 @@ internal fun MonthGrid(
+     }
+ }
+ 
+-@Composable
+-private fun DayCell(day: LocalDate, isToday: Boolean, isSelected: Boolean, events: Boolean, tasks: Boolean, onClick: () -> Unit) {
+-    Column(
+-        horizontalAlignment = Alignment.CenterHorizontally,
+-        verticalArrangement = Arrangement.spacedBy(2.dp),
+-        modifier = Modifier.clip(CircleShape).clickable(onClick = onClick),
+-    ) {
+-        Box(
+-            Modifier
+-                .size(30.dp)
+-                .clip(CircleShape)
+-                .background(if (isSelected) Palette.accent else Color.Transparent),
+-            contentAlignment = Alignment.Center,
+-        ) {
+-            Text(
+-                day.dayOfMonth.toString(),
+-                style = if (isToday) NoopType.headline else NoopType.subhead,
+-                color = when {
+-                    isSelected -> Palette.surfaceBase
+-                    isToday -> Palette.accent
+-                    else -> Palette.textPrimary
+-                },
+-            )
+-        }
+-        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+-            if (events) Box(Modifier.size(5.dp).clip(CircleShape).background(Palette.accent))
+-            if (tasks) Box(Modifier.size(5.dp).clip(CircleShape).background(Palette.statusWarning))
+-            if (!events && !tasks) Box(Modifier.size(5.dp))
+-        }
+-    }
+-}
++private const val MONTH_CHIPS = 3
+ 
+ /** victor:day — the Google Tasks block when there is no list to show: connect, reconnect, loading, failed. */
+ @Composable
+diff --git a/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
+index 503a12da..68eb73ac 100644
+--- a/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
++++ b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
+@@ -15,6 +15,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
+ import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.combinedClickable
+ import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Row
+@@ -65,9 +67,6 @@ import java.util.Date
+ import java.util.Locale
+ import kotlin.math.abs
+ 
+-private const val MAX_EVENTS = 5
+-private const val MAX_TASKS = 6
+-private const val WEEK_PER_DAY = 4
+ 
+ /**
+  * victor:day — "Mi día" at the top of Today: this morning's weigh-in, today's calendar and the Google
+@@ -75,6 +74,7 @@ private const val WEEK_PER_DAY = 4
+  * weight and agenda re-read every time the app comes back to the front, so stepping off the scale and
+  * opening NOOP is enough. Registered by a one-line hook in TodayScreen.
+  */
++@OptIn(ExperimentalFoundationApi::class)
+ @Composable
+ internal fun TodayMyDaySection() {
+     val ctx = LocalContext.current
+@@ -95,7 +95,6 @@ internal fun TodayMyDaySection() {
+     val locale = Locale.getDefault()
+     var view by remember { mutableStateOf(DayCalendar.loadView(ctx)) }
+     var anchor by remember { mutableStateOf(today) }
+-    var selected by remember { mutableStateOf(today) }
+     val (from, until) = DayCalendar.range(view, anchor, locale)
+     val agenda by produceState(emptyMap<LocalDate, List<AgendaEvent>>(), calendarAllowed, resumes, from, until) {
+         value = if (calendarAllowed) DayAgendaSource.range(ctx, from, until) else emptyMap()
+@@ -177,7 +176,6 @@ internal fun TodayMyDaySection() {
+                         view = v
+                         DayCalendar.saveView(ctx, v)
+                         anchor = today
+-                        selected = today
+                     }
+                     if (v != DayView.entries.last()) Spacer(Modifier.width(4.dp))
+                 }
+@@ -186,80 +184,63 @@ internal fun TodayMyDaySection() {
+             PeriodBar(
+                 label = DayCalendar.label(view, anchor, locale),
+                 atToday = DayCalendar.range(view, today, locale) == from to until,
+-                onPrevious = {
+-                    anchor = DayCalendar.shift(view, anchor, -1)
+-                    selected = if (view == DayView.MONTH) anchor.withDayOfMonth(1) else anchor
+-                },
+-                onNext = {
+-                    anchor = DayCalendar.shift(view, anchor, 1)
+-                    selected = if (view == DayView.MONTH) anchor.withDayOfMonth(1) else anchor
+-                },
+-                onToday = {
+-                    anchor = today
+-                    selected = today
+-                },
++                onPrevious = { anchor = DayCalendar.shift(view, anchor, -1) },
++                onNext = { anchor = DayCalendar.shift(view, anchor, 1) },
++                onToday = { anchor = today },
+             )
+             if (!calendarAllowed) {
+                 Block(Icons.Outlined.Event, onClick = {}) {
+                     Action(uiString(R.string.victor_day_calendar_allow)) { calendarPermission.launch(Manifest.permission.READ_CALENDAR) }
+                 }
+             }
++            val openDay: (LocalDate) -> Unit = { d ->
++                view = DayView.DAY
++                anchor = d
++            }
++            val tasksBlock: @Composable () -> Unit = {
++                if (allTasks == null) Block(Icons.Outlined.TaskAlt, onClick = { openTasks(ctx) }) { tasksStatus() }
++            }
+             when (view) {
+                 DayView.DAY -> {
+-                    if (calendarAllowed) {
+-                        Block(Icons.Outlined.Event, onClick = { openCalendar(ctx, anchor) }) {
+-                            val events = agenda[anchor].orEmpty()
+-                            if (events.isEmpty()) Quiet(uiString(R.string.victor_day_calendar_empty)) else AgendaLines(events, MAX_EVENTS)
+-                        }
+-                    }
+-                    Block(
+-                        Icons.Outlined.TaskAlt,
+-                        onClick = { openTasks(ctx) },
+-                        onLongClick = { if (GoogleTasksSource.isConnected(ctx)) confirmDisconnect = true },
+-                    ) {
+-                        if (allTasks == null) tasksStatus()
+-                        else tasksOn(anchor).let { if (it.isEmpty()) Quiet(uiString(R.string.victor_day_tasks_empty)) else TaskLines(it, MAX_TASKS) }
++                    val events = agenda[anchor].orEmpty()
++                    val due = tasksOn(anchor)
++                    if (events.any { it.allDay } || due.isNotEmpty()) {
++                        Box(
++                            Modifier.combinedClickable(
++                                onClick = { if (due.isNotEmpty()) openTasks(ctx) else openCalendar(ctx, anchor) },
++                                onLongClick = { if (GoogleTasksSource.isConnected(ctx)) confirmDisconnect = true },
++                            ),
++                        ) { AllDayChips(events, due, tiny = false, limit = 6, today = today) }
+                     }
++                    if (calendarAllowed) TimeGrid(listOf(anchor), agenda, today, height = 360.dp) { openCalendar(ctx, it) }
++                    tasksBlock()
+                 }
+                 DayView.WEEK -> {
+-                    val days = generateSequence(from) { it.plusDays(1) }.takeWhile { it.isBefore(until) }
+-                        .filter { agenda[it].orEmpty().isNotEmpty() || tasksOn(it).isNotEmpty() }.toList()
+-                    if (days.isEmpty()) Quiet(uiString(R.string.victor_day_nothing))
+-                    days.forEach { d ->
+-                        Column(
+-                            modifier = Modifier.fillMaxWidth().clickable { openCalendar(ctx, d) },
+-                            verticalArrangement = Arrangement.spacedBy(Metrics.space4),
+-                        ) {
+-                            Text(
+-                                DayCalendar.dayTitle(d, locale),
+-                                style = NoopType.subhead,
+-                                color = if (d == today) Palette.accent else Palette.textSecondary,
+-                            )
+-                            agenda[d]?.let { AgendaLines(it, WEEK_PER_DAY) }
+-                            tasksOn(d).takeIf { it.isNotEmpty() }?.let { TaskLines(it, WEEK_PER_DAY) }
++                    val days = generateSequence(from) { it.plusDays(1) }.takeWhile { it.isBefore(until) }.toList()
++                    WeekHeader(days, today, locale, onDayClick = openDay)
++                    if (days.any { d -> agenda[d].orEmpty().any { it.allDay } || tasksOn(d).isNotEmpty() }) {
++                        Row(Modifier.fillMaxWidth()) {
++                            Spacer(Modifier.width(HourLabelWidth))
++                            days.forEach { d ->
++                                Box(Modifier.weight(1f).padding(horizontal = 1.dp).clickable { openDay(d) }) {
++                                    AllDayChips(agenda[d].orEmpty(), tasksOn(d), tiny = true, limit = 2, today = today)
++                                }
++                            }
+                         }
+                     }
+-                    if (allTasks == null) Block(Icons.Outlined.TaskAlt, onClick = { openTasks(ctx) }) { tasksStatus() }
++                    if (calendarAllowed) TimeGrid(days, agenda, today, height = 380.dp, onDayClick = openDay)
++                    tasksBlock()
+                 }
+                 DayView.MONTH -> {
+                     MonthGrid(
+                         month = YearMonth.from(anchor),
+                         today = today,
+-                        selected = selected,
+-                        hasEvents = { agenda[it].orEmpty().isNotEmpty() },
+-                        hasTasks = { tasksOn(it).isNotEmpty() },
++                        events = { agenda[it].orEmpty() },
++                        tasks = { tasksOn(it) },
+                         locale = locale,
+-                        onSelect = { selected = it },
++                        onDayClick = openDay,
+                     )
+-                    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space4)) {
+-                        Text(DayCalendar.dayTitle(selected, locale), style = NoopType.subhead, color = Palette.textSecondary)
+-                        val events = agenda[selected].orEmpty()
+-                        val due = tasksOn(selected)
+-                        if (events.isEmpty() && due.isEmpty() && allTasks != null) Quiet(uiString(R.string.victor_day_nothing))
+-                        if (events.isNotEmpty()) AgendaLines(events, MAX_EVENTS)
+-                        if (due.isNotEmpty()) TaskLines(due, MAX_TASKS)
+-                    }
+-                    if (allTasks == null) Block(Icons.Outlined.TaskAlt, onClick = { openTasks(ctx) }) { tasksStatus() }
++                    tasksBlock()
+                 }
+             }
+         }
+@@ -307,52 +288,6 @@ private fun WeightRow(w: DayWeight) {
+     }
+ }
+ 
+-@Composable
+-private fun AgendaLines(events: List<AgendaEvent>, limit: Int) {
+-    val ctx = LocalContext.current
+-    val now = System.currentTimeMillis()
+-    val fmt = remember { DateFormat.getTimeFormat(ctx) }
+-    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space6)) {
+-        events.take(limit).forEach { e ->
+-            val past = !e.allDay && e.end < now
+-            Row(horizontalArrangement = Arrangement.spacedBy(Metrics.space8)) {
+-                // An all-day entry simply has no time: the empty column says it, no extra words.
+-                Text(
+-                    if (e.allDay) "" else fmt.format(Date(e.begin)),
+-                    style = NoopType.bodyNumber,
+-                    color = if (past) Palette.textTertiary else Palette.textSecondary,
+-                    maxLines = 1,
+-                    modifier = Modifier.width(72.dp),
+-                )
+-                Text(
+-                    e.title.ifBlank { "—" },
+-                    style = NoopType.body,
+-                    color = if (past) Palette.textTertiary else Palette.textPrimary,
+-                    maxLines = 1,
+-                    overflow = TextOverflow.Ellipsis,
+-                )
+-            }
+-        }
+-        if (events.size > limit) Quiet(uiString(R.string.victor_day_more, events.size - limit))
+-    }
+-}
+-
+-@Composable
+-private fun TaskLines(tasks: List<DayTask>, limit: Int) {
+-    val today = LocalDate.now()
+-    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space6)) {
+-        tasks.take(limit).forEach { t ->
+-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space8)) {
+-                Text(t.title, style = NoopType.body, color = Palette.textPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+-                if (t.due != null && t.due.isBefore(today)) {
+-                    Text(uiString(R.string.victor_day_tasks_overdue), style = NoopType.subhead, color = Palette.statusWarning)
+-                }
+-            }
+-        }
+-        if (tasks.size > limit) Quiet(uiString(R.string.victor_day_more, tasks.size - limit))
+-    }
+-}
+-
+ @OptIn(ExperimentalFoundationApi::class)
+ @Composable
+ private fun Block(icon: ImageVector, onClick: () -> Unit, onLongClick: (() -> Unit)? = null, content: @Composable () -> Unit) {
+diff --git a/android/app/src/test/java/com/noop/day/DayCalendarTest.kt b/android/app/src/test/java/com/noop/day/DayCalendarTest.kt
+index e2bfa35a..cb70162d 100644
+--- a/android/app/src/test/java/com/noop/day/DayCalendarTest.kt
++++ b/android/app/src/test/java/com/noop/day/DayCalendarTest.kt
+@@ -58,4 +58,31 @@ class DayCalendarTest {
+         assertEquals(listOf("A", "b"), GoogleTasksSource.onDay(tasks, sat).map { it.title })
+         assertEquals(listOf("vieja", "A", "b"), GoogleTasksSource.forDay(tasks, sat).map { it.title })
+     }
++
++    @Test
++    fun overlappingEventsSitSideBySideAndShortOnesStayTappable() {
++        val madrid = ZoneId.of("Europe/Madrid")
++        fun at(h: Int, m: Int = 0) = sat.atTime(h, m).atZone(madrid).toInstant().toEpochMilli()
++        val placed = DayAgendaSource.layoutDay(
++            listOf(
++                AgendaEvent("A", at(9), at(11), false),
++                AgendaEvent("B", at(10), at(10, 30), false),
++                AgendaEvent("C", at(10, 45), at(12), false),
++                AgendaEvent("Café", at(15), at(15, 5), false),
++                AgendaEvent("Todo el día", 0L, 0L, true),
++                AgendaEvent("Anoche", at(23).minus(86_400_000L), at(1), false),
++            ),
++            sat,
++            madrid,
++        ).associateBy { it.event.title }
++        assertEquals(setOf("A", "B", "C", "Café", "Anoche"), placed.keys)
++        assertEquals(0, placed["Anoche"]!!.startMin) // clipped to midnight
++        assertEquals(60, placed["Anoche"]!!.endMin)
++        assertEquals(2, placed["A"]!!.lanes) // A overlaps B, then C
++        assertEquals(0, placed["A"]!!.lane)
++        assertEquals(1, placed["B"]!!.lane)
++        assertEquals(1, placed["C"]!!.lane) // B's lane is free again by 10:45
++        assertEquals(1, placed["Café"]!!.lanes)
++        assertEquals(15 * 60 + 20, placed["Café"]!!.endMin) // 5 minutes drawn as 20
++    }
+ }
+-- 
+2.54.0
+
