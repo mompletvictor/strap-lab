@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Sat, 17 Oct 2026 20:32:31 +0200
+Subject: [PATCH] fix(day): a calendar grid you can see on the dark card
+
+The theme hairline nearly vanished over the dark Today card. Grid lines
+now use the tertiary text colour at 45% and a full 1 dp, with fainter
+half-hour lines in Day/Week, a closing edge on the last column, and
+vertical separators between the Month's days.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../java/com/noop/day/DayCalendarViews.kt     | 30 +++++++++++++++----
+ 1 file changed, 24 insertions(+), 6 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/day/DayCalendarViews.kt b/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
+index 39f3b1e9..5049d482 100644
+--- a/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
++++ b/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
+@@ -81,6 +81,13 @@ internal fun PeriodBar(label: String, atToday: Boolean, onPrevious: () -> Unit,
+     }
+ }
+ 
++/**
++ * victor:day — the calendar's grid lines: the theme's hairline is too faint over the dark card, so the
++ * grid uses the tertiary text colour, translucent, at a full 1 dp.
++ */
++@Composable
++private fun gridColor(): Color = Palette.textTertiary.copy(alpha = 0.45f)
++
+ /** victor:day — tiny text for chips inside week columns and month cells. */
+ private val ChipText = NoopType.footnote.copy(fontSize = 10.sp, lineHeight = 12.sp)
+ 
+@@ -143,7 +150,8 @@ internal fun TimeGrid(days: List<LocalDate>, events: Map<LocalDate, List<AgendaE
+         val h = (LocalTime.now().hour - 1).coerceIn(0, 23)
+         scroll.scrollTo(with(density) { (HourHeight * h).roundToPx() })
+     }
+-    val lineColor = Palette.hairline
++    val lineColor = gridColor()
++    val halfColor = gridColor().copy(alpha = 0.18f)
+     Box(Modifier.fillMaxWidth().height(height).verticalScroll(scroll)) {
+         Row(Modifier.fillMaxWidth().height(HourHeight * 24)) {
+             Column(Modifier.width(HourLabelWidth)) {
+@@ -157,14 +165,20 @@ internal fun TimeGrid(days: List<LocalDate>, events: Map<LocalDate, List<AgendaE
+                     }
+                 }
+             }
+-            days.forEach { day ->
++            days.forEachIndexed { index, day ->
++                val isLast = index == days.lastIndex
+                 val placed = remember(events[day], day) { DayAgendaSource.layoutDay(events[day].orEmpty(), day, zone) }
+                 BoxWithConstraints(Modifier.weight(1f).fillMaxHeight().clickable { onDayClick(day) }) {
+                     val colW = maxWidth
+                     Canvas(Modifier.matchParentSize()) {
+                         val hh = HourHeight.toPx()
+-                        for (h in 0..24) drawLine(lineColor, Offset(0f, h * hh), Offset(size.width, h * hh), strokeWidth = 1f)
+-                        drawLine(lineColor, Offset(0f, 0f), Offset(0f, size.height), strokeWidth = 1f)
++                        val stroke = 1.dp.toPx()
++                        for (h in 0 until 24) {
++                            drawLine(lineColor, Offset(0f, h * hh), Offset(size.width, h * hh), strokeWidth = stroke)
++                            drawLine(halfColor, Offset(0f, h * hh + hh / 2), Offset(size.width, h * hh + hh / 2), strokeWidth = stroke)
++                        }
++                        drawLine(lineColor, Offset(0f, 0f), Offset(0f, size.height), strokeWidth = stroke)
++                        if (isLast) drawLine(lineColor, Offset(size.width, 0f), Offset(size.width, size.height), strokeWidth = stroke)
+                     }
+                     placed.forEach { p ->
+                         val w = colW / p.lanes
+@@ -248,7 +262,7 @@ internal fun MonthGrid(
+     onDayClick: (LocalDate) -> Unit,
+ ) {
+     val first = DayCalendar.firstDayOfWeek(locale)
+-    val lineColor = Palette.hairline
++    val lineColor = gridColor()
+     Column {
+         Row(Modifier.fillMaxWidth()) {
+             (0L until 7L).map { first.plus(it) }.forEach { dow ->
+@@ -271,7 +285,11 @@ internal fun MonthGrid(
+                         modifier = Modifier
+                             .weight(1f)
+                             .heightIn(min = 76.dp)
+-                            .drawBehind { drawLine(lineColor, Offset(0f, 0f), Offset(size.width, 0f), strokeWidth = 1f) }
++                            .drawBehind {
++                                val stroke = 1.dp.toPx()
++                                drawLine(lineColor, Offset(0f, 0f), Offset(size.width, 0f), strokeWidth = stroke)
++                                drawLine(lineColor, Offset(size.width, 0f), Offset(size.width, size.height), strokeWidth = stroke)
++                            }
+                             .then(if (day != null) Modifier.clickable { onDayClick(day) } else Modifier)
+                             .padding(horizontal = 1.dp, vertical = 2.dp),
+                     ) {
+-- 
+2.54.0
+
