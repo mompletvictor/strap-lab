@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Sat, 17 Oct 2026 21:02:19 +0200
+Subject: [PATCH] =?UTF-8?q?fix(day):=20stronger=20calendar=20grid=20?=
+ =?UTF-8?q?=E2=80=94=20still=20too=20faint=20on=20an=20AMOLED=20phone?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+On the S25 the tertiary-text grid all but disappeared. Grid lines now use
+the secondary text colour at 50%, and the Month's day separators are drawn
+on each cell's left edge (columns 2-7) so none can fall outside a cell.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/main/java/com/noop/day/DayCalendarViews.kt  | 13 +++++++------
+ 1 file changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/day/DayCalendarViews.kt b/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
+index 5049d482..f0376ed5 100644
+--- a/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
++++ b/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
+@@ -82,11 +82,12 @@ internal fun PeriodBar(label: String, atToday: Boolean, onPrevious: () -> Unit,
+ }
+ 
+ /**
+- * victor:day — the calendar's grid lines: the theme's hairline is too faint over the dark card, so the
+- * grid uses the tertiary text colour, translucent, at a full 1 dp.
++ * victor:day — the calendar's grid lines. The theme's hairline (and even the tertiary text colour) all
++ * but vanished over the dark card on an AMOLED phone, so the grid uses the secondary text colour, half
++ * opaque, at 1 dp: clearly a grid, still quieter than the events.
+  */
+ @Composable
+-private fun gridColor(): Color = Palette.textTertiary.copy(alpha = 0.45f)
++private fun gridColor(): Color = Palette.textSecondary.copy(alpha = 0.5f)
+ 
+ /** victor:day — tiny text for chips inside week columns and month cells. */
+ private val ChipText = NoopType.footnote.copy(fontSize = 10.sp, lineHeight = 12.sp)
+@@ -151,7 +152,7 @@ internal fun TimeGrid(days: List<LocalDate>, events: Map<LocalDate, List<AgendaE
+         scroll.scrollTo(with(density) { (HourHeight * h).roundToPx() })
+     }
+     val lineColor = gridColor()
+-    val halfColor = gridColor().copy(alpha = 0.18f)
++    val halfColor = Palette.textSecondary.copy(alpha = 0.18f)
+     Box(Modifier.fillMaxWidth().height(height).verticalScroll(scroll)) {
+         Row(Modifier.fillMaxWidth().height(HourHeight * 24)) {
+             Column(Modifier.width(HourLabelWidth)) {
+@@ -278,7 +279,7 @@ internal fun MonthGrid(
+         }
+         DayCalendar.monthCells(month, locale).chunked(7).forEach { week ->
+             Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+-                week.forEach { day ->
++                week.forEachIndexed { col, day ->
+                     Column(
+                         horizontalAlignment = Alignment.CenterHorizontally,
+                         verticalArrangement = Arrangement.spacedBy(2.dp),
+@@ -288,7 +289,7 @@ internal fun MonthGrid(
+                             .drawBehind {
+                                 val stroke = 1.dp.toPx()
+                                 drawLine(lineColor, Offset(0f, 0f), Offset(size.width, 0f), strokeWidth = stroke)
+-                                drawLine(lineColor, Offset(size.width, 0f), Offset(size.width, size.height), strokeWidth = stroke)
++                                if (col > 0) drawLine(lineColor, Offset(0f, 0f), Offset(0f, size.height), strokeWidth = stroke)
+                             }
+                             .then(if (day != null) Modifier.clickable { onDayClick(day) } else Modifier)
+                             .padding(horizontal = 1.dp, vertical = 2.dp),
+-- 
+2.54.0
+
