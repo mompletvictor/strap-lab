@@ -1,0 +1,1359 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Sat, 17 Oct 2026 19:35:18 +0200
+Subject: [PATCH] feat: Food history with charts, and Day / Week / Month
+ calendar in "My day"
+
+- Food tab gets Today / History: range 7 / 30 / 90 days, averages (kcal,
+  balance, protein; today left out), eaten-vs-burned bars with the goal
+  line, stacked macros, and average kcal by meal. The real-burn card and
+  previous days move into History. Burn comes from FoodEnergy.loadRange
+  (three reads for the whole range, also used by the coach and the
+  adaptive estimate instead of one load per day).
+- "My day" switches Day / Week / Month (remembered), with previous/next and
+  a way back to today. Week lists each day that has events or tasks;
+  Month is a Monday-first grid with a dot for events and one for tasks,
+  and the tapped day's list below. DayAgendaSource.range buckets events on
+  every day they touch; Google Tasks keeps every open task and each view
+  picks its days (overdue ones only on today).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../java/com/noop/ai/VictorCoachExtras.kt     |   3 +-
+ .../src/main/java/com/noop/day/DayAgenda.kt   |  27 +-
+ .../src/main/java/com/noop/day/DayCalendar.kt |  81 +++++
+ .../java/com/noop/day/DayCalendarViews.kt     | 148 +++++++++
+ .../src/main/java/com/noop/day/GoogleTasks.kt |  12 +-
+ .../java/com/noop/day/TodayMyDaySection.kt    | 158 ++++++---
+ .../main/java/com/noop/food/FoodAdaptive.kt   |   8 +-
+ .../src/main/java/com/noop/food/FoodEnergy.kt |  36 +-
+ .../main/java/com/noop/food/FoodHistory.kt    | 307 ++++++++++++++++++
+ .../src/main/java/com/noop/food/FoodScreen.kt |  77 +++--
+ .../main/res/values-es/strings_victor_day.xml |   7 +
+ .../res/values-es/strings_victor_food.xml     |  14 +
+ .../main/res/values/strings_victor_day.xml    |   7 +
+ .../main/res/values/strings_victor_food.xml   |  14 +
+ .../test/java/com/noop/day/DayCalendarTest.kt |  61 ++++
+ .../java/com/noop/food/FoodHistoryTest.kt     |  66 ++++
+ 16 files changed, 935 insertions(+), 91 deletions(-)
+ create mode 100644 android/app/src/main/java/com/noop/day/DayCalendar.kt
+ create mode 100644 android/app/src/main/java/com/noop/day/DayCalendarViews.kt
+ create mode 100644 android/app/src/main/java/com/noop/food/FoodHistory.kt
+ create mode 100644 android/app/src/test/java/com/noop/day/DayCalendarTest.kt
+ create mode 100644 android/app/src/test/java/com/noop/food/FoodHistoryTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+index 1cbb49e4..359a24a8 100644
+--- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
++++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+@@ -74,9 +74,10 @@ internal object VictorCoachExtras {
+ 
+     private suspend fun weekBalanceLine(ctx: Context, repo: WhoopRepository, strapId: String, today: LocalDate): String? {
+         val entries = FoodStore.load(ctx)
++        val energy = FoodEnergy.loadRange(ctx, repo, strapId, today.minusDays(7).toString(), today.minusDays(1).toString())
+         val days = (1L..7L).map { today.minusDays(it).toString() }.mapNotNull { day ->
+             val eaten = FoodDays.totalsFor(entries, day)?.kcal ?: return@mapNotNull null
+-            val burned = FoodEnergy.load(ctx, repo, strapId, day)?.burnedKcal ?: return@mapNotNull null
++            val burned = energy[day]?.burnedKcal ?: return@mapNotNull null
+             Triple(day, eaten, burned)
+         }
+         return weekBalanceLine(days)
+diff --git a/android/app/src/main/java/com/noop/day/DayAgenda.kt b/android/app/src/main/java/com/noop/day/DayAgenda.kt
+index 8f1f01b8..7f5114c2 100644
+--- a/android/app/src/main/java/com/noop/day/DayAgenda.kt
++++ b/android/app/src/main/java/com/noop/day/DayAgenda.kt
+@@ -26,10 +26,17 @@ object DayAgendaSource {
+ 
+     /** Today's events of visible calendars, not declined, in [inDayOrder]. Empty without the permission. */
+     suspend fun today(ctx: Context, day: LocalDate = LocalDate.now(), zone: ZoneId = ZoneId.systemDefault()): List<AgendaEvent> =
++        range(ctx, day, day.plusDays(1), zone)[day].orEmpty()
++
++    /**
++     * Every day from [from] until [until] (exclusive) that has something, each with its events in
++     * [inDayOrder]; an event spanning several days is listed on each. Empty without the permission.
++     */
++    suspend fun range(ctx: Context, from: LocalDate, until: LocalDate, zone: ZoneId = ZoneId.systemDefault()): Map<LocalDate, List<AgendaEvent>> =
+         withContext(Dispatchers.IO) {
+-            if (!hasPermission(ctx)) return@withContext emptyList()
+-            val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
+-            val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
++            if (!hasPermission(ctx)) return@withContext emptyMap()
++            val start = from.atStartOfDay(zone).toInstant().toEpochMilli()
++            val end = until.atStartOfDay(zone).toInstant().toEpochMilli()
+             val uri = CalendarContract.Instances.CONTENT_URI.buildUpon().also {
+                 ContentUris.appendId(it, start)
+                 ContentUris.appendId(it, end)
+@@ -55,9 +62,21 @@ object DayAgendaSource {
+                     }
+                 }
+             }
+-            inDayOrder(events.filter { isOnDay(it, day, zone) })
++            byDay(events, from, until, zone)
+         }
+ 
++    /** Pure. [events] bucketed onto each day of [from, until) they belong to. */
++    internal fun byDay(events: List<AgendaEvent>, from: LocalDate, until: LocalDate, zone: ZoneId): Map<LocalDate, List<AgendaEvent>> {
++        val out = LinkedHashMap<LocalDate, List<AgendaEvent>>()
++        var d = from
++        while (d.isBefore(until)) {
++            val day = d
++            events.filter { isOnDay(it, day, zone) }.takeIf { it.isNotEmpty() }?.let { out[day] = inDayOrder(it) }
++            d = d.plusDays(1)
++        }
++        return out
++    }
++
+     /**
+      * Pure. A timed event belongs to [day] when it overlaps the local day. An all-day event is stored as UTC
+      * midnights, so it belongs when [day] falls in its UTC date range (the Instances window, being local,
+diff --git a/android/app/src/main/java/com/noop/day/DayCalendar.kt b/android/app/src/main/java/com/noop/day/DayCalendar.kt
+new file mode 100644
+index 00000000..97e84b7c
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/day/DayCalendar.kt
+@@ -0,0 +1,81 @@
++package com.noop.day
++
++import android.content.Context
++import androidx.annotation.StringRes
++import com.noop.R
++import java.time.DayOfWeek
++import java.time.LocalDate
++import java.time.YearMonth
++import java.time.format.DateTimeFormatter
++import java.time.temporal.TemporalAdjusters
++import java.time.temporal.WeekFields
++import java.util.Locale
++
++/** victor:day — how much of the calendar "Mi día" shows. */
++internal enum class DayView(val id: String, @StringRes val label: Int) {
++    DAY("day", R.string.victor_day_view_day),
++    WEEK("week", R.string.victor_day_view_week),
++    MONTH("month", R.string.victor_day_view_month),
++}
++
++/** victor:day — the periods behind the Día / Semana / Mes views. Pure apart from the remembered view. */
++internal object DayCalendar {
++
++    private const val PREFS = "noop_prefs"
++    private const val KEY_VIEW = "victor.day.view"
++
++    fun loadView(ctx: Context): DayView =
++        ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_VIEW, null)
++            ?.let { id -> DayView.entries.firstOrNull { it.id == id } } ?: DayView.DAY
++
++    fun saveView(ctx: Context, view: DayView) {
++        ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_VIEW, view.id).apply()
++    }
++
++    /** The locale's first weekday (Monday in Spain). */
++    fun firstDayOfWeek(locale: Locale): DayOfWeek = WeekFields.of(locale).firstDayOfWeek
++
++    /** The days [from, until) the [view] around [anchor] covers. */
++    fun range(view: DayView, anchor: LocalDate, locale: Locale): Pair<LocalDate, LocalDate> = when (view) {
++        DayView.DAY -> anchor to anchor.plusDays(1)
++        DayView.WEEK -> anchor.with(TemporalAdjusters.previousOrSame(firstDayOfWeek(locale))).let { it to it.plusDays(7) }
++        DayView.MONTH -> anchor.withDayOfMonth(1).let { it to it.plusMonths(1) }
++    }
++
++    /** [anchor] moved by [steps] days, weeks or months. */
++    fun shift(view: DayView, anchor: LocalDate, steps: Long): LocalDate = when (view) {
++        DayView.DAY -> anchor.plusDays(steps)
++        DayView.WEEK -> anchor.plusWeeks(steps)
++        DayView.MONTH -> anchor.plusMonths(steps)
++    }
++
++    /** "Sábado 17 oct", "13 – 19 oct", "28 sept – 4 oct", "Octubre 2026". */
++    fun label(view: DayView, anchor: LocalDate, locale: Locale): String = when (view) {
++        DayView.DAY -> dayTitle(anchor, locale)
++        DayView.WEEK -> {
++            val (from, until) = range(view, anchor, locale)
++            val to = until.minusDays(1)
++            val month = DateTimeFormatter.ofPattern("MMM", locale)
++            if (from.month == to.month) "${from.dayOfMonth} – ${to.dayOfMonth} ${to.format(month)}"
++            else "${from.dayOfMonth} ${from.format(month)} – ${to.dayOfMonth} ${to.format(month)}"
++        }
++        DayView.MONTH -> YearMonth.from(anchor).format(DateTimeFormatter.ofPattern("LLLL yyyy", locale)).capitalized(locale)
++    }
++
++    /** "Sábado 17 oct". */
++    fun dayTitle(day: LocalDate, locale: Locale): String =
++        day.format(DateTimeFormatter.ofPattern("EEEE d MMM", locale)).capitalized(locale)
++
++    /** The month grid: leading blank cells, then each day, in rows of seven starting on [firstDayOfWeek]. */
++    fun monthCells(month: YearMonth, locale: Locale): List<LocalDate?> {
++        val first = month.atDay(1)
++        val lead = (first.dayOfWeek.value - firstDayOfWeek(locale).value + 7) % 7
++        val cells = ArrayList<LocalDate?>(42)
++        repeat(lead) { cells += null }
++        for (d in 1..month.lengthOfMonth()) cells += month.atDay(d)
++        while (cells.size % 7 != 0) cells += null
++        return cells
++    }
++
++    private fun String.capitalized(locale: Locale) = replaceFirstChar { it.titlecase(locale) }
++}
+diff --git a/android/app/src/main/java/com/noop/day/DayCalendarViews.kt b/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
+new file mode 100644
+index 00000000..852e20da
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
+@@ -0,0 +1,148 @@
++package com.noop.day
++
++import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.filled.ChevronLeft
++import androidx.compose.material.icons.filled.ChevronRight
++import androidx.compose.material3.CircularProgressIndicator
++import androidx.compose.material3.Icon
++import androidx.compose.material3.IconButton
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.text.style.TextAlign
++import androidx.compose.ui.unit.dp
++import com.noop.R
++import com.noop.food.FoodChip
++import com.noop.ui.Metrics
++import com.noop.ui.NoopType
++import com.noop.ui.Palette
++import com.noop.ui.uiString
++import java.time.LocalDate
++import java.time.YearMonth
++import java.time.format.TextStyle
++import java.util.Locale
++
++/** victor:day — "‹ 13 – 19 oct ›", with a way back to today once the wearer has moved away. */
++@Composable
++internal fun PeriodBar(label: String, atToday: Boolean, onPrevious: () -> Unit, onNext: () -> Unit, onToday: () -> Unit) {
++    Row(verticalAlignment = Alignment.CenterVertically) {
++        IconButton(onClick = onPrevious) {
++            Icon(Icons.Filled.ChevronLeft, contentDescription = uiString(R.string.victor_day_previous), tint = Palette.textSecondary)
++        }
++        Text(
++            label,
++            style = NoopType.headline,
++            color = Palette.textPrimary,
++            textAlign = TextAlign.Center,
++            modifier = Modifier.weight(1f).clickable(onClick = onToday),
++        )
++        IconButton(onClick = onNext) {
++            Icon(Icons.Filled.ChevronRight, contentDescription = uiString(R.string.victor_day_next), tint = Palette.textSecondary)
++        }
++        if (!atToday) FoodChip(uiString(R.string.victor_day_back_today), selected = false, small = true, onClick = onToday)
++    }
++}
++
++/**
++ * victor:day — the month at a glance: a dot under a day with calendar events (accent) and one for tasks
++ * due (warning). Tapping a day shows its list underneath.
++ */
++@Composable
++internal fun MonthGrid(
++    month: YearMonth,
++    today: LocalDate,
++    selected: LocalDate,
++    hasEvents: (LocalDate) -> Boolean,
++    hasTasks: (LocalDate) -> Boolean,
++    locale: Locale,
++    onSelect: (LocalDate) -> Unit,
++) {
++    val first = DayCalendar.firstDayOfWeek(locale)
++    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space4)) {
++        Row(Modifier.fillMaxWidth()) {
++            (0L until 7L).map { first.plus(it) }.forEach { dow ->
++                Text(
++                    dow.getDisplayName(TextStyle.NARROW, locale).uppercase(locale),
++                    style = NoopType.caption,
++                    color = Palette.textTertiary,
++                    textAlign = TextAlign.Center,
++                    modifier = Modifier.weight(1f),
++                )
++            }
++        }
++        DayCalendar.monthCells(month, locale).chunked(7).forEach { week ->
++            Row(Modifier.fillMaxWidth()) {
++                week.forEach { day ->
++                    Box(Modifier.weight(1f).height(44.dp), contentAlignment = Alignment.Center) {
++                        if (day != null) DayCell(day, day == today, day == selected, hasEvents(day), hasTasks(day)) { onSelect(day) }
++                    }
++                }
++            }
++        }
++    }
++}
++
++@Composable
++private fun DayCell(day: LocalDate, isToday: Boolean, isSelected: Boolean, events: Boolean, tasks: Boolean, onClick: () -> Unit) {
++    Column(
++        horizontalAlignment = Alignment.CenterHorizontally,
++        verticalArrangement = Arrangement.spacedBy(2.dp),
++        modifier = Modifier.clip(CircleShape).clickable(onClick = onClick),
++    ) {
++        Box(
++            Modifier
++                .size(30.dp)
++                .clip(CircleShape)
++                .background(if (isSelected) Palette.accent else Color.Transparent),
++            contentAlignment = Alignment.Center,
++        ) {
++            Text(
++                day.dayOfMonth.toString(),
++                style = if (isToday) NoopType.headline else NoopType.subhead,
++                color = when {
++                    isSelected -> Palette.surfaceBase
++                    isToday -> Palette.accent
++                    else -> Palette.textPrimary
++                },
++            )
++        }
++        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
++            if (events) Box(Modifier.size(5.dp).clip(CircleShape).background(Palette.accent))
++            if (tasks) Box(Modifier.size(5.dp).clip(CircleShape).background(Palette.statusWarning))
++            if (!events && !tasks) Box(Modifier.size(5.dp))
++        }
++    }
++}
++
++/** victor:day — the Google Tasks block when there is no list to show: connect, reconnect, loading, failed. */
++@Composable
++internal fun TasksStatus(state: TasksState, onConnect: () -> Unit) {
++    when (state) {
++        TasksState.NotConnected -> Action(uiString(R.string.victor_day_tasks_connect), onConnect)
++        TasksState.NeedsConsent -> Action(uiString(R.string.victor_day_tasks_reconnect), onConnect)
++        TasksState.Loading -> CircularProgressIndicator(color = Palette.accent, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
++        is TasksState.Failed -> Quiet(
++            uiString(
++                when (state.reason) {
++                    TasksError.NOT_CONFIGURED -> R.string.victor_day_tasks_not_configured
++                    TasksError.OFFLINE -> R.string.victor_day_tasks_offline
++                    TasksError.SERVER -> R.string.victor_day_tasks_failed
++                },
++            ),
++        )
++        is TasksState.Ready -> Unit
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/day/GoogleTasks.kt b/android/app/src/main/java/com/noop/day/GoogleTasks.kt
+index 6c8aa4b2..fc819ab8 100644
+--- a/android/app/src/main/java/com/noop/day/GoogleTasks.kt
++++ b/android/app/src/main/java/com/noop/day/GoogleTasks.kt
+@@ -28,7 +28,7 @@ sealed interface TasksState {
+     object Loading : TasksState
+     /** Google needs the wearer's OK again (first connection, or the grant was withdrawn). */
+     object NeedsConsent : TasksState
+-    /** Open tasks due today or earlier, overdue first. */
++    /** Every open task; each view picks its days ([GoogleTasksSource.forDay], [GoogleTasksSource.onDay]). */
+     data class Ready(val tasks: List<DayTask>) : TasksState
+     data class Failed(val reason: TasksError) : TasksState
+ }
+@@ -74,8 +74,8 @@ object GoogleTasksSource {
+     /** A fresh cached list, or null when it has to be fetched. */
+     fun cached(): List<DayTask>? = cache?.takeIf { System.currentTimeMillis() - it.first < CACHE_MS }?.second
+ 
+-    /** Every open task of every list, then [forDay]. Throws on HTTP/network failure. */
+-    suspend fun fetch(token: String, today: LocalDate = LocalDate.now()): List<DayTask> = withContext(Dispatchers.IO) {
++    /** Every open task of every list. Throws on HTTP/network failure. */
++    suspend fun fetch(token: String): List<DayTask> = withContext(Dispatchers.IO) {
+         val all = ArrayList<DayTask>()
+         for ((id, title) in parseLists(get("$API/users/@me/lists", token, mapOf("maxResults" to "100")))) {
+             var page: String? = null
+@@ -87,7 +87,7 @@ object GoogleTasksSource {
+                 page = next
+             } while (page != null)
+         }
+-        forDay(all, today).also { cache = System.currentTimeMillis() to it }
++        all.toList().also { cache = System.currentTimeMillis() to it }
+     }
+ 
+     /** Thrown for a non-2xx answer; 401/403 mean the token or the grant is no longer good. */
+@@ -130,6 +130,10 @@ object GoogleTasksSource {
+         return tasks to root.optString("nextPageToken").takeIf { it.isNotBlank() }
+     }
+ 
++    /** Pure. What is due on [day] exactly (the week and month views), by title. */
++    internal fun onDay(tasks: List<DayTask>, day: LocalDate): List<DayTask> =
++        tasks.filter { it.due == day }.sortedBy { it.title.lowercase() }
++
+     /** What is for [today]: due today or overdue, oldest due first, then by title. Undated ones wait. */
+     internal fun forDay(tasks: List<DayTask>, today: LocalDate): List<DayTask> =
+         tasks.filter { it.due != null && !it.due.isAfter(today) }
+diff --git a/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
+index e06ecf6c..503a12da 100644
+--- a/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
++++ b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
+@@ -15,6 +15,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
+ import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.combinedClickable
+ import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.fillMaxWidth
+@@ -25,7 +26,6 @@ import androidx.compose.material.icons.outlined.Event
+ import androidx.compose.material.icons.outlined.MonitorWeight
+ import androidx.compose.material.icons.outlined.TaskAlt
+ import androidx.compose.material3.AlertDialog
+-import androidx.compose.material3.CircularProgressIndicator
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.Text
+ import androidx.compose.material3.TextButton
+@@ -49,6 +49,7 @@ import com.google.android.gms.auth.api.identity.Identity
+ import com.google.android.gms.common.api.ApiException
+ import com.google.android.gms.common.api.CommonStatusCodes
+ import com.noop.R
++import com.noop.food.FoodChip
+ import com.noop.ui.Metrics
+ import com.noop.ui.NoopCard
+ import com.noop.ui.NoopType
+@@ -58,6 +59,7 @@ import com.noop.ui.uiString
+ import kotlinx.coroutines.launch
+ import java.io.IOException
+ import java.time.LocalDate
++import java.time.YearMonth
+ import java.time.ZoneId
+ import java.util.Date
+ import java.util.Locale
+@@ -65,6 +67,7 @@ import kotlin.math.abs
+ 
+ private const val MAX_EVENTS = 5
+ private const val MAX_TASKS = 6
++private const val WEEK_PER_DAY = 4
+ 
+ /**
+  * victor:day — "Mi día" at the top of Today: this morning's weigh-in, today's calendar and the Google
+@@ -88,8 +91,14 @@ internal fun TodayMyDaySection() {
+     val calendarPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+         calendarAllowed = granted
+     }
+-    val agenda by produceState(emptyList<AgendaEvent>(), calendarAllowed, resumes) {
+-        value = if (calendarAllowed) DayAgendaSource.today(ctx) else emptyList()
++    val today = LocalDate.now()
++    val locale = Locale.getDefault()
++    var view by remember { mutableStateOf(DayCalendar.loadView(ctx)) }
++    var anchor by remember { mutableStateOf(today) }
++    var selected by remember { mutableStateOf(today) }
++    val (from, until) = DayCalendar.range(view, anchor, locale)
++    val agenda by produceState(emptyMap<LocalDate, List<AgendaEvent>>(), calendarAllowed, resumes, from, until) {
++        value = if (calendarAllowed) DayAgendaSource.range(ctx, from, until) else emptyMap()
+     }
+ 
+     var tasks by remember {
+@@ -149,38 +158,108 @@ internal fun TodayMyDaySection() {
+     }
+     var confirmDisconnect by remember { mutableStateOf(false) }
+ 
++    val allTasks = (tasks as? TasksState.Ready)?.tasks
++    fun tasksOn(day: LocalDate): List<DayTask> = when {
++        allTasks == null -> emptyList()
++        day == today -> GoogleTasksSource.forDay(allTasks, today)
++        else -> GoogleTasksSource.onDay(allTasks, day)
++    }
++    val tasksStatus: @Composable () -> Unit = {
++        TasksStatus(tasks, onConnect = { connect(interactive = true) })
++    }
++
+     NoopCard(tint = Palette.accent) {
+         Column(verticalArrangement = Arrangement.spacedBy(Metrics.space12)) {
+-            Overline(uiString(R.string.victor_day_title))
+-            weight?.let { WeightRow(it) }
+-            Block(Icons.Outlined.Event, onClick = { openCalendar(ctx) }) {
+-                when {
+-                    !calendarAllowed -> Action(uiString(R.string.victor_day_calendar_allow)) {
+-                        calendarPermission.launch(Manifest.permission.READ_CALENDAR)
++            Row(verticalAlignment = Alignment.CenterVertically) {
++                Overline(uiString(R.string.victor_day_title), modifier = Modifier.weight(1f))
++                DayView.entries.forEach { v ->
++                    FoodChip(uiString(v.label), selected = view == v, small = true) {
++                        view = v
++                        DayCalendar.saveView(ctx, v)
++                        anchor = today
++                        selected = today
+                     }
+-                    agenda.isEmpty() -> Quiet(uiString(R.string.victor_day_calendar_empty))
+-                    else -> AgendaLines(agenda)
++                    if (v != DayView.entries.last()) Spacer(Modifier.width(4.dp))
+                 }
+             }
+-            Block(
+-                Icons.Outlined.TaskAlt,
+-                onClick = { openTasks(ctx) },
+-                onLongClick = { if (GoogleTasksSource.isConnected(ctx)) confirmDisconnect = true },
+-            ) {
+-                when (val t = tasks) {
+-                    TasksState.NotConnected -> Action(uiString(R.string.victor_day_tasks_connect)) { connect(interactive = true) }
+-                    TasksState.NeedsConsent -> Action(uiString(R.string.victor_day_tasks_reconnect)) { connect(interactive = true) }
+-                    TasksState.Loading -> CircularProgressIndicator(color = Palette.accent, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+-                    is TasksState.Ready -> if (t.tasks.isEmpty()) Quiet(uiString(R.string.victor_day_tasks_empty)) else TaskLines(t.tasks)
+-                    is TasksState.Failed -> Quiet(
+-                        uiString(
+-                            when (t.reason) {
+-                                TasksError.NOT_CONFIGURED -> R.string.victor_day_tasks_not_configured
+-                                TasksError.OFFLINE -> R.string.victor_day_tasks_offline
+-                                TasksError.SERVER -> R.string.victor_day_tasks_failed
+-                            },
+-                        ),
++            weight?.let { WeightRow(it) }
++            PeriodBar(
++                label = DayCalendar.label(view, anchor, locale),
++                atToday = DayCalendar.range(view, today, locale) == from to until,
++                onPrevious = {
++                    anchor = DayCalendar.shift(view, anchor, -1)
++                    selected = if (view == DayView.MONTH) anchor.withDayOfMonth(1) else anchor
++                },
++                onNext = {
++                    anchor = DayCalendar.shift(view, anchor, 1)
++                    selected = if (view == DayView.MONTH) anchor.withDayOfMonth(1) else anchor
++                },
++                onToday = {
++                    anchor = today
++                    selected = today
++                },
++            )
++            if (!calendarAllowed) {
++                Block(Icons.Outlined.Event, onClick = {}) {
++                    Action(uiString(R.string.victor_day_calendar_allow)) { calendarPermission.launch(Manifest.permission.READ_CALENDAR) }
++                }
++            }
++            when (view) {
++                DayView.DAY -> {
++                    if (calendarAllowed) {
++                        Block(Icons.Outlined.Event, onClick = { openCalendar(ctx, anchor) }) {
++                            val events = agenda[anchor].orEmpty()
++                            if (events.isEmpty()) Quiet(uiString(R.string.victor_day_calendar_empty)) else AgendaLines(events, MAX_EVENTS)
++                        }
++                    }
++                    Block(
++                        Icons.Outlined.TaskAlt,
++                        onClick = { openTasks(ctx) },
++                        onLongClick = { if (GoogleTasksSource.isConnected(ctx)) confirmDisconnect = true },
++                    ) {
++                        if (allTasks == null) tasksStatus()
++                        else tasksOn(anchor).let { if (it.isEmpty()) Quiet(uiString(R.string.victor_day_tasks_empty)) else TaskLines(it, MAX_TASKS) }
++                    }
++                }
++                DayView.WEEK -> {
++                    val days = generateSequence(from) { it.plusDays(1) }.takeWhile { it.isBefore(until) }
++                        .filter { agenda[it].orEmpty().isNotEmpty() || tasksOn(it).isNotEmpty() }.toList()
++                    if (days.isEmpty()) Quiet(uiString(R.string.victor_day_nothing))
++                    days.forEach { d ->
++                        Column(
++                            modifier = Modifier.fillMaxWidth().clickable { openCalendar(ctx, d) },
++                            verticalArrangement = Arrangement.spacedBy(Metrics.space4),
++                        ) {
++                            Text(
++                                DayCalendar.dayTitle(d, locale),
++                                style = NoopType.subhead,
++                                color = if (d == today) Palette.accent else Palette.textSecondary,
++                            )
++                            agenda[d]?.let { AgendaLines(it, WEEK_PER_DAY) }
++                            tasksOn(d).takeIf { it.isNotEmpty() }?.let { TaskLines(it, WEEK_PER_DAY) }
++                        }
++                    }
++                    if (allTasks == null) Block(Icons.Outlined.TaskAlt, onClick = { openTasks(ctx) }) { tasksStatus() }
++                }
++                DayView.MONTH -> {
++                    MonthGrid(
++                        month = YearMonth.from(anchor),
++                        today = today,
++                        selected = selected,
++                        hasEvents = { agenda[it].orEmpty().isNotEmpty() },
++                        hasTasks = { tasksOn(it).isNotEmpty() },
++                        locale = locale,
++                        onSelect = { selected = it },
+                     )
++                    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space4)) {
++                        Text(DayCalendar.dayTitle(selected, locale), style = NoopType.subhead, color = Palette.textSecondary)
++                        val events = agenda[selected].orEmpty()
++                        val due = tasksOn(selected)
++                        if (events.isEmpty() && due.isEmpty() && allTasks != null) Quiet(uiString(R.string.victor_day_nothing))
++                        if (events.isNotEmpty()) AgendaLines(events, MAX_EVENTS)
++                        if (due.isNotEmpty()) TaskLines(due, MAX_TASKS)
++                    }
++                    if (allTasks == null) Block(Icons.Outlined.TaskAlt, onClick = { openTasks(ctx) }) { tasksStatus() }
+                 }
+             }
+         }
+@@ -229,12 +308,12 @@ private fun WeightRow(w: DayWeight) {
+ }
+ 
+ @Composable
+-private fun AgendaLines(events: List<AgendaEvent>) {
++private fun AgendaLines(events: List<AgendaEvent>, limit: Int) {
+     val ctx = LocalContext.current
+     val now = System.currentTimeMillis()
+     val fmt = remember { DateFormat.getTimeFormat(ctx) }
+     Column(verticalArrangement = Arrangement.spacedBy(Metrics.space6)) {
+-        events.take(MAX_EVENTS).forEach { e ->
++        events.take(limit).forEach { e ->
+             val past = !e.allDay && e.end < now
+             Row(horizontalArrangement = Arrangement.spacedBy(Metrics.space8)) {
+                 // An all-day entry simply has no time: the empty column says it, no extra words.
+@@ -254,15 +333,15 @@ private fun AgendaLines(events: List<AgendaEvent>) {
+                 )
+             }
+         }
+-        if (events.size > MAX_EVENTS) Quiet(uiString(R.string.victor_day_more, events.size - MAX_EVENTS))
++        if (events.size > limit) Quiet(uiString(R.string.victor_day_more, events.size - limit))
+     }
+ }
+ 
+ @Composable
+-private fun TaskLines(tasks: List<DayTask>) {
++private fun TaskLines(tasks: List<DayTask>, limit: Int) {
+     val today = LocalDate.now()
+     Column(verticalArrangement = Arrangement.spacedBy(Metrics.space6)) {
+-        tasks.take(MAX_TASKS).forEach { t ->
++        tasks.take(limit).forEach { t ->
+             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space8)) {
+                 Text(t.title, style = NoopType.body, color = Palette.textPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                 if (t.due != null && t.due.isBefore(today)) {
+@@ -270,7 +349,7 @@ private fun TaskLines(tasks: List<DayTask>) {
+                 }
+             }
+         }
+-        if (tasks.size > MAX_TASKS) Quiet(uiString(R.string.victor_day_more, tasks.size - MAX_TASKS))
++        if (tasks.size > limit) Quiet(uiString(R.string.victor_day_more, tasks.size - limit))
+     }
+ }
+ 
+@@ -287,15 +366,16 @@ private fun Block(icon: ImageVector, onClick: () -> Unit, onLongClick: (() -> Un
+ }
+ 
+ @Composable
+-private fun Quiet(text: String) = Text(text, style = NoopType.subhead, color = Palette.textSecondary)
++internal fun Quiet(text: String) = Text(text, style = NoopType.subhead, color = Palette.textSecondary)
+ 
+ /** A one-tap switch-on, sized like a line of the card rather than a button. */
+ @Composable
+-private fun Action(text: String, onClick: () -> Unit) =
++internal fun Action(text: String, onClick: () -> Unit) =
+     Text(text, style = NoopType.headline, color = Palette.accent, modifier = Modifier.clickable(onClick = onClick))
+ 
+-private fun openCalendar(ctx: Context) {
+-    val uri = CalendarContract.CONTENT_URI.buildUpon().appendPath("time").appendPath(System.currentTimeMillis().toString()).build()
++private fun openCalendar(ctx: Context, day: LocalDate = LocalDate.now()) {
++    val at = if (day == LocalDate.now()) System.currentTimeMillis() else day.atTime(9, 0).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
++    val uri = CalendarContract.CONTENT_URI.buildUpon().appendPath("time").appendPath(at.toString()).build()
+     tryStart(ctx, Intent(Intent.ACTION_VIEW, uri))
+ }
+ 
+diff --git a/android/app/src/main/java/com/noop/food/FoodAdaptive.kt b/android/app/src/main/java/com/noop/food/FoodAdaptive.kt
+index 2ad57f0a..bc2b9589 100644
+--- a/android/app/src/main/java/com/noop/food/FoodAdaptive.kt
++++ b/android/app/src/main/java/com/noop/food/FoodAdaptive.kt
+@@ -64,9 +64,11 @@ internal object FoodAdaptive {
+         }.getOrDefault(emptyList())
+         val days = days(entries, weights, today)
+         val estimate = AdaptiveExpenditureEngine.estimate(days) ?: return building(days)
+-        val burns = windowIntakeDays(days, estimate).mapNotNull { day ->
+-            runCatching { FoodEnergy.load(ctx, repo, strapId, day)?.burnedKcal }.getOrNull()
+-        }
++        val window = windowIntakeDays(days, estimate)
++        val energy = if (window.isEmpty()) emptyMap() else runCatching {
++            FoodEnergy.loadRange(ctx, repo, strapId, window.first(), window.last())
++        }.getOrDefault(emptyMap())
++        val burns = window.mapNotNull { energy[it]?.burnedKcal }
+         return AdaptiveState.Ready(estimate, burns.takeIf { it.isNotEmpty() }?.average())
+     }
+ }
+diff --git a/android/app/src/main/java/com/noop/food/FoodEnergy.kt b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
+index df6e5cfa..3a68828b 100644
+--- a/android/app/src/main/java/com/noop/food/FoodEnergy.kt
++++ b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
+@@ -97,22 +97,42 @@ internal data class FoodEnergy(
+         }
+ 
+         /** Read the day's energy. Best-effort: a failed read just leaves its candidate out. */
+-        suspend fun load(ctx: Context, repo: WhoopRepository, strapId: String, day: String): FoodEnergy? {
++        suspend fun load(ctx: Context, repo: WhoopRepository, strapId: String, day: String): FoodEnergy? =
++            loadRange(ctx, repo, strapId, day, day)[day]
++
++        /**
++         * Every day from [from] to [to] (inclusive, "yyyy-MM-dd") in three reads rather than three per day,
++         * for the history charts. Days with nothing known are absent.
++         */
++        suspend fun loadRange(ctx: Context, repo: WhoopRepository, strapId: String, from: String, to: String): Map<String, FoodEnergy> {
+             val phoneRows = runCatching {
+-                repo.appleDaily("apple-health", day, day) + repo.appleDaily("health-connect", day, day)
++                repo.appleDaily("apple-health", from, to) + repo.appleDaily("health-connect", from, to)
+             }.getOrDefault(emptyList())
+-            val phoneActive = phoneRows.firstNotNullOfOrNull { r -> r.activeKcal?.takeIf { it > 0 } }
+-            val phoneBasal = phoneRows.firstNotNullOfOrNull { r -> r.basalKcal?.takeIf { it > 0 } }
++            val phoneActive = HashMap<String, Double>()
++            val phoneBasal = HashMap<String, Double>()
++            for (r in phoneRows) {
++                r.activeKcal?.takeIf { it > 0 }?.let { phoneActive.putIfAbsent(r.day, it) }
++                r.basalKcal?.takeIf { it > 0 }?.let { phoneBasal.putIfAbsent(r.day, it) }
++            }
+             val strap = runCatching {
+-                repo.resolvedSeries("active_kcal", "my-whoop", day, day, strapDeviceId = strapId)
+-                    .points.firstOrNull()?.value?.takeIf { it > 0 }
+-            }.getOrNull()
++                repo.resolvedSeries("active_kcal", "my-whoop", from, to, strapDeviceId = strapId)
++                    .points.filter { it.value > 0 }.associate { it.day to it.value }
++            }.getOrDefault(emptyMap())
+             val basal = runCatching { ScaleImport.snapshot(repo)?.bmr?.value }.getOrNull()?.takeIf { it > 0 }
+                 ?: runCatching {
+                     val p = ProfileStore.from(ctx)
+                     profileBasalKcal(p.sex, p.weightKg, p.heightCm, p.age)
+                 }.getOrNull()
+-            return resolve(strap, phoneActive, phoneBasal, basal, dayFraction(day, LocalDate.now(ZoneId.systemDefault())))
++            val today = LocalDate.now(ZoneId.systemDefault())
++            val out = LinkedHashMap<String, FoodEnergy>()
++            var d = LocalDate.parse(from)
++            val last = LocalDate.parse(to)
++            while (!d.isAfter(last)) {
++                val key = d.toString()
++                resolve(strap[key], phoneActive[key], phoneBasal[key], basal, dayFraction(key, today))?.let { out[key] = it }
++                d = d.plusDays(1)
++            }
++            return out
+         }
+     }
+ }
+diff --git a/android/app/src/main/java/com/noop/food/FoodHistory.kt b/android/app/src/main/java/com/noop/food/FoodHistory.kt
+new file mode 100644
+index 00000000..56b4587f
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/food/FoodHistory.kt
+@@ -0,0 +1,307 @@
++package com.noop.food
++
++import androidx.compose.foundation.Canvas
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.ExperimentalLayoutApi
++import androidx.compose.foundation.layout.FlowRow
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.produceState
++import androidx.compose.runtime.saveable.rememberSaveable
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.geometry.CornerRadius
++import androidx.compose.ui.geometry.Offset
++import androidx.compose.ui.geometry.Size
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.PathEffect
++import androidx.compose.ui.graphics.drawscope.DrawScope
++import androidx.compose.foundation.background
++import androidx.compose.ui.platform.LocalConfiguration
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.unit.dp
++import com.noop.R
++import com.noop.ui.AppViewModel
++import com.noop.ui.Metrics
++import com.noop.ui.NoopCard
++import com.noop.ui.NoopType
++import com.noop.ui.Overline
++import com.noop.ui.Palette
++import com.noop.ui.uiString
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import java.time.LocalDate
++import java.time.format.DateTimeFormatter
++import java.util.Locale
++import kotlin.math.max
++
++/** victor:food — one day of the history: what was eaten (null = nothing logged) and burned (null = unknown). */
++internal data class HistoryDay(val day: LocalDate, val eaten: FoodTotals?, val burnedKcal: Double?)
++
++/** Averages over the logged days, today left out (it is still going). */
++internal data class HistorySummary(val loggedDays: Int, val avgKcal: Double?, val avgProteinG: Double?, val avgBalance: Double?)
++
++/** victor:food — the Food tab's history: how intake (and its balance) moved, and where it comes from. */
++internal object FoodHistory {
++
++    enum class Range(val days: Int) { WEEK(7), MONTH(30), QUARTER(90) }
++
++    /** Pure. The [range] days ending today, oldest first; burn only where it means something (see below). */
++    fun days(entries: List<FoodEntry>, energy: Map<String, FoodEnergy>, today: LocalDate, range: Range): List<HistoryDay> {
++        val byDay = entries.groupBy { it.day }
++        return (range.days - 1 downTo 0).map { back ->
++            val d = today.minusDays(back.toLong())
++            val key = d.toString()
++            val eaten = byDay[key]?.let { FoodTotals.ofEntries(it) }
++            // A resting-only figure says nothing on its own: plot it only where it backs a balance.
++            val burned = energy[key]?.takeIf { it.source != EnergySource.BASAL || eaten != null }?.burnedKcal
++            HistoryDay(d, eaten, burned)
++        }
++    }
++
++    /** Pure. Today never counts: its intake is half a day. */
++    fun summary(days: List<HistoryDay>, today: LocalDate): HistorySummary {
++        val logged = days.filter { it.day != today && it.eaten != null }
++        if (logged.isEmpty()) return HistorySummary(0, null, null, null)
++        val balances = logged.mapNotNull { d -> d.burnedKcal?.let { d.eaten!!.kcal - it } }
++        return HistorySummary(
++            loggedDays = logged.size,
++            avgKcal = logged.map { it.eaten!!.kcal }.average(),
++            avgProteinG = logged.map { it.eaten!!.proteinG }.average(),
++            avgBalance = balances.takeIf { it.isNotEmpty() }?.average(),
++        )
++    }
++
++    /** Pure. Average kcal of each meal type over the days it was logged, in the order of the day. */
++    fun mealAverages(entries: List<FoodEntry>, from: LocalDate, today: LocalDate): List<Pair<MealType, Double>> {
++        val inRange = entries.filter { it.day >= from.toString() && it.day < today.toString() }
++        return MealType.entries.mapNotNull { meal ->
++            val perDay = inRange.filter { it.meal == meal }.groupBy { it.day }.values.map { list -> list.sumOf { it.kcal } }
++            perDay.takeIf { it.isNotEmpty() }?.let { meal to it.average() }
++        }
++    }
++}
++
++/**
++ * victor:food — the Historial view of the Food tab: a range picker, the averages, and three charts
++ * (eaten vs burned with the goal, macros, kcal by meal). Burn comes from [FoodEnergy.loadRange], the same
++ * resolver as every other balance in the app.
++ */
++@OptIn(ExperimentalLayoutApi::class)
++@Composable
++internal fun FoodHistorySection(vm: AppViewModel, entries: List<FoodEntry>, kcalTarget: Int?) {
++    val ctx = LocalContext.current
++    val today = FoodDays.today().let { LocalDate.parse(it) }
++    var range by rememberSaveable { mutableStateOf(FoodHistory.Range.MONTH) }
++    val from = today.minusDays(range.days.toLong() - 1)
++    val energy by produceState(emptyMap<String, FoodEnergy>(), range, entries) {
++        value = withContext(Dispatchers.IO) {
++            runCatching { FoodEnergy.loadRange(ctx, vm.repo, vm.activeStrapId, from.toString(), today.toString()) }.getOrDefault(emptyMap())
++        }
++    }
++    val days = FoodHistory.days(entries, energy, today, range)
++    val summary = FoodHistory.summary(days, today)
++
++    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space16)) {
++        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
++            FoodHistory.Range.entries.forEach { r ->
++                FoodChip(uiString(rangeLabel(r)), selected = range == r) { range = r }
++            }
++        }
++        NoopCard {
++            Row(Modifier.fillMaxWidth()) {
++                Stat(uiString(R.string.victor_food_history_avg), summary.avgKcal?.let { "${whole(it)} kcal" }, Modifier.weight(1f))
++                Stat(
++                    uiString(R.string.victor_food_history_balance),
++                    summary.avgBalance?.let { (if (it > 0) "+" else "") + whole(it) },
++                    Modifier.weight(1f),
++                    color = summary.avgBalance?.let { if (it < 0) Palette.chargeColor else Palette.metricAmber },
++                )
++                Stat(uiString(R.string.victor_food_protein), summary.avgProteinG?.let { "${whole(it)} g" }, Modifier.weight(1f))
++            }
++        }
++        if (summary.loggedDays == 0 && days.none { it.eaten != null }) {
++            Text(uiString(R.string.victor_food_history_empty), style = NoopType.subhead, color = Palette.textSecondary)
++            return@Column
++        }
++        ChartCard(uiString(R.string.victor_food_history_kcal_title)) {
++            KcalChart(days, kcalTarget)
++            Legend(
++                listOf(
++                    Palette.accent to uiString(R.string.victor_food_history_eaten),
++                    Palette.textSecondary to uiString(R.string.victor_food_history_burned),
++                ) + listOfNotNull(kcalTarget?.let { Palette.chargeColor to uiString(R.string.victor_food_history_goal) }),
++            )
++            AxisDates(days)
++        }
++        ChartCard(uiString(R.string.victor_food_history_macros_title)) {
++            MacroChart(days)
++            Legend(
++                listOf(
++                    Palette.metricCyan to uiString(R.string.victor_food_protein),
++                    Palette.metricAmber to uiString(R.string.victor_food_carbs),
++                    Palette.metricRose to uiString(R.string.victor_food_fat),
++                ),
++            )
++            AxisDates(days)
++        }
++        val meals = FoodHistory.mealAverages(entries, from, today)
++        if (meals.isNotEmpty()) {
++            ChartCard(uiString(R.string.victor_food_history_meals_title)) { MealBars(meals) }
++        }
++    }
++}
++
++private fun rangeLabel(r: FoodHistory.Range): Int = when (r) {
++    FoodHistory.Range.WEEK -> R.string.victor_food_history_week
++    FoodHistory.Range.MONTH -> R.string.victor_food_history_month
++    FoodHistory.Range.QUARTER -> R.string.victor_food_history_quarter
++}
++
++@Composable
++private fun Stat(label: String, value: String?, modifier: Modifier, color: Color? = null) {
++    Column(modifier, verticalArrangement = Arrangement.spacedBy(Metrics.space2)) {
++        Text(label, style = NoopType.caption, color = Palette.textSecondary)
++        Text(value ?: "—", style = NoopType.chartValue, color = color ?: Palette.textPrimary)
++    }
++}
++
++@Composable
++private fun ChartCard(title: String, content: @Composable () -> Unit) {
++    NoopCard {
++        Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
++            Overline(title)
++            content()
++        }
++    }
++}
++
++private val ChartHeight = 170.dp
++
++/** Bars: eaten per day; dots + line: burned; dashed line: the daily goal. */
++@Composable
++private fun KcalChart(days: List<HistoryDay>, target: Int?) {
++    val eatenColor = Palette.accent
++    val burnColor = Palette.textSecondary
++    val goalColor = Palette.chargeColor
++    val grid = Palette.hairline
++    val top = max(
++        1.0,
++        listOfNotNull(days.mapNotNull { it.eaten?.kcal }.maxOrNull(), days.mapNotNull { it.burnedKcal }.maxOrNull(), target?.toDouble()).maxOrNull() ?: 1.0,
++    ) * 1.1
++    Canvas(Modifier.fillMaxWidth().height(ChartHeight)) {
++        drawGrid(grid)
++        val slot = size.width / days.size
++        val barW = (slot * 0.62f).coerceAtLeast(1.5f)
++        days.forEachIndexed { i, d ->
++            val kcal = d.eaten?.kcal ?: return@forEachIndexed
++            val h = (kcal / top * size.height).toFloat()
++            drawRoundRect(eatenColor, Offset(i * slot + (slot - barW) / 2, size.height - h), Size(barW, h), CornerRadius(barW / 3))
++        }
++        var prev: Offset? = null
++        days.forEachIndexed { i, d ->
++            val b = d.burnedKcal ?: run { prev = null; return@forEachIndexed }
++            val p = Offset(i * slot + slot / 2, size.height - (b / top * size.height).toFloat())
++            prev?.let { drawLine(burnColor, it, p, strokeWidth = 2.dp.toPx()) }
++            drawCircle(burnColor, radius = (if (days.size > 40) 1.5f else 3f).dp.toPx(), center = p)
++            prev = p
++        }
++        target?.let {
++            val y = size.height - (it / top * size.height).toFloat()
++            drawLine(goalColor, Offset(0f, y), Offset(size.width, y), strokeWidth = 1.5.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 10f)))
++        }
++    }
++}
++
++/** Stacked grams per day: protein, carbs, fat. */
++@Composable
++private fun MacroChart(days: List<HistoryDay>) {
++    val colors = listOf(Palette.metricCyan, Palette.metricAmber, Palette.metricRose)
++    val grid = Palette.hairline
++    val top = max(1.0, days.mapNotNull { d -> d.eaten?.let { it.proteinG + it.carbsG + it.fatG } }.maxOrNull() ?: 1.0) * 1.1
++    Canvas(Modifier.fillMaxWidth().height(ChartHeight)) {
++        drawGrid(grid)
++        val slot = size.width / days.size
++        val barW = (slot * 0.62f).coerceAtLeast(1.5f)
++        days.forEachIndexed { i, d ->
++            val t = d.eaten ?: return@forEachIndexed
++            var base = size.height
++            listOf(t.proteinG, t.carbsG, t.fatG).forEachIndexed { k, g ->
++                val h = (g / top * size.height).toFloat()
++                if (h > 0f) drawRect(colors[k], Offset(i * slot + (slot - barW) / 2, base - h), Size(barW, h))
++                base -= h
++            }
++        }
++    }
++}
++
++private fun DrawScope.drawGrid(color: Color) {
++    for (k in 1..3) {
++        val y = size.height * k / 4f
++        drawLine(color, Offset(0f, y), Offset(size.width, y), strokeWidth = 1f)
++    }
++    drawLine(color, Offset(0f, size.height), Offset(size.width, size.height), strokeWidth = 1.dp.toPx())
++}
++
++/** Average kcal per meal type, as horizontal bars. */
++@Composable
++private fun MealBars(meals: List<Pair<MealType, Double>>) {
++    val top = meals.maxOf { it.second }.coerceAtLeast(1.0)
++    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
++        meals.forEach { (meal, kcal) ->
++            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space8)) {
++                Text(uiString(mealLabel(meal)), style = NoopType.subhead, color = Palette.textPrimary, modifier = Modifier.width(96.dp))
++                Box(Modifier.weight(1f).height(14.dp)) {
++                    Box(
++                        Modifier
++                            .fillMaxWidth((kcal / top).toFloat().coerceIn(0.02f, 1f))
++                            .height(14.dp)
++                            .clip(RoundedCornerShape(50))
++                            .background(Palette.accent),
++                    )
++                }
++                Text(whole(kcal), style = NoopType.bodyNumber, color = Palette.textSecondary, modifier = Modifier.width(52.dp))
++            }
++        }
++    }
++}
++
++@OptIn(ExperimentalLayoutApi::class)
++@Composable
++private fun Legend(items: List<Pair<Color, String>>) {
++    FlowRow(horizontalArrangement = Arrangement.spacedBy(Metrics.space12)) {
++        items.forEach { (c, label) ->
++            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space4)) {
++                Box(Modifier.size(10.dp).clip(RoundedCornerShape(50)).background(c))
++                Text(label, style = NoopType.caption, color = Palette.textSecondary)
++            }
++        }
++    }
++}
++
++/** First, middle and last day under a chart. */
++@Composable
++private fun AxisDates(days: List<HistoryDay>) {
++    val locale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
++    val fmt = DateTimeFormatter.ofPattern("d MMM", locale)
++    Row(Modifier.fillMaxWidth()) {
++        Text(days.first().day.format(fmt), style = NoopType.caption, color = Palette.textTertiary)
++        Spacer(Modifier.weight(1f))
++        if (days.size > 2) Text(days[days.size / 2].day.format(fmt), style = NoopType.caption, color = Palette.textTertiary)
++        Spacer(Modifier.weight(1f))
++        Text(days.last().day.format(fmt), style = NoopType.caption, color = Palette.textTertiary)
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+index 42ce5751..b1482785 100644
+--- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
++++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+@@ -152,49 +152,62 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+     fun startGallery() = pickPhotos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+ 
+     var confirmDelete by remember { mutableStateOf<FoodEntry?>(null) }
++    // 0 = today (log a meal), 1 = history (charts, real burn, previous days).
++    var tab by rememberSaveable { mutableStateOf(0) }
++    val kcalTarget = VictorGoalsStore.load(ctx).dailyKcalTarget
+ 
+     LazyScreenScaffold(
+         title = uiString(R.string.victor_food_title),
+         subtitle = uiString(R.string.victor_food_subtitle),
+     ) {
+-        item { FoodDayCard(todayTotals, todayEntries.size, energy, kcalTarget = VictorGoalsStore.load(ctx).dailyKcalTarget) }
+         item {
+-            Row(horizontalArrangement = Arrangement.spacedBy(Metrics.space12)) {
+-                NoopButton(
+-                    text = uiString(R.string.victor_food_photo),
+-                    leadingIcon = Icons.Filled.PhotoCamera,
+-                    kind = NoopButtonKind.Primary,
+-                    modifier = Modifier.weight(1f),
+-                ) { startCamera() }
+-                NoopButton(
+-                    text = uiString(R.string.victor_food_gallery),
+-                    leadingIcon = Icons.Filled.PhotoLibrary,
+-                    kind = NoopButtonKind.Secondary,
+-                    modifier = Modifier.weight(1f),
+-                ) { startGallery() }
++            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
++                FoodChip(uiString(R.string.victor_food_today), selected = tab == 0) { tab = 0 }
++                FoodChip(uiString(R.string.victor_food_history), selected = tab == 1) { tab = 1 }
+             }
+         }
+-        item {
+-            NoopCard {
+-                Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
+-                    Overline(uiString(R.string.victor_food_today))
+-                    if (todayEntries.isEmpty()) {
+-                        Text(
+-                            uiString(R.string.victor_food_today_empty),
+-                            style = NoopType.subhead,
+-                            color = Palette.textSecondary,
+-                        )
+-                    } else {
+-                        MealGroups(todayEntries, onEdit = food::edit, onDelete = { confirmDelete = it })
++        if (tab == 0) {
++            item { FoodDayCard(todayTotals, todayEntries.size, energy, kcalTarget = kcalTarget) }
++            item {
++                Row(horizontalArrangement = Arrangement.spacedBy(Metrics.space12)) {
++                    NoopButton(
++                        text = uiString(R.string.victor_food_photo),
++                        leadingIcon = Icons.Filled.PhotoCamera,
++                        kind = NoopButtonKind.Primary,
++                        modifier = Modifier.weight(1f),
++                    ) { startCamera() }
++                    NoopButton(
++                        text = uiString(R.string.victor_food_gallery),
++                        leadingIcon = Icons.Filled.PhotoLibrary,
++                        kind = NoopButtonKind.Secondary,
++                        modifier = Modifier.weight(1f),
++                    ) { startGallery() }
++                }
++            }
++            item {
++                NoopCard {
++                    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
++                        Overline(uiString(R.string.victor_food_today))
++                        if (todayEntries.isEmpty()) {
++                            Text(
++                                uiString(R.string.victor_food_today_empty),
++                                style = NoopType.subhead,
++                                color = Palette.textSecondary,
++                            )
++                        } else {
++                            MealGroups(todayEntries, onEdit = food::edit, onDelete = { confirmDelete = it })
++                        }
+                     }
+                 }
+             }
+-        }
+-        adaptive?.let { item { AdaptiveCard(it) } }
+-        if (previous.isNotEmpty()) {
+-            item { Overline(uiString(R.string.victor_food_previous)) }
+-            items(previous, key = { it.first }) { (day, list) ->
+-                DayCard(vm, day, foodDayLabel(day, today, locale), list, onEdit = food::edit, onDelete = { confirmDelete = it })
++        } else {
++            item { FoodHistorySection(vm, entries, kcalTarget) }
++            adaptive?.let { item { AdaptiveCard(it) } }
++            if (previous.isNotEmpty()) {
++                item { Overline(uiString(R.string.victor_food_previous)) }
++                items(previous, key = { it.first }) { (day, list) ->
++                    DayCard(vm, day, foodDayLabel(day, today, locale), list, onEdit = food::edit, onDelete = { confirmDelete = it })
++                }
+             }
+         }
+         item {
+diff --git a/android/app/src/main/res/values-es/strings_victor_day.xml b/android/app/src/main/res/values-es/strings_victor_day.xml
+index 0100d8ee..28a384b2 100644
+--- a/android/app/src/main/res/values-es/strings_victor_day.xml
++++ b/android/app/src/main/res/values-es/strings_victor_day.xml
+@@ -20,4 +20,11 @@
+     <string name="victor_day_tasks_disconnect_body">Tus tareas dejan de verse aquí. También puedes quitar el acceso en myaccount.google.com → Seguridad.</string>
+     <string name="victor_day_disconnect">Desconectar</string>
+     <string name="victor_day_cancel">Cancelar</string>
++    <string name="victor_day_view_day">Día</string>
++    <string name="victor_day_view_week">Semana</string>
++    <string name="victor_day_view_month">Mes</string>
++    <string name="victor_day_nothing">Nada previsto</string>
++    <string name="victor_day_back_today">Hoy</string>
++    <string name="victor_day_previous">Anterior</string>
++    <string name="victor_day_next">Siguiente</string>
+ </resources>
+diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
+index c961d49c..5337b5c2 100644
+--- a/android/app/src/main/res/values-es/strings_victor_food.xml
++++ b/android/app/src/main/res/values-es/strings_victor_food.xml
+@@ -106,4 +106,18 @@
+     <string name="victor_food_adaptive_detail">%1$s–%2$s kcal, según lo que comes y cómo cambia tu peso (%3$d días)</string>
+     <string name="victor_food_adaptive_app">La app estimaba %1$s kcal/día esos días</string>
+     <string name="victor_food_adaptive_building">Se calcula con 3 semanas que tengan 14 días de comidas y 6 pesajes. Llevas %1$d/14 días de comidas y %2$d/6 pesajes.</string>
++
++    <string name="victor_food_history">Historial</string>
++    <string name="victor_food_history_week">7 días</string>
++    <string name="victor_food_history_month">30 días</string>
++    <string name="victor_food_history_quarter">90 días</string>
++    <string name="victor_food_history_avg">Media al día</string>
++    <string name="victor_food_history_balance">Balance medio</string>
++    <string name="victor_food_history_empty">Aún no hay nada apuntado en estos días.</string>
++    <string name="victor_food_history_kcal_title">Calorías</string>
++    <string name="victor_food_history_eaten">Comido</string>
++    <string name="victor_food_history_burned">Gastado</string>
++    <string name="victor_food_history_goal">Objetivo</string>
++    <string name="victor_food_history_macros_title">Macros (g)</string>
++    <string name="victor_food_history_meals_title">Media por comida (kcal)</string>
+ </resources>
+diff --git a/android/app/src/main/res/values/strings_victor_day.xml b/android/app/src/main/res/values/strings_victor_day.xml
+index 215e7fad..212f5be9 100644
+--- a/android/app/src/main/res/values/strings_victor_day.xml
++++ b/android/app/src/main/res/values/strings_victor_day.xml
+@@ -20,4 +20,11 @@
+     <string name="victor_day_tasks_disconnect_body">Your tasks stop showing here. You can also remove the access at myaccount.google.com → Security.</string>
+     <string name="victor_day_disconnect">Disconnect</string>
+     <string name="victor_day_cancel">Cancel</string>
++    <string name="victor_day_view_day">Day</string>
++    <string name="victor_day_view_week">Week</string>
++    <string name="victor_day_view_month">Month</string>
++    <string name="victor_day_nothing">Nothing planned</string>
++    <string name="victor_day_back_today">Today</string>
++    <string name="victor_day_previous">Previous</string>
++    <string name="victor_day_next">Next</string>
+ </resources>
+diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
+index 7eb580e3..441607c9 100644
+--- a/android/app/src/main/res/values/strings_victor_food.xml
++++ b/android/app/src/main/res/values/strings_victor_food.xml
+@@ -106,4 +106,18 @@
+     <string name="victor_food_adaptive_detail">%1$s–%2$s kcal, from what you eat and how your weight moves (%3$d days)</string>
+     <string name="victor_food_adaptive_app">The app estimated %1$s kcal/day those days</string>
+     <string name="victor_food_adaptive_building">Needs 3 weeks with 14 days of meals and 6 weigh-ins. So far: %1$d/14 days of meals, %2$d/6 weigh-ins.</string>
++
++    <string name="victor_food_history">History</string>
++    <string name="victor_food_history_week">7 days</string>
++    <string name="victor_food_history_month">30 days</string>
++    <string name="victor_food_history_quarter">90 days</string>
++    <string name="victor_food_history_avg">Daily average</string>
++    <string name="victor_food_history_balance">Average balance</string>
++    <string name="victor_food_history_empty">Nothing logged in these days yet.</string>
++    <string name="victor_food_history_kcal_title">Calories</string>
++    <string name="victor_food_history_eaten">Eaten</string>
++    <string name="victor_food_history_burned">Burned</string>
++    <string name="victor_food_history_goal">Goal</string>
++    <string name="victor_food_history_macros_title">Macros (g)</string>
++    <string name="victor_food_history_meals_title">Average by meal (kcal)</string>
+ </resources>
+diff --git a/android/app/src/test/java/com/noop/day/DayCalendarTest.kt b/android/app/src/test/java/com/noop/day/DayCalendarTest.kt
+new file mode 100644
+index 00000000..e2bfa35a
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/day/DayCalendarTest.kt
+@@ -0,0 +1,61 @@
++package com.noop.day
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Test
++import java.time.LocalDate
++import java.time.YearMonth
++import java.time.ZoneId
++import java.util.Locale
++
++/** victor:day — the Día / Semana / Mes periods, the month grid and what each day shows. */
++class DayCalendarTest {
++
++    private val es = Locale("es", "ES")
++    private val sat = LocalDate.of(2026, 10, 17)
++
++    @Test
++    fun weeksStartOnMondayInSpainAndMonthsOnTheFirst() {
++        assertEquals(LocalDate.of(2026, 10, 12) to LocalDate.of(2026, 10, 19), DayCalendar.range(DayView.WEEK, sat, es))
++        assertEquals(LocalDate.of(2026, 10, 1) to LocalDate.of(2026, 11, 1), DayCalendar.range(DayView.MONTH, sat, es))
++        assertEquals(sat to sat.plusDays(1), DayCalendar.range(DayView.DAY, sat, es))
++        assertEquals(LocalDate.of(2026, 11, 17), DayCalendar.shift(DayView.MONTH, sat, 1))
++        assertEquals(LocalDate.of(2026, 10, 10), DayCalendar.shift(DayView.WEEK, sat, -1))
++    }
++
++    @Test
++    fun labelsReadInSpanish() {
++        assertEquals("12 – 18 oct", DayCalendar.label(DayView.WEEK, sat, es))
++        assertEquals("28 sept – 4 oct", DayCalendar.label(DayView.WEEK, LocalDate.of(2026, 10, 1), es))
++        assertEquals("Octubre 2026", DayCalendar.label(DayView.MONTH, sat, es))
++        assertEquals("Sábado 17 oct", DayCalendar.label(DayView.DAY, sat, es))
++    }
++
++    @Test
++    fun monthGridPadsToWholeMondayFirstWeeks() {
++        // October 2026 starts on a Thursday: three blanks (L, M, X) before the 1st.
++        val cells = DayCalendar.monthCells(YearMonth.of(2026, 10), es)
++        assertEquals(0, cells.size % 7)
++        assertNull(cells[0]); assertNull(cells[2])
++        assertEquals(LocalDate.of(2026, 10, 1), cells[3])
++        assertEquals(LocalDate.of(2026, 10, 31), cells.filterNotNull().last())
++    }
++
++    @Test
++    fun eventsLandOnEveryDayTheyTouchAndTasksOnTheirDueDay() {
++        val madrid = ZoneId.of("Europe/Madrid")
++        fun at(d: LocalDate, h: Int) = d.atTime(h, 0).atZone(madrid).toInstant().toEpochMilli()
++        val mon = LocalDate.of(2026, 10, 12)
++        val events = listOf(
++            AgendaEvent("Gym", at(mon, 19), at(mon, 20), false),
++            AgendaEvent("Viaje", at(mon.plusDays(1), 18), at(mon.plusDays(3), 10), false),
++        )
++        val map = DayAgendaSource.byDay(events, mon, mon.plusDays(7), madrid)
++        assertEquals(listOf(mon, mon.plusDays(1), mon.plusDays(2), mon.plusDays(3)), map.keys.toList())
++        assertEquals(listOf("Viaje"), map[mon.plusDays(2)]!!.map { it.title })
++
++        val tasks = listOf(DayTask("b", sat, "L"), DayTask("A", sat, "L"), DayTask("vieja", sat.minusDays(2), "L"))
++        assertEquals(listOf("A", "b"), GoogleTasksSource.onDay(tasks, sat).map { it.title })
++        assertEquals(listOf("vieja", "A", "b"), GoogleTasksSource.forDay(tasks, sat).map { it.title })
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt b/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt
+new file mode 100644
+index 00000000..e2ef2887
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt
+@@ -0,0 +1,66 @@
++package com.noop.food
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Test
++import java.time.LocalDate
++
++/** victor:food — the history view's days, averages and per-meal breakdown. */
++class FoodHistoryTest {
++
++    private val today = LocalDate.of(2026, 10, 17)
++
++    private fun meal(day: LocalDate, kcal: Double, meal: MealType = MealType.LUNCH, p: Double = 30.0) = FoodEntry(
++        id = "$day-$kcal-$meal", timestamp = 0L, day = day.toString(), note = "", items = emptyList(),
++        kcal = kcal, proteinG = p, carbsG = 0.0, fatG = 0.0, thumbnailPaths = emptyList(), meal = meal,
++    )
++
++    private fun burned(day: LocalDate, kcal: Double) =
++        day.toString() to FoodEnergy.resolve(kcal, null, null, null, 1.0)!!
++
++    @Test
++    fun daysEndTodayOldestFirstWithGapsForUnloggedDays() {
++        val entries = listOf(meal(today, 500.0), meal(today.minusDays(2), 2000.0))
++        val days = FoodHistory.days(entries, mapOf(burned(today.minusDays(2), 2600.0)), today, FoodHistory.Range.WEEK)
++        assertEquals(7, days.size)
++        assertEquals(today.minusDays(6), days.first().day)
++        assertEquals(today, days.last().day)
++        assertNull(days[5].eaten) // yesterday: nothing logged
++        assertEquals(2000.0, days[4].eaten!!.kcal, 0.0)
++        assertEquals(2600.0, days[4].burnedKcal!!, 0.0)
++        // Resting-only days without food draw no burn point; with food they do (they back a balance).
++        val restOnly = mapOf(today.minusDays(1).toString() to FoodEnergy.resolve(null, null, null, 1800.0, 1.0)!!)
++        assertNull(FoodHistory.days(emptyList(), restOnly, today, FoodHistory.Range.WEEK)[5].burnedKcal)
++        assertEquals(1800.0, FoodHistory.days(listOf(meal(today.minusDays(1), 900.0)), restOnly, today, FoodHistory.Range.WEEK)[5].burnedKcal!!, 0.0)
++    }
++
++    @Test
++    fun averagesLeaveTodayOut() {
++        val entries = listOf(
++            meal(today, 400.0, p = 20.0),
++            meal(today.minusDays(1), 2200.0, p = 150.0),
++            meal(today.minusDays(2), 1800.0, p = 110.0),
++        )
++        val energy = mapOf(burned(today.minusDays(1), 2500.0), burned(today.minusDays(2), 2400.0))
++        val s = FoodHistory.summary(FoodHistory.days(entries, energy, today, FoodHistory.Range.WEEK), today)
++        assertEquals(2, s.loggedDays)
++        assertEquals(2000.0, s.avgKcal!!, 0.0)
++        assertEquals(130.0, s.avgProteinG!!, 0.0)
++        assertEquals(-450.0, s.avgBalance!!, 0.0)
++        assertNull(FoodHistory.summary(FoodHistory.days(emptyList(), emptyMap(), today, FoodHistory.Range.WEEK), today).avgKcal)
++    }
++
++    @Test
++    fun mealAveragesArePerLoggedDayInDayOrder() {
++        val d1 = today.minusDays(1)
++        val d2 = today.minusDays(2)
++        val entries = listOf(
++            meal(d1, 300.0, MealType.DINNER), meal(d1, 200.0, MealType.DINNER), // 500 on d1
++            meal(d2, 700.0, MealType.DINNER),
++            meal(d1, 450.0, MealType.BREAKFAST),
++            meal(today, 999.0, MealType.BREAKFAST), // today: left out
++        )
++        val avg = FoodHistory.mealAverages(entries, today.minusDays(29), today)
++        assertEquals(listOf(MealType.BREAKFAST to 450.0, MealType.DINNER to 600.0), avg)
++    }
++}
+-- 
+2.54.0
+
