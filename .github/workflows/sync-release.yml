@@ -90,6 +90,12 @@ jobs:
           git checkout -B build "$TAG"
           git am --3way "$RUNNER_TEMP"/patches/*.patch
 
+      - name: Español para los textos fijos de upstream
+        # Tools/victor_l10n.py (lo trae un parche) reescribe en el árbol de build los literales en
+        # inglés del código de upstream y genera el overlay de español corregido. Nunca falla por
+        # cambios de upstream: una regla que ya no encaja se salta y ese texto sale como upstream.
+        run: python3 Tools/victor_l10n.py
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

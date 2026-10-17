@@ -1,0 +1,1659 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Sat, 17 Oct 2026 16:47:19 +0200
+Subject: [PATCH] feat(food): several photos per meal, meal type and day, and
+ how much was eaten
+
+- One meal can carry up to four photos (camera one by one, or a multi-select
+  gallery pick); all go to Claude in a single request, which is told they are
+  one meal so each food is counted once.
+- Every meal has a type (breakfast, mid-morning, lunch, afternoon snack,
+  dinner, nibbles), guessed from Spanish meal hours and changeable; the day
+  can be moved to yesterday or any past date, keeping the time of day.
+- Each item has an "eaten" fraction (1/4 to x2) over the served portion; the
+  stored numbers are what was eaten, the sheet reopens at the whole portion.
+  The prompt also tells Claude to follow a note like "half the steak".
+- The Food tab groups each day by meal with per-meal totals; the coach line
+  gains a per-meal breakdown. Old logs read unchanged (single thumb, meal
+  from the clock, eaten 1).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../java/com/noop/food/FoodCoachContext.kt    |  20 +-
+ .../src/main/java/com/noop/food/FoodDraft.kt  |  74 ++++--
+ .../src/main/java/com/noop/food/FoodModels.kt |  56 +++-
+ .../src/main/java/com/noop/food/FoodScreen.kt |  67 +++--
+ .../src/main/java/com/noop/food/FoodSheet.kt  | 239 ++++++++++++++++--
+ .../src/main/java/com/noop/food/FoodStore.kt  |  40 ++-
+ .../main/java/com/noop/food/FoodViewModel.kt  |  57 ++++-
+ .../src/main/java/com/noop/food/FoodVision.kt |  53 ++--
+ .../java/com/noop/goals/VictorGoalsCard.kt    |  23 +-
+ .../res/values-es/strings_victor_food.xml     |  35 ++-
+ .../res/values-es/strings_victor_goals.xml    |   2 +-
+ .../main/res/values/strings_victor_food.xml   |  27 +-
+ .../test/java/com/noop/food/FoodLogTest.kt    |  71 +++++-
+ .../java/com/noop/food/FoodStoreCodecTest.kt  |  25 +-
+ .../java/com/noop/food/FoodVisionReplyTest.kt |   8 +-
+ .../com/noop/food/FoodVisionRequestTest.kt    |  24 +-
+ 16 files changed, 650 insertions(+), 171 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/food/FoodCoachContext.kt b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
+index 689f397a..e36085df 100644
+--- a/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
++++ b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
+@@ -18,9 +18,9 @@ object FoodCoachContext {
+         line(FoodStore.load(ctx), today)
+ 
+     /**
+-     * Pure. Example: `FOOD LOG (photo estimates): today 1850 kcal (P 120 g, C 180 g, F 60 g) from 3 meals;
+-     * previous 7 days avg 2100 kcal/day over 6 logged days`. Today is left out of the average because it
+-     * is still in progress.
++     * Pure. Example: `FOOD LOG (photo estimates): today 1850 kcal (P 120 g, C 180 g, F 60 g) from 3 meals
++     * (breakfast 400, lunch 900, dinner 550 kcal); previous 7 days avg 2100 kcal/day over 6 logged days`.
++     * Today is left out of the average because it is still in progress.
+      */
+     internal fun line(entries: List<FoodEntry>, today: LocalDate): String? {
+         val todayKey = today.toString()
+@@ -34,7 +34,10 @@ object FoodCoachContext {
+             val t = FoodTotals.ofEntries(todayEntries)
+             val n = todayEntries.size
+             parts += "today ${t.kcal.roundToInt()} kcal (P ${t.proteinG.roundToInt()} g, " +
+-                "C ${t.carbsG.roundToInt()} g, F ${t.fatG.roundToInt()} g) from $n ${if (n == 1) "meal" else "meals"}"
++                "C ${t.carbsG.roundToInt()} g, F ${t.fatG.roundToInt()} g) from $n ${if (n == 1) "meal" else "meals"} (" +
++                FoodDays.groupedByMeal(todayEntries).joinToString(", ") { (meal, list) ->
++                    "${coachName(meal)} ${FoodTotals.ofEntries(list).kcal.roundToInt()}"
++                } + " kcal)"
+         } else {
+             parts += "today nothing logged yet"
+         }
+@@ -45,4 +48,13 @@ object FoodCoachContext {
+         }
+         return PREFIX + parts.joinToString("; ")
+     }
++
++    private fun coachName(meal: MealType): String = when (meal) {
++        MealType.BREAKFAST -> "breakfast"
++        MealType.MID_MORNING -> "mid-morning snack"
++        MealType.LUNCH -> "lunch"
++        MealType.SNACK -> "afternoon snack"
++        MealType.DINNER -> "dinner"
++        MealType.NIBBLE -> "nibbles"
++    }
+ }
+diff --git a/android/app/src/main/java/com/noop/food/FoodDraft.kt b/android/app/src/main/java/com/noop/food/FoodDraft.kt
+index 225dc70c..5a6351ae 100644
+--- a/android/app/src/main/java/com/noop/food/FoodDraft.kt
++++ b/android/app/src/main/java/com/noop/food/FoodDraft.kt
+@@ -3,7 +3,10 @@ package com.noop.food
+ import java.util.Locale
+ import kotlin.math.roundToLong
+ 
+-/** victor:food — one item as the review sheet edits it: numbers stay text until saved. */
++/**
++ * victor:food — one item as the review sheet edits it: numbers stay text until saved. The numbers are
++ * for the whole served [portion]; [eaten] (a fraction of it) is applied when the item is saved.
++ */
+ data class FoodItemDraft(
+     val name: String,
+     val portion: String,
+@@ -11,14 +14,16 @@ data class FoodItemDraft(
+     val protein: String,
+     val carbs: String,
+     val fat: String,
++    val eaten: Double = 1.0,
+ ) {
+     fun toItem() = FoodItem(
+         name = name.trim(),
+         portion = portion.trim(),
+-        kcal = parseAmount(kcal),
+-        proteinG = parseAmount(protein),
+-        carbsG = parseAmount(carbs),
+-        fatG = parseAmount(fat),
++        kcal = round1(parseAmount(kcal) * eaten),
++        proteinG = round1(parseAmount(protein) * eaten),
++        carbsG = round1(parseAmount(carbs) * eaten),
++        fatG = round1(parseAmount(fat) * eaten),
++        eaten = eaten,
+     )
+ 
+     /** Worth saving: named, or carrying energy. */
+@@ -27,14 +32,25 @@ data class FoodItemDraft(
+     companion object {
+         val EMPTY = FoodItemDraft("", "", "", "", "", "")
+ 
+-        fun of(i: FoodItem) = FoodItemDraft(
+-            name = i.name,
+-            portion = i.portion,
+-            kcal = formatAmount(i.kcal),
+-            protein = formatAmount(i.proteinG),
+-            carbs = formatAmount(i.carbsG),
+-            fat = formatAmount(i.fatG),
+-        )
++        /** How much of a served portion the review sheet offers: a quarter up to a double helping. */
++        val EATEN_STEPS = listOf(0.25, 0.5, 0.75, 1.0, 1.5, 2.0)
++
++        /** Back to the whole served portion, so changing [eaten] later scales from the original numbers. */
++        fun of(i: FoodItem): FoodItemDraft {
++            val eaten = sanitizeEaten(i.eaten)
++            return FoodItemDraft(
++                name = i.name,
++                portion = i.portion,
++                kcal = formatAmount(i.kcal / eaten),
++                protein = formatAmount(i.proteinG / eaten),
++                carbs = formatAmount(i.carbsG / eaten),
++                fat = formatAmount(i.fatG / eaten),
++                eaten = eaten,
++            )
++        }
++
++        /** A stored fraction to a usable one: finite, above zero, at most 10 portions; else 1. */
++        fun sanitizeEaten(v: Double): Double = if (v.isFinite() && v > 0.0 && v <= 10.0) v else 1.0
+ 
+         /** "12,5" and "12.5" both read as 12.5; blank, junk, negative → 0. */
+         fun parseAmount(s: String): Double =
+@@ -51,32 +67,40 @@ data class FoodItemDraft(
+ 
+ enum class FoodStage { PREPARE, ANALYZING, REVIEW }
+ 
++/** victor:food — one photo of a new meal, ready for analysis ([jpeg]) and for the log ([thumb]). Memory only. */
++class FoodPhoto(val jpeg: ByteArray, val thumb: ByteArray)
++
+ /**
+- * victor:food — the sheet's working copy of a meal: a new photo on its way through analysis, or an
+- * existing entry being edited ([entryId] set). [photoJpeg] lives only in memory. A plain class (not a
+- * data class) on purpose: it holds byte arrays, and every update must reach the StateFlow.
++ * victor:food — the sheet's working copy of a meal: new photos on their way through analysis, or an
++ * existing entry being edited ([entryId] set; its photos are only the stored [thumbPaths]). [day],
++ * [timestamp] and [meal] are the wearer's to change. A plain class (not a data class) on purpose: it
++ * holds byte arrays, and every update must reach the StateFlow.
+  */
+ class FoodDraft(
+     val entryId: String?,
+     val timestamp: Long,
+     val day: String,
++    val meal: MealType,
+     val note: String,
+     val items: List<FoodItemDraft>,
+-    val photoJpeg: ByteArray?,
+-    val thumbJpeg: ByteArray?,
+-    val thumbPath: String?,
++    val photos: List<FoodPhoto>,
++    val thumbPaths: List<String>,
+     val confidence: String?,
+     val aiNotes: String?,
+     val stage: FoodStage,
+-    /** True once Claude has answered for this photo (an empty item list then means "no food seen"). */
++    /** True once Claude has answered for these photos (an empty item list then means "no food seen"). */
+     val analyzed: Boolean = false,
+     val error: FoodError? = null,
+     val errorDetail: String? = null,
+     val saving: Boolean = false,
+ ) {
+     fun copy(
++        timestamp: Long = this.timestamp,
++        day: String = this.day,
++        meal: MealType = this.meal,
+         note: String = this.note,
+         items: List<FoodItemDraft> = this.items,
++        photos: List<FoodPhoto> = this.photos,
+         confidence: String? = this.confidence,
+         aiNotes: String? = this.aiNotes,
+         stage: FoodStage = this.stage,
+@@ -85,10 +109,18 @@ class FoodDraft(
+         errorDetail: String? = this.errorDetail,
+         saving: Boolean = this.saving,
+     ) = FoodDraft(
+-        entryId, timestamp, day, note, items, photoJpeg, thumbJpeg, thumbPath,
++        entryId, timestamp, day, meal, note, items, photos, thumbPaths,
+         confidence, aiNotes, stage, analyzed, error, errorDetail, saving,
+     )
+ 
+     val totals: FoodTotals get() = FoodTotals.ofItems(items.map { it.toItem() })
+     val canSave: Boolean get() = !saving && items.any { it.isMeaningful }
++
++    /** More photos can join only a new meal that has not been analysed yet. */
++    val canAddPhotos: Boolean get() = entryId == null && stage == FoodStage.PREPARE && photos.size < MAX_PHOTOS
++
++    companion object {
++        /** One meal, several plates: enough for a menú del día without making the request heavy. */
++        const val MAX_PHOTOS = 4
++    }
+ }
+diff --git a/android/app/src/main/java/com/noop/food/FoodModels.kt b/android/app/src/main/java/com/noop/food/FoodModels.kt
+index 160dbeef..8fcea86f 100644
+--- a/android/app/src/main/java/com/noop/food/FoodModels.kt
++++ b/android/app/src/main/java/com/noop/food/FoodModels.kt
+@@ -2,6 +2,7 @@ package com.noop.food
+ 
+ import java.time.Instant
+ import java.time.LocalDate
++import java.time.LocalTime
+ import java.time.ZoneId
+ import kotlin.math.roundToLong
+ 
+@@ -11,7 +12,10 @@ import kotlin.math.roundToLong
+  * nutrition lane.
+  */
+ 
+-/** One food the estimate (or the wearer) listed, with its portion and macros for that portion. */
++/**
++ * One food the estimate (or the wearer) listed. [kcal]/[proteinG]/[carbsG]/[fatG] are what was EATEN:
++ * [eaten] of the served [portion] (1 = all of it, 0.5 = half the steak), already applied.
++ */
+ data class FoodItem(
+     val name: String,
+     val portion: String,
+@@ -19,8 +23,39 @@ data class FoodItem(
+     val proteinG: Double,
+     val carbsG: Double,
+     val fatG: Double,
++    val eaten: Double = 1.0,
+ )
+ 
++/**
++ * The meals of a Spanish day, in the order they are shown. [NIBBLE] (picoteo) is never picked by the
++ * clock: it is the wearer's choice for something eaten between meals.
++ */
++enum class MealType(val id: String) {
++    BREAKFAST("breakfast"),
++    MID_MORNING("mid_morning"),
++    LUNCH("lunch"),
++    SNACK("snack"),
++    DINNER("dinner"),
++    NIBBLE("nibble");
++
++    companion object {
++        fun fromId(id: String?): MealType? = entries.firstOrNull { it.id == id }
++
++        /** The meal a local time most likely is, on Spanish hours (almuerzo = mid-morning). */
++        fun forTime(time: LocalTime): MealType = when {
++            time < LocalTime.of(4, 0) -> DINNER
++            time < LocalTime.of(10, 30) -> BREAKFAST
++            time < LocalTime.of(13, 0) -> MID_MORNING
++            time < LocalTime.of(16, 30) -> LUNCH
++            time < LocalTime.of(20, 0) -> SNACK
++            else -> DINNER
++        }
++
++        fun forTimestamp(timestampMs: Long, zone: ZoneId = ZoneId.systemDefault()): MealType =
++            forTime(Instant.ofEpochMilli(timestampMs).atZone(zone).toLocalTime())
++    }
++}
++
+ /** Energy and macros, summed. Values are always finite and non-negative. */
+ data class FoodTotals(
+     val kcal: Double,
+@@ -48,8 +83,8 @@ data class FoodTotals(
+ /**
+  * One logged meal. [day] is the LOCAL calendar day the meal was logged on, fixed at creation so a
+  * later time-zone change never moves it. [kcal]/[proteinG]/[carbsG]/[fatG] are the sum of [items]
+- * at save time. [thumbnailPath] is relative to the food directory (see FoodStore.foodDir); the
+- * full-resolution photo is never kept.
++ * at save time. [thumbnailPaths] (one per photo, in order) are relative to the food directory (see
++ * FoodStore.foodDir); the full-resolution photos are never kept.
+  */
+ data class FoodEntry(
+     val id: String,
+@@ -61,9 +96,10 @@ data class FoodEntry(
+     val proteinG: Double,
+     val carbsG: Double,
+     val fatG: Double,
+-    val thumbnailPath: String?,
++    val thumbnailPaths: List<String>,
+     val confidence: String? = null,
+     val aiNotes: String? = null,
++    val meal: MealType = MealType.forTimestamp(timestamp),
+ ) {
+     val totals: FoodTotals get() = FoodTotals(kcal, proteinG, carbsG, fatG)
+ }
+@@ -86,12 +122,24 @@ object FoodDays {
+ 
+     fun today(zone: ZoneId = ZoneId.systemDefault()): String = LocalDate.now(zone).toString()
+ 
++    /** [timestampMs] moved to the local [day], same wall-clock time: what "this was yesterday's dinner" means. */
++    fun moveToDay(timestampMs: Long, day: String, zone: ZoneId = ZoneId.systemDefault()): Long {
++        val time = Instant.ofEpochMilli(timestampMs).atZone(zone).toLocalTime()
++        return LocalDate.parse(day).atTime(time).atZone(zone).toInstant().toEpochMilli()
++    }
++
+     /** The day's totals, or null when nothing is logged that day (distinct from a logged 0 kcal). */
+     fun totalsFor(entries: List<FoodEntry>, day: String): FoodTotals? {
+         val ofDay = entries.filter { it.day == day }
+         return if (ofDay.isEmpty()) null else FoodTotals.ofEntries(ofDay)
+     }
+ 
++    /** One day's entries by meal, in [MealType] order; within a meal, in the order they were eaten. */
++    fun groupedByMeal(entries: List<FoodEntry>): List<Pair<MealType, List<FoodEntry>>> =
++        entries.groupBy { it.meal }
++            .toSortedMap(compareBy { it.ordinal })
++            .map { (meal, list) -> meal to list.sortedBy { it.timestamp } }
++
+     /** Days newest first; within a day, meals in the order they were eaten. */
+     fun groupedByDay(entries: List<FoodEntry>): List<Pair<String, List<FoodEntry>>> =
+         entries.groupBy { it.day }
+diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+index 60c3c1dc..26e19686 100644
+--- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
++++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+@@ -122,7 +122,7 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+         pendingCapture = null
+         if (path != null) {
+             val file = File(path)
+-            if (ok) food.onPhoto(open = { FileInputStream(file) }, cleanup = { file.delete() }) else file.delete()
++            if (ok) food.onPhotos(listOf { FileInputStream(file) }, cleanup = { file.delete() }) else file.delete()
+         }
+     }
+     fun launchCamera() {
+@@ -139,9 +139,13 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+     val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+         if (granted) launchCamera() else food.notify(R.string.victor_food_camera_denied)
+     }
+-    val pickPhoto = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+-        if (uri != null) food.onPhoto(open = { ctx.contentResolver.openInputStream(uri) })
++    val pickPhotos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(FoodDraft.MAX_PHOTOS)) { uris ->
++        food.onPhotos(uris.map { uri -> { ctx.contentResolver.openInputStream(uri) } })
+     }
++    fun startCamera() {
++        if (FoodImage.cameraPermissionNeeded(ctx)) cameraPermission.launch(Manifest.permission.CAMERA) else launchCamera()
++    }
++    fun startGallery() = pickPhotos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+ 
+     var confirmDelete by remember { mutableStateOf<FoodEntry?>(null) }
+ 
+@@ -157,21 +161,13 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+                     leadingIcon = Icons.Filled.PhotoCamera,
+                     kind = NoopButtonKind.Primary,
+                     modifier = Modifier.weight(1f),
+-                ) {
+-                    if (FoodImage.cameraPermissionNeeded(ctx)) {
+-                        cameraPermission.launch(Manifest.permission.CAMERA)
+-                    } else {
+-                        launchCamera()
+-                    }
+-                }
++                ) { startCamera() }
+                 NoopButton(
+                     text = uiString(R.string.victor_food_gallery),
+                     leadingIcon = Icons.Filled.PhotoLibrary,
+                     kind = NoopButtonKind.Secondary,
+                     modifier = Modifier.weight(1f),
+-                ) {
+-                    pickPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+-                }
++                ) { startGallery() }
+             }
+         }
+         item {
+@@ -185,7 +181,7 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+                             color = Palette.textSecondary,
+                         )
+                     } else {
+-                        EntryList(todayEntries, onEdit = food::edit, onDelete = { confirmDelete = it })
++                        MealGroups(todayEntries, onEdit = food::edit, onDelete = { confirmDelete = it })
+                     }
+                 }
+             }
+@@ -193,7 +189,7 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+         if (previous.isNotEmpty()) {
+             item { Overline(uiString(R.string.victor_food_previous)) }
+             items(previous, key = { it.first }) { (day, list) ->
+-                DayCard(dayLabel(day, today, locale), list, onEdit = food::edit, onDelete = { confirmDelete = it })
++                DayCard(foodDayLabel(day, today, locale), list, onEdit = food::edit, onDelete = { confirmDelete = it })
+             }
+         }
+         item {
+@@ -206,7 +202,7 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+         }
+     }
+ 
+-    draft?.let { FoodSheet(it, food, onOpenCoach) }
++    draft?.let { FoodSheet(it, food, onOpenCoach, onAddCamera = ::startCamera, onAddGallery = ::startGallery) }
+ 
+     confirmDelete?.let { entry ->
+         AlertDialog(
+@@ -242,7 +238,25 @@ private fun DayCard(label: String, entries: List<FoodEntry>, onEdit: (FoodEntry)
+             }
+             Text(macrosLine(t), style = NoopType.caption, color = Palette.textSecondary)
+             SettingsRowDivider()
+-            EntryList(entries, onEdit, onDelete)
++            MealGroups(entries, onEdit, onDelete)
++        }
++    }
++}
++
++/** One day's meals under their meal headers (Desayuno · 420 kcal …), in the order of the day. */
++@Composable
++private fun MealGroups(entries: List<FoodEntry>, onEdit: (FoodEntry) -> Unit, onDelete: (FoodEntry) -> Unit) {
++    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
++        FoodDays.groupedByMeal(entries).forEach { (meal, list) ->
++            Row(verticalAlignment = Alignment.CenterVertically) {
++                Text(uiString(mealLabel(meal)), style = NoopType.subhead, color = Palette.textSecondary, modifier = Modifier.weight(1f))
++                Text(
++                    "${whole(FoodTotals.ofEntries(list).kcal)} ${uiString(R.string.victor_food_kcal)}",
++                    style = NoopType.caption,
++                    color = Palette.textSecondary,
++                )
++            }
++            EntryList(list, onEdit, onDelete)
+         }
+     }
+ }
+@@ -271,7 +285,22 @@ private fun EntryRow(entry: FoodEntry, onEdit: () -> Unit, onDelete: () -> Unit)
+         verticalAlignment = Alignment.CenterVertically,
+         horizontalArrangement = Arrangement.spacedBy(Metrics.space12),
+     ) {
+-        FoodThumb(entry.thumbnailPath, ThumbSize)
++        Box {
++            FoodThumb(entry.thumbnailPaths.firstOrNull(), ThumbSize)
++            if (entry.thumbnailPaths.size > 1) {
++                Text(
++                    "+${entry.thumbnailPaths.size - 1}",
++                    style = NoopType.caption,
++                    color = Palette.textPrimary,
++                    modifier = Modifier
++                        .align(Alignment.BottomEnd)
++                        .padding(Metrics.space2)
++                        .clip(RoundedCornerShape(Metrics.cornerSm))
++                        .background(Palette.surfaceOverlay)
++                        .padding(horizontal = Metrics.space4),
++                )
++            }
++        }
+         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Metrics.space2)) {
+             Text(title, style = NoopType.body, color = Palette.textPrimary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+             Text(
+@@ -332,7 +361,7 @@ internal fun macrosLine(t: FoodTotals): String =
+ 
+ internal fun whole(v: Double): String = v.roundToInt().toString()
+ 
+-private fun dayLabel(day: String, today: String, locale: Locale): String {
++internal fun foodDayLabel(day: String, today: String, locale: Locale): String {
+     val d = runCatching { LocalDate.parse(day) }.getOrNull() ?: return day
+     val t = runCatching { LocalDate.parse(today) }.getOrNull() ?: return day
+     if (d == t.minusDays(1)) return uiString(R.string.victor_food_yesterday)
+diff --git a/android/app/src/main/java/com/noop/food/FoodSheet.kt b/android/app/src/main/java/com/noop/food/FoodSheet.kt
+index 36a67e42..ecdd3ab2 100644
+--- a/android/app/src/main/java/com/noop/food/FoodSheet.kt
++++ b/android/app/src/main/java/com/noop/food/FoodSheet.kt
+@@ -1,8 +1,14 @@
+ package com.noop.food
+ 
++import android.app.DatePickerDialog
+ import android.graphics.BitmapFactory
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.horizontalScroll
+ import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.ExperimentalLayoutApi
++import androidx.compose.foundation.layout.FlowRow
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
+@@ -10,6 +16,8 @@ import androidx.compose.foundation.layout.imePadding
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.rememberScrollState
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.foundation.text.KeyboardOptions
+ import androidx.compose.foundation.verticalScroll
+ import androidx.compose.material.icons.Icons
+@@ -17,6 +25,8 @@ import androidx.compose.material.icons.filled.Add
+ import androidx.compose.material.icons.filled.AutoAwesome
+ import androidx.compose.material.icons.filled.Check
+ import androidx.compose.material.icons.filled.Close
++import androidx.compose.material.icons.filled.PhotoCamera
++import androidx.compose.material.icons.filled.PhotoLibrary
+ import androidx.compose.material3.CircularProgressIndicator
+ import androidx.compose.material3.ExperimentalMaterial3Api
+ import androidx.compose.material3.Icon
+@@ -25,6 +35,7 @@ import androidx.compose.material3.ModalBottomSheet
+ import androidx.compose.material3.OutlinedTextField
+ import androidx.compose.material3.OutlinedTextFieldDefaults
+ import androidx.compose.material3.SheetValue
++import androidx.compose.material3.Surface
+ import androidx.compose.material3.Text
+ import androidx.compose.material3.rememberModalBottomSheetState
+ import androidx.compose.runtime.Composable
+@@ -33,8 +44,11 @@ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.rememberUpdatedState
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
+ import androidx.compose.ui.graphics.ImageBitmap
+ import androidx.compose.ui.graphics.asImageBitmap
++import androidx.compose.ui.platform.LocalConfiguration
++import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.text.input.KeyboardType
+ import androidx.compose.ui.unit.dp
+ import com.noop.R
+@@ -46,27 +60,38 @@ import com.noop.ui.NoopType
+ import com.noop.ui.Overline
+ import com.noop.ui.Palette
+ import com.noop.ui.uiString
++import java.time.LocalDate
++import java.time.ZoneId
++import java.util.Locale
+ 
+ private val PreviewHeight = 180.dp
+-private val SmallPreview = 72.dp
++private val StripThumb = 96.dp
++private val SmallPreview = 56.dp
+ private const val MAX_AMOUNT_CHARS = 7
+ 
+ /**
+- * victor:food — the one sheet of the food log: prepare (photo + note) → analysing → review, or the
+- * review of an existing meal. While an analysis runs or a new estimate is under review, swiping the
++ * victor:food — the one sheet of the food log: prepare (photos + meal + note) → analysing → review, or
++ * the review of an existing meal. While an analysis runs or a new estimate is under review, swiping the
+  * sheet away is blocked so a paid analysis is never lost by accident; Discard/Cancel are explicit.
++ * [onAddCamera]/[onAddGallery] bring more photos into a meal that has not been analysed yet.
+  */
+ @OptIn(ExperimentalMaterial3Api::class)
+ @Composable
+-internal fun FoodSheet(draft: FoodDraft, food: FoodViewModel, onOpenCoach: () -> Unit) {
++internal fun FoodSheet(
++    draft: FoodDraft,
++    food: FoodViewModel,
++    onOpenCoach: () -> Unit,
++    onAddCamera: () -> Unit,
++    onAddGallery: () -> Unit,
++) {
+     val dismissible by rememberUpdatedState(
+         draft.stage == FoodStage.PREPARE || (draft.entryId != null && !draft.saving),
+     )
+     val confirm = remember { { v: SheetValue -> v != SheetValue.Hidden || dismissible } }
+     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true, confirmValueChange = confirm)
+-    val preview: ImageBitmap? = remember(draft.thumbJpeg) {
+-        draft.thumbJpeg?.let { bytes ->
+-            runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap() }.getOrNull()
++    val previews: List<ImageBitmap?> = remember(draft.photos) {
++        draft.photos.map { p ->
++            runCatching { BitmapFactory.decodeByteArray(p.thumb, 0, p.thumb.size)?.asImageBitmap() }.getOrNull()
+         }
+     }
+ 
+@@ -91,19 +116,50 @@ internal fun FoodSheet(draft: FoodDraft, food: FoodViewModel, onOpenCoach: () ->
+                 color = Palette.textPrimary,
+             )
+             when (draft.stage) {
+-                FoodStage.PREPARE -> PrepareContent(draft, preview, food, onOpenCoach)
+-                FoodStage.ANALYZING -> AnalyzingContent(preview, food)
+-                FoodStage.REVIEW -> ReviewContent(draft, preview, food)
++                FoodStage.PREPARE -> PrepareContent(draft, previews, food, onOpenCoach, onAddCamera, onAddGallery)
++                FoodStage.ANALYZING -> AnalyzingContent(previews, food)
++                FoodStage.REVIEW -> ReviewContent(draft, previews, food)
+             }
+         }
+     }
+ }
+ 
+ @Composable
+-private fun PrepareContent(draft: FoodDraft, preview: ImageBitmap?, food: FoodViewModel, onOpenCoach: () -> Unit) {
+-    if (preview != null) {
+-        ThumbBox(preview, Modifier.fillMaxWidth().height(PreviewHeight))
++private fun PrepareContent(
++    draft: FoodDraft,
++    previews: List<ImageBitmap?>,
++    food: FoodViewModel,
++    onOpenCoach: () -> Unit,
++    onAddCamera: () -> Unit,
++    onAddGallery: () -> Unit,
++) {
++    if (previews.size == 1) {
++        ThumbBox(previews[0], Modifier.fillMaxWidth().height(PreviewHeight))
++    } else if (previews.isNotEmpty()) {
++        PhotoStrip(previews, StripThumb, onRemove = food::removePhoto)
+     }
++    if (draft.canAddPhotos) {
++        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space8)) {
++            NoopButton(
++                text = uiString(R.string.victor_food_add_camera),
++                leadingIcon = Icons.Filled.PhotoCamera,
++                kind = NoopButtonKind.Tertiary,
++            ) { onAddCamera() }
++            NoopButton(
++                text = uiString(R.string.victor_food_add_gallery),
++                leadingIcon = Icons.Filled.PhotoLibrary,
++                kind = NoopButtonKind.Tertiary,
++            ) { onAddGallery() }
++        }
++    }
++    if (previews.size > 1) {
++        Text(
++            uiString(R.string.victor_food_photo_count, previews.size, FoodDraft.MAX_PHOTOS),
++            style = NoopType.caption,
++            color = Palette.textTertiary,
++        )
++    }
++    WhenPicker(draft, food)
+     NoteField(draft.note, food::setNote)
+     draft.error?.let { ErrorCard(it, draft.errorDetail, onOpenCoach) }
+     NoopButton(
+@@ -111,7 +167,7 @@ private fun PrepareContent(draft: FoodDraft, preview: ImageBitmap?, food: FoodVi
+         leadingIcon = Icons.Filled.AutoAwesome,
+         kind = NoopButtonKind.Primary,
+         fullWidth = true,
+-        enabled = draft.photoJpeg != null,
++        enabled = draft.photos.isNotEmpty(),
+     ) { food.analyze() }
+     Row(horizontalArrangement = Arrangement.spacedBy(Metrics.space12)) {
+         NoopButton(
+@@ -128,9 +184,11 @@ private fun PrepareContent(draft: FoodDraft, preview: ImageBitmap?, food: FoodVi
+ }
+ 
+ @Composable
+-private fun AnalyzingContent(preview: ImageBitmap?, food: FoodViewModel) {
+-    if (preview != null) {
+-        ThumbBox(preview, Modifier.fillMaxWidth().height(PreviewHeight))
++private fun AnalyzingContent(previews: List<ImageBitmap?>, food: FoodViewModel) {
++    if (previews.size == 1) {
++        ThumbBox(previews[0], Modifier.fillMaxWidth().height(PreviewHeight))
++    } else if (previews.isNotEmpty()) {
++        PhotoStrip(previews, StripThumb, onRemove = null)
+     }
+     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space12)) {
+         CircularProgressIndicator(color = Palette.accent, modifier = Modifier.size(Metrics.iconButton))
+@@ -144,9 +202,17 @@ private fun AnalyzingContent(preview: ImageBitmap?, food: FoodViewModel) {
+ }
+ 
+ @Composable
+-private fun ReviewContent(draft: FoodDraft, preview: ImageBitmap?, food: FoodViewModel) {
++private fun ReviewContent(draft: FoodDraft, previews: List<ImageBitmap?>, food: FoodViewModel) {
++    when {
++        previews.isNotEmpty() -> PhotoStrip(previews, SmallPreview, onRemove = null)
++        draft.thumbPaths.isNotEmpty() -> Row(
++            modifier = Modifier.horizontalScroll(rememberScrollState()),
++            horizontalArrangement = Arrangement.spacedBy(Metrics.space8),
++        ) {
++            draft.thumbPaths.forEach { FoodThumb(it, SmallPreview) }
++        }
++    }
+     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space12)) {
+-        if (preview != null) ThumbBox(preview, Modifier.size(SmallPreview)) else FoodThumb(draft.thumbPath, SmallPreview)
+         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Metrics.space4)) {
+             Overline(uiString(R.string.victor_food_review))
+             confidenceLabel(draft.confidence)?.let { (label, color) ->
+@@ -178,6 +244,7 @@ private fun ReviewContent(draft: FoodDraft, preview: ImageBitmap?, food: FoodVie
+         }
+     }
+ 
++    WhenPicker(draft, food)
+     NoteField(draft.note, food::setNote)
+     NoopButton(
+         text = uiString(R.string.victor_food_save),
+@@ -187,7 +254,7 @@ private fun ReviewContent(draft: FoodDraft, preview: ImageBitmap?, food: FoodVie
+         enabled = draft.canSave,
+     ) { food.save() }
+     Row(horizontalArrangement = Arrangement.spacedBy(Metrics.space12)) {
+-        if (draft.photoJpeg != null) {
++        if (draft.photos.isNotEmpty()) {
+             NoopButton(
+                 text = uiString(R.string.victor_food_reanalyze),
+                 kind = NoopButtonKind.Secondary,
+@@ -239,10 +306,142 @@ private fun ItemEditor(item: FoodItemDraft, onChange: (FoodItemDraft) -> Unit, o
+                 AmountField(item.carbs, R.string.victor_food_item_carbs, Modifier.weight(1f)) { onChange(item.copy(carbs = it)) }
+                 AmountField(item.fat, R.string.victor_food_item_fat, Modifier.weight(1f)) { onChange(item.copy(fat = it)) }
+             }
++            EatenPicker(item, onChange)
++        }
++    }
++}
++
++/** How much of the served portion was eaten: the numbers above stay the whole portion, this scales them. */
++@OptIn(ExperimentalLayoutApi::class)
++@Composable
++private fun EatenPicker(item: FoodItemDraft, onChange: (FoodItemDraft) -> Unit) {
++    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space6)) {
++        Text(uiString(R.string.victor_food_eaten_label), style = NoopType.caption, color = Palette.textSecondary)
++        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
++            FoodItemDraft.EATEN_STEPS.forEach { step ->
++                FoodChip(eatenLabel(step), selected = item.eaten == step, small = true) { onChange(item.copy(eaten = step)) }
++            }
++        }
++        if (item.eaten != 1.0) {
++            val eaten = item.toItem()
++            Text(
++                uiString(
++                    R.string.victor_food_eaten_result,
++                    whole(eaten.kcal),
++                    macrosLine(FoodTotals(eaten.kcal, eaten.proteinG, eaten.carbsG, eaten.fatG)),
++                ),
++                style = NoopType.caption,
++                color = Palette.accent,
++            )
++        }
++    }
++}
++
++private fun eatenLabel(step: Double): String = when (step) {
++    0.25 -> "¼"
++    0.5 -> "½"
++    0.75 -> "¾"
++    1.0 -> uiString(R.string.victor_food_eaten_all)
++    1.5 -> "×1½"
++    2.0 -> "×2"
++    else -> "×$step"
++}
++
++/** Which meal of the day, and which day: the clock's guess, one tap to change. */
++@OptIn(ExperimentalLayoutApi::class)
++@Composable
++private fun WhenPicker(draft: FoodDraft, food: FoodViewModel) {
++    val ctx = LocalContext.current
++    val locale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
++    val today = FoodDays.today()
++    val yesterday = LocalDate.parse(today).minusDays(1).toString()
++    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
++        Overline(uiString(R.string.victor_food_when))
++        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
++            MealType.entries.forEach { meal ->
++                FoodChip(uiString(mealLabel(meal)), selected = draft.meal == meal) { food.setMeal(meal) }
++            }
++        }
++        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
++            FoodChip(uiString(R.string.victor_food_today), selected = draft.day == today) { food.setDay(today) }
++            FoodChip(uiString(R.string.victor_food_yesterday), selected = draft.day == yesterday) { food.setDay(yesterday) }
++            val other = draft.day != today && draft.day != yesterday
++            FoodChip(
++                if (other) foodDayLabel(draft.day, today, locale) else uiString(R.string.victor_food_day_other),
++                selected = other,
++            ) {
++                val d = runCatching { LocalDate.parse(draft.day) }.getOrDefault(LocalDate.now())
++                DatePickerDialog(ctx, { _, y, m, dom -> food.setDay(LocalDate.of(y, m + 1, dom).toString()) }, d.year, d.monthValue - 1, d.dayOfMonth)
++                    .apply {
++                        datePicker.maxDate = LocalDate.parse(today).plusDays(1)
++                            .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli() - 1
++                    }
++                    .show()
++            }
+         }
+     }
+ }
+ 
++/** A row of photo thumbnails; with [onRemove], each carries a small remove button. */
++@Composable
++private fun PhotoStrip(previews: List<ImageBitmap?>, size: androidx.compose.ui.unit.Dp, onRemove: ((Int) -> Unit)?) {
++    Row(
++        modifier = Modifier.horizontalScroll(rememberScrollState()),
++        horizontalArrangement = Arrangement.spacedBy(Metrics.space8),
++    ) {
++        previews.forEachIndexed { i, bitmap ->
++            Box {
++                ThumbBox(bitmap, Modifier.size(size))
++                if (onRemove != null) {
++                    Surface(
++                        shape = CircleShape,
++                        color = Palette.surfaceOverlay,
++                        modifier = Modifier
++                            .align(Alignment.TopEnd)
++                            .padding(Metrics.space4)
++                            .size(24.dp)
++                            .clip(CircleShape)
++                            .clickable { onRemove(i) },
++                    ) {
++                        Icon(
++                            Icons.Filled.Close,
++                            contentDescription = uiString(R.string.victor_food_photo_remove),
++                            tint = Palette.textPrimary,
++                            modifier = Modifier.padding(Metrics.space4),
++                        )
++                    }
++                }
++            }
++        }
++    }
++}
++
++/** The fork's pill chip (food meal/day/portion pickers, the goals card). */
++@Composable
++internal fun FoodChip(label: String, selected: Boolean, small: Boolean = false, onClick: () -> Unit) {
++    Surface(
++        shape = RoundedCornerShape(50),
++        color = if (selected) Palette.accent else Palette.surfaceInset,
++        modifier = Modifier.clip(RoundedCornerShape(50)).clickable(onClick = onClick),
++    ) {
++        Text(
++            label,
++            style = NoopType.subhead,
++            color = if (selected) Palette.surfaceBase else Palette.textPrimary,
++            modifier = Modifier.padding(horizontal = if (small) 10.dp else 12.dp, vertical = if (small) 5.dp else 7.dp),
++        )
++    }
++}
++
++internal fun mealLabel(meal: MealType): Int = when (meal) {
++    MealType.BREAKFAST -> R.string.victor_food_meal_breakfast
++    MealType.MID_MORNING -> R.string.victor_food_meal_mid_morning
++    MealType.LUNCH -> R.string.victor_food_meal_lunch
++    MealType.SNACK -> R.string.victor_food_meal_snack
++    MealType.DINNER -> R.string.victor_food_meal_dinner
++    MealType.NIBBLE -> R.string.victor_food_meal_nibble
++}
++
+ @Composable
+ private fun AmountField(value: String, labelRes: Int, modifier: Modifier, onChange: (String) -> Unit) {
+     OutlinedTextField(
+diff --git a/android/app/src/main/java/com/noop/food/FoodStore.kt b/android/app/src/main/java/com/noop/food/FoodStore.kt
+index 52ade9e6..95f2a583 100644
+--- a/android/app/src/main/java/com/noop/food/FoodStore.kt
++++ b/android/app/src/main/java/com/noop/food/FoodStore.kt
+@@ -40,7 +40,8 @@ internal object FoodStoreCodec {
+                         .put("kcal", i.kcal)
+                         .put("protein_g", i.proteinG)
+                         .put("carbs_g", i.carbsG)
+-                        .put("fat_g", i.fatG),
++                        .put("fat_g", i.fatG)
++                        .apply { if (i.eaten != 1.0) put("eaten", i.eaten) },
+                 )
+             }
+             val o = JSONObject()
+@@ -53,7 +54,8 @@ internal object FoodStoreCodec {
+                 .put("protein_g", e.proteinG)
+                 .put("carbs_g", e.carbsG)
+                 .put("fat_g", e.fatG)
+-            e.thumbnailPath?.let { o.put("thumb", it) }
++                .put("meal", e.meal.id)
++            if (e.thumbnailPaths.isNotEmpty()) o.put("thumbs", JSONArray(e.thumbnailPaths))
+             e.confidence?.let { o.put("confidence", it) }
+             e.aiNotes?.let { o.put("ai_notes", it) }
+             entries.put(o)
+@@ -86,8 +88,13 @@ internal object FoodStoreCodec {
+                     proteinG = round1(io.optDouble("protein_g", 0.0)),
+                     carbsG = round1(io.optDouble("carbs_g", 0.0)),
+                     fatG = round1(io.optDouble("fat_g", 0.0)),
++                    eaten = FoodItemDraft.sanitizeEaten(io.optDouble("eaten", 1.0)),
+                 )
+             }
++            // Before several photos a meal had one "thumb"; before meal types the clock decides.
++            val thumbs = o.optJSONArray("thumbs")?.let { a ->
++                (0 until a.length()).mapNotNull { a.optString(it).takeIf { p -> p.isNotBlank() } }
++            } ?: listOfNotNull(o.optString("thumb").takeIf { it.isNotBlank() })
+             entries += FoodEntry(
+                 id = id,
+                 timestamp = ts,
+@@ -98,9 +105,10 @@ internal object FoodStoreCodec {
+                 proteinG = round1(o.optDouble("protein_g", 0.0)),
+                 carbsG = round1(o.optDouble("carbs_g", 0.0)),
+                 fatG = round1(o.optDouble("fat_g", 0.0)),
+-                thumbnailPath = o.optString("thumb").takeIf { it.isNotBlank() },
++                thumbnailPaths = thumbs,
+                 confidence = o.optString("confidence").takeIf { it.isNotBlank() },
+                 aiNotes = o.optString("ai_notes").takeIf { it.isNotBlank() },
++                meal = MealType.fromId(o.optString("meal")) ?: MealType.forTimestamp(ts),
+             )
+         }
+         val synced = LinkedHashMap<String, FoodTotals>()
+@@ -146,7 +154,7 @@ object FoodStore {
+ 
+     fun foodDir(ctx: Context): File = File(ctx.applicationContext.filesDir, DIR)
+ 
+-    /** Resolve an entry's relative [FoodEntry.thumbnailPath]. */
++    /** Resolve one of an entry's relative [FoodEntry.thumbnailPaths]. */
+     fun thumbFile(ctx: Context, relativePath: String): File = File(foodDir(ctx), relativePath)
+ 
+     suspend fun load(ctx: Context): List<FoodEntry> = withContext(Dispatchers.IO) {
+@@ -154,21 +162,25 @@ object FoodStore {
+     }
+ 
+     /**
+-     * Add or replace [entry] (matched by id). [newThumbJpeg], when given, replaces the thumbnail.
+-     * Then rewrites the nutrition lane for the entry's day (and its old day, if it moved).
++     * Add or replace [entry] (matched by id). [newThumbs], when given, replace its thumbnails (one per
++     * photo). Then rewrites the nutrition lane for the entry's day (and its old day, if it moved).
+      */
+-    suspend fun save(ctx: Context, repo: WhoopRepository, entry: FoodEntry, newThumbJpeg: ByteArray?) =
++    suspend fun save(ctx: Context, repo: WhoopRepository, entry: FoodEntry, newThumbs: List<ByteArray>?) =
+         withContext(Dispatchers.IO) {
+             mutex.withLock {
+                 val current = state(ctx)
+                 val old = current.entries.firstOrNull { it.id == entry.id }
+                 var toSave = entry
+-                if (newThumbJpeg != null) {
+-                    val rel = "$THUMBS/${entry.id}.jpg"
+-                    val f = thumbFile(ctx, rel)
+-                    f.parentFile?.mkdirs()
+-                    f.writeBytes(newThumbJpeg)
+-                    toSave = entry.copy(thumbnailPath = rel)
++                if (newThumbs != null) {
++                    val paths = newThumbs.mapIndexed { i, bytes ->
++                        val rel = "$THUMBS/${entry.id}-$i.jpg"
++                        val f = thumbFile(ctx, rel)
++                        f.parentFile?.mkdirs()
++                        f.writeBytes(bytes)
++                        rel
++                    }
++                    old?.thumbnailPaths?.filterNot { it in paths }?.forEach { runCatching { thumbFile(ctx, it).delete() } }
++                    toSave = entry.copy(thumbnailPaths = paths)
+                 }
+                 val entries = current.entries.filterNot { it.id == entry.id } + toSave
+                 var next = current.copy(entries = entries.sortedBy { it.timestamp })
+@@ -183,7 +195,7 @@ object FoodStore {
+         mutex.withLock {
+             val current = state(ctx)
+             val old = current.entries.firstOrNull { it.id == id } ?: return@withLock
+-            old.thumbnailPath?.let { runCatching { thumbFile(ctx, it).delete() } }
++            old.thumbnailPaths.forEach { runCatching { thumbFile(ctx, it).delete() } }
+             var next = current.copy(entries = current.entries.filterNot { it.id == id })
+             persist(ctx, next)
+             next = syncDays(repo, next, setOf(old.day))
+diff --git a/android/app/src/main/java/com/noop/food/FoodViewModel.kt b/android/app/src/main/java/com/noop/food/FoodViewModel.kt
+index 42a3b38d..db05fd92 100644
+--- a/android/app/src/main/java/com/noop/food/FoodViewModel.kt
++++ b/android/app/src/main/java/com/noop/food/FoodViewModel.kt
+@@ -44,30 +44,46 @@ class FoodViewModel(app: Application) : AndroidViewModel(app) {
+         }
+     }
+ 
+-    /** A photo arrived (camera or gallery): prepare it off the main thread and open the sheet. */
+-    fun onPhoto(open: () -> InputStream?, cleanup: () -> Unit = {}) {
++    /**
++     * Photos arrived (camera or gallery): prepare them off the main thread, then add them to the new
++     * meal being prepared, or open a new one. Beyond [FoodDraft.MAX_PHOTOS] the rest are dropped with
++     * a notice.
++     */
++    fun onPhotos(opens: List<() -> InputStream?>, cleanup: () -> Unit = {}) {
++        if (opens.isEmpty()) return
+         viewModelScope.launch {
+             val prepared = withContext(Dispatchers.IO) {
+                 try {
+-                    FoodImage.prepare(open)
++                    opens.map { FoodImage.prepare(it) }
+                 } finally {
+                     runCatching { cleanup() }
+                 }
+             }
+-            if (prepared == null) {
++            val photos = prepared.filterNotNull().map { FoodPhoto(it.jpeg, it.thumb) }
++            if (photos.isEmpty()) {
+                 _notice.value = R.string.victor_food_photo_unreadable
+                 return@launch
+             }
++            if (photos.size < prepared.size) _notice.value = R.string.victor_food_photo_unreadable
++            val current = _draft.value
++            val base = if (current != null && current.canAddPhotos) current.photos else emptyList()
++            val all = base + photos
++            if (all.size > FoodDraft.MAX_PHOTOS) _notice.value = R.string.victor_food_photo_limit
++            val kept = all.take(FoodDraft.MAX_PHOTOS)
++            if (current != null && current.canAddPhotos) {
++                _draft.value = current.copy(photos = kept, error = null, errorDetail = null)
++                return@launch
++            }
+             val now = System.currentTimeMillis()
+             _draft.value = FoodDraft(
+                 entryId = null,
+                 timestamp = now,
+                 day = FoodDays.dayOf(now),
++                meal = MealType.forTimestamp(now),
+                 note = "",
+                 items = emptyList(),
+-                photoJpeg = prepared.jpeg,
+-                thumbJpeg = prepared.thumb,
+-                thumbPath = null,
++                photos = kept,
++                thumbPaths = emptyList(),
+                 confidence = null,
+                 aiNotes = null,
+                 stage = FoodStage.PREPARE,
+@@ -75,15 +91,27 @@ class FoodViewModel(app: Application) : AndroidViewModel(app) {
+         }
+     }
+ 
++    fun removePhoto(index: Int) = _draft.update { d ->
++        d?.copy(photos = d.photos.filterIndexed { i, _ -> i != index })
++    }
++
++    fun setMeal(meal: MealType) = _draft.update { it?.copy(meal = meal) }
++
++    /** Move the meal to another local [day] (never the future), keeping its time of day. */
++    fun setDay(day: String) = _draft.update { d ->
++        if (d == null || day > FoodDays.today()) d else d.copy(day = day, timestamp = FoodDays.moveToDay(d.timestamp, day))
++    }
++
+     fun setNote(note: String) = _draft.update { it?.copy(note = note.take(MAX_NOTE)) }
+ 
+     fun analyze() {
+         val d = _draft.value ?: return
+-        val jpeg = d.photoJpeg ?: return
++        if (d.photos.isEmpty()) return
++        val jpegs = d.photos.map { it.jpeg }
+         _draft.value = d.copy(stage = FoodStage.ANALYZING, error = null, errorDetail = null)
+         analysis?.cancel()
+         analysis = viewModelScope.launch {
+-            val result = FoodVision.analyze(getApplication(), jpeg, d.note)
++            val result = FoodVision.analyze(getApplication(), jpegs, d.note)
+             _draft.update { cur ->
+                 if (cur == null || cur.stage != FoodStage.ANALYZING) {
+                     cur
+@@ -128,11 +156,11 @@ class FoodViewModel(app: Application) : AndroidViewModel(app) {
+             entryId = entry.id,
+             timestamp = entry.timestamp,
+             day = entry.day,
++            meal = entry.meal,
+             note = entry.note,
+             items = entry.items.map { FoodItemDraft.of(it) }.ifEmpty { listOf(FoodItemDraft.EMPTY) },
+-            photoJpeg = null,
+-            thumbJpeg = null,
+-            thumbPath = entry.thumbnailPath,
++            photos = emptyList(),
++            thumbPaths = entry.thumbnailPaths,
+             confidence = entry.confidence,
+             aiNotes = entry.aiNotes,
+             stage = FoodStage.REVIEW,
+@@ -165,13 +193,14 @@ class FoodViewModel(app: Application) : AndroidViewModel(app) {
+             proteinG = totals.proteinG,
+             carbsG = totals.carbsG,
+             fatG = totals.fatG,
+-            thumbnailPath = d.thumbPath,
++            thumbnailPaths = d.thumbPaths,
+             confidence = d.confidence,
+             aiNotes = d.aiNotes,
++            meal = d.meal,
+         )
+         _draft.value = d.copy(saving = true)
+         viewModelScope.launch {
+-            val ok = runCatching { FoodStore.save(getApplication(), repo, entry, d.thumbJpeg) }.isSuccess
++            val ok = runCatching { FoodStore.save(getApplication(), repo, entry, d.photos.map { it.thumb }.ifEmpty { null }) }.isSuccess
+             if (ok) {
+                 _draft.value = null
+             } else {
+diff --git a/android/app/src/main/java/com/noop/food/FoodVision.kt b/android/app/src/main/java/com/noop/food/FoodVision.kt
+index adcefae0..af913a84 100644
+--- a/android/app/src/main/java/com/noop/food/FoodVision.kt
++++ b/android/app/src/main/java/com/noop/food/FoodVision.kt
+@@ -66,12 +66,15 @@ object FoodVision {
+         .callTimeout(180, TimeUnit.SECONDS)
+         .build()
+ 
+-    /** Analyse one JPEG. Needs the Anthropic key from the Coach settings; [FoodError.NO_KEY] otherwise. */
+-    suspend fun analyze(ctx: Context, jpeg: ByteArray, note: String): FoodResult = withContext(Dispatchers.IO) {
++    /**
++     * Analyse one meal from its JPEGs (one request, every photo in it). Needs the Anthropic key from the
++     * Coach settings; [FoodError.NO_KEY] otherwise.
++     */
++    suspend fun analyze(ctx: Context, jpegs: List<ByteArray>, note: String): FoodResult = withContext(Dispatchers.IO) {
+         val app = ctx.applicationContext
+         val key = AiKeyStore.read(app, AiProvider.ANTHROPIC) ?: return@withContext FoodResult.Failed(FoodError.NO_KEY)
+         val model = AiKeyStore.readModel(app, AiProvider.ANTHROPIC)
+-        val base64 = Base64.getEncoder().encodeToString(jpeg)
++        val base64 = jpegs.map { Base64.getEncoder().encodeToString(it) }
+         run(model, base64, note) { body -> post(AiProvider.ANTHROPIC.endpoint, key, body) }
+     }
+ 
+@@ -82,14 +85,14 @@ object FoodVision {
+      */
+     internal suspend fun run(
+         model: String,
+-        imageBase64: String,
++        imagesBase64: List<String>,
+         note: String,
+         send: suspend (String) -> Pair<Int, String>,
+     ): FoodResult {
+         var structured = true
+         while (true) {
+             val (code, body) = try {
+-                send(buildRequestBody(model, imageBase64, note, structured).toString())
++                send(buildRequestBody(model, imagesBase64, note, structured).toString())
+             } catch (e: CancellationException) {
+                 throw e
+             } catch (e: UnknownHostException) {
+@@ -157,20 +160,27 @@ object FoodVision {
+             .put("additionalProperties", false)
+     }
+ 
+-    internal fun prompt(note: String, structured: Boolean): String = buildString {
+-        append("Estimate the nutrition of the meal in this photo.\n")
++    internal fun prompt(note: String, structured: Boolean, photos: Int = 1): String = buildString {
++        if (photos > 1) {
++            append("Estimate the nutrition of the meal in these $photos photos. They are all one meal: they may ")
++            append("show different dishes or the same dish from another angle, so count each food only once.\n")
++        } else {
++            append("Estimate the nutrition of the meal in this photo.\n")
++        }
+         append("- List each distinct food or drink you can see as one item.\n")
+         append("- Estimate a realistic portion for each from visual cues (plate and cutlery size, hands, packaging) ")
+         append("and write it in plain units (g, ml, units).\n")
+         append("- Give kcal, protein_g, carbs_g and fat_g for that portion from standard food composition data. ")
+         append("Include oil, butter, sauces and dressings you can reasonably infer.\n")
+         append("- The user's note describes what was actually eaten; when it conflicts with the photo, follow the note.\n")
++        append("- When the note says only part of something was eaten (for example half the steak), give the portion ")
++        append("and the numbers for the part actually eaten.\n")
+         append("- total_* must equal the sum of the items.\n")
+         append("- confidence: high when foods and amounts are clear, medium when portions are uncertain, ")
+         append("low when the photo is unclear or the food is hard to identify.\n")
+         append("- Write name, portion and notes in Spanish (Spain). notes: one or two short sentences with ")
+         append("the main assumptions.\n")
+-        append("- If the photo does not show food or drink, return no items, zero totals, confidence low, ")
++        append("- If the photos show no food or drink, return no items, zero totals, confidence low, ")
+         append("and say so in notes.\n")
+         val trimmed = note.trim()
+         append("\nUser's note: ")
+@@ -182,24 +192,29 @@ object FoodVision {
+     }
+ 
+     /**
+-     * The Messages API body: model, reply cap, one user turn of [image, text], and (when
++     * The Messages API body: model, reply cap, one user turn of [image…, text], and (when
+      * [structured]) `output_config.format` with [outputSchema]. Never temperature/top_p/thinking/
+      * tool_choice: Claude 5.x answers those with HTTP 400.
+      */
+-    internal fun buildRequestBody(model: String, imageBase64: String, note: String, structured: Boolean): JSONObject {
+-        val image = JSONObject()
+-            .put("type", "image")
+-            .put(
+-                "source",
++    internal fun buildRequestBody(model: String, imagesBase64: List<String>, note: String, structured: Boolean): JSONObject {
++        val content = JSONArray()
++        for (data in imagesBase64) {
++            content.put(
+                 JSONObject()
+-                    .put("type", "base64")
+-                    .put("media_type", "image/jpeg")
+-                    .put("data", imageBase64),
++                    .put("type", "image")
++                    .put(
++                        "source",
++                        JSONObject()
++                            .put("type", "base64")
++                            .put("media_type", "image/jpeg")
++                            .put("data", data),
++                    ),
+             )
+-        val text = JSONObject().put("type", "text").put("text", prompt(note, structured))
++        }
++        content.put(JSONObject().put("type", "text").put("text", prompt(note, structured, imagesBase64.size)))
+         val message = JSONObject()
+             .put("role", "user")
+-            .put("content", JSONArray().put(image).put(text))
++            .put("content", content)
+         val body = JSONObject()
+             .put("model", model)
+             .put("max_tokens", AiCoach.ANTHROPIC_MAX_TOKENS)
+diff --git a/android/app/src/main/java/com/noop/goals/VictorGoalsCard.kt b/android/app/src/main/java/com/noop/goals/VictorGoalsCard.kt
+index ede3f23a..b028d2aa 100644
+--- a/android/app/src/main/java/com/noop/goals/VictorGoalsCard.kt
++++ b/android/app/src/main/java/com/noop/goals/VictorGoalsCard.kt
+@@ -1,17 +1,13 @@
+ package com.noop.goals
+ 
+-import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.ExperimentalLayoutApi
+ import androidx.compose.foundation.layout.FlowRow
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.fillMaxWidth
+-import androidx.compose.foundation.layout.padding
+-import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.foundation.text.KeyboardOptions
+ import androidx.compose.material3.OutlinedTextField
+-import androidx.compose.material3.Surface
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.getValue
+@@ -23,6 +19,7 @@ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.text.input.KeyboardType
+ import androidx.compose.ui.unit.dp
+ import com.noop.R
++import com.noop.food.FoodChip
+ import com.noop.food.foodFieldColors
+ import com.noop.ui.NoopCard
+ import com.noop.ui.NoopType
+@@ -52,7 +49,7 @@ internal fun VictorGoalsCard() {
+             Text(uiString(R.string.victor_goals_blurb), style = NoopType.footnote, color = Palette.textSecondary)
+             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                 VictorGoals.Goal.entries.filter { it != VictorGoals.Goal.NONE }.forEach { g ->
+-                    GoalChip(
++                    FoodChip(
+                         label = uiString(goalLabel(g)),
+                         selected = goals.goal == g,
+                         // Tapping the chosen goal again clears it.
+@@ -103,22 +100,6 @@ internal fun VictorGoalsCard() {
+     }
+ }
+ 
+-@Composable
+-private fun GoalChip(label: String, selected: Boolean, onClick: () -> Unit) {
+-    Surface(
+-        shape = RoundedCornerShape(50),
+-        color = if (selected) Palette.accent else Palette.surfaceInset,
+-        modifier = Modifier.clickable(onClick = onClick),
+-    ) {
+-        Text(
+-            label,
+-            style = NoopType.subhead,
+-            color = if (selected) Palette.surfaceBase else Palette.textPrimary,
+-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+-        )
+-    }
+-}
+-
+ private fun goalLabel(g: VictorGoals.Goal): Int = when (g) {
+     VictorGoals.Goal.LOSE_FAT -> R.string.victor_goals_lose_fat
+     VictorGoals.Goal.MAINTAIN -> R.string.victor_goals_maintain
+diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
+index e635bf42..58eb8737 100644
+--- a/android/app/src/main/res/values-es/strings_victor_food.xml
++++ b/android/app/src/main/res/values-es/strings_victor_food.xml
+@@ -27,7 +27,7 @@
+     <string name="victor_food_photo">Foto</string>
+     <string name="victor_food_gallery">Galería</string>
+     <string name="victor_food_today_empty">Hoy no hay nada apuntado. Haz una foto de tu próxima comida.</string>
+-    <string name="victor_food_privacy">La foto solo se envía a Anthropic, con tu clave, cuando pulsas Analizar. En el móvil solo queda una miniatura. Todas las cifras son estimaciones.</string>
++    <string name="victor_food_privacy">Las fotos solo se envían a Anthropic, con tu clave, cuando pulsas Analizar. En el móvil solo quedan miniaturas. Todas las cifras son estimaciones.</string>
+ 
+     <string name="victor_food_delete">Eliminar</string>
+     <string name="victor_food_delete_title">¿Eliminar esta comida?</string>
+@@ -37,7 +37,7 @@
+     <string name="victor_food_sheet_new">Nueva comida</string>
+     <string name="victor_food_sheet_edit">Editar comida</string>
+     <string name="victor_food_note_label">Nota (opcional)</string>
+-    <string name="victor_food_note_hint">media ración, sin aceite…</string>
++    <string name="victor_food_note_hint">me comí la mitad del filete, sin aceite…</string>
+     <string name="victor_food_analyze">Analizar con Claude</string>
+     <string name="victor_food_by_hand">Rellenar a mano</string>
+     <string name="victor_food_discard">Descartar</string>
+@@ -46,7 +46,7 @@
+     <string name="victor_food_confidence_low">Confianza baja</string>
+     <string name="victor_food_confidence_medium">Confianza media</string>
+     <string name="victor_food_confidence_high">Confianza alta</string>
+-    <string name="victor_food_no_items">Claude no ha visto comida en esta foto.</string>
++    <string name="victor_food_no_items">Claude no ha visto comida en las fotos.</string>
+     <string name="victor_food_item_name">Alimento</string>
+     <string name="victor_food_item_portion">Ración</string>
+     <string name="victor_food_item_kcal">kcal</string>
+@@ -58,23 +58,40 @@
+     <string name="victor_food_total">Total</string>
+     <string name="victor_food_save">Guardar</string>
+     <string name="victor_food_reanalyze">Volver a analizar</string>
+-    <string name="victor_food_open_coach">Abrir Coach</string>
++    <string name="victor_food_open_coach">Abrir Entrenador</string>
+ 
+-    <string name="victor_food_err_no_key">El análisis de fotos usa tu clave de Anthropic. Añádela en Coach → Ajustes, con Anthropic como proveedor.</string>
+-    <string name="victor_food_err_key">Anthropic ha rechazado la clave. Revísala en Coach → Ajustes.</string>
++    <string name="victor_food_err_no_key">El análisis de fotos usa tu clave de Anthropic. Añádela en Entrenador → Ajustes, con Anthropic como proveedor.</string>
++    <string name="victor_food_err_key">Anthropic ha rechazado la clave. Revísala en Entrenador → Ajustes.</string>
+     <string name="victor_food_err_busy">Claude está saturado ahora mismo. Prueba otra vez en un minuto.</string>
+     <string name="victor_food_err_server">Anthropic ha tenido un fallo en su servidor. Prueba otra vez en un rato.</string>
+-    <string name="victor_food_err_bad_request">Anthropic no ha aceptado la petición. Revisa el modelo elegido en Coach → Ajustes.</string>
++    <string name="victor_food_err_bad_request">Anthropic no ha aceptado la petición. Revisa el modelo elegido en Entrenador → Ajustes.</string>
+     <string name="victor_food_err_offline">Sin conexión a internet.</string>
+     <string name="victor_food_err_timeout">Claude ha tardado demasiado en responder. Inténtalo otra vez.</string>
+     <string name="victor_food_err_network">Error de red al contactar con Anthropic.</string>
+-    <string name="victor_food_err_refusal">Claude no ha querido analizar esta foto. Prueba con otra o rellena los datos a mano.</string>
++    <string name="victor_food_err_refusal">Claude no ha querido analizar estas fotos. Prueba con otras o rellena los datos a mano.</string>
+     <string name="victor_food_err_unreadable">No se ha podido leer la respuesta. Inténtalo otra vez o rellena los datos a mano.</string>
+-    <string name="victor_food_err_image">La foto es demasiado grande para enviarla.</string>
++    <string name="victor_food_err_image">Las fotos pesan demasiado para enviarlas.</string>
+ 
+     <string name="victor_food_photo_unreadable">No se ha podido abrir esa foto.</string>
+     <string name="victor_food_save_failed">No se ha podido guardar la comida.</string>
+     <string name="victor_food_delete_failed">No se ha podido eliminar la comida.</string>
+     <string name="victor_food_no_camera">No hay ninguna app de cámara.</string>
+     <string name="victor_food_camera_denied">Permiso de cámara denegado.</string>
++
++    <string name="victor_food_when">Cuándo</string>
++    <string name="victor_food_meal_breakfast">Desayuno</string>
++    <string name="victor_food_meal_mid_morning">Almuerzo</string>
++    <string name="victor_food_meal_lunch">Comida</string>
++    <string name="victor_food_meal_snack">Merienda</string>
++    <string name="victor_food_meal_dinner">Cena</string>
++    <string name="victor_food_meal_nibble">Picoteo</string>
++    <string name="victor_food_day_other">Otro día…</string>
++    <string name="victor_food_add_camera">Otra foto</string>
++    <string name="victor_food_add_gallery">De la galería</string>
++    <string name="victor_food_photo_count">%1$d de %2$d fotos</string>
++    <string name="victor_food_photo_remove">Quitar foto</string>
++    <string name="victor_food_photo_limit">Máximo 4 fotos por comida; el resto no se ha añadido.</string>
++    <string name="victor_food_eaten_label">¿Cuánto te has comido?</string>
++    <string name="victor_food_eaten_all">Todo</string>
++    <string name="victor_food_eaten_result">Comido: %1$s kcal · %2$s</string>
+ </resources>
+diff --git a/android/app/src/main/res/values-es/strings_victor_goals.xml b/android/app/src/main/res/values-es/strings_victor_goals.xml
+index bb3c8c93..bec67ece 100644
+--- a/android/app/src/main/res/values-es/strings_victor_goals.xml
++++ b/android/app/src/main/res/values-es/strings_victor_goals.xml
+@@ -2,7 +2,7 @@
+ <!-- victor:goals — textos propios del fork, fuera del strings.xml de upstream para que el parche no choque. -->
+ <resources>
+     <string name="victor_goals_title">Tus objetivos</string>
+-    <string name="victor_goals_blurb">El coach planifica sus consejos según esto, y la tarjeta Comida muestra tu objetivo diario. Todo es opcional.</string>
++    <string name="victor_goals_blurb">El entrenador planifica sus consejos según esto, y la tarjeta Comida muestra tu objetivo diario. Todo es opcional.</string>
+     <string name="victor_goals_lose_fat">Perder grasa</string>
+     <string name="victor_goals_maintain">Mantener</string>
+     <string name="victor_goals_gain_muscle">Ganar músculo</string>
+diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
+index 0e8aefcd..31697711 100644
+--- a/android/app/src/main/res/values/strings_victor_food.xml
++++ b/android/app/src/main/res/values/strings_victor_food.xml
+@@ -27,7 +27,7 @@
+     <string name="victor_food_photo">Photo</string>
+     <string name="victor_food_gallery">Gallery</string>
+     <string name="victor_food_today_empty">Nothing logged today. Take a photo of your next meal.</string>
+-    <string name="victor_food_privacy">A photo goes to Anthropic, with your own key, only when you tap Analyse. Only a small thumbnail stays on the phone. All figures are estimates.</string>
++    <string name="victor_food_privacy">Photos are sent to Anthropic, with your key, only when you tap Analyse. Only small thumbnails stay on the phone. Every number is an estimate.</string>
+ 
+     <string name="victor_food_delete">Delete</string>
+     <string name="victor_food_delete_title">Delete this meal?</string>
+@@ -37,7 +37,7 @@
+     <string name="victor_food_sheet_new">New meal</string>
+     <string name="victor_food_sheet_edit">Edit meal</string>
+     <string name="victor_food_note_label">Note (optional)</string>
+-    <string name="victor_food_note_hint">half portion, no oil…</string>
++    <string name="victor_food_note_hint">ate half the steak, no oil…</string>
+     <string name="victor_food_analyze">Analyse with Claude</string>
+     <string name="victor_food_by_hand">Fill in by hand</string>
+     <string name="victor_food_discard">Discard</string>
+@@ -46,7 +46,7 @@
+     <string name="victor_food_confidence_low">Low confidence</string>
+     <string name="victor_food_confidence_medium">Medium confidence</string>
+     <string name="victor_food_confidence_high">High confidence</string>
+-    <string name="victor_food_no_items">Claude found no food in this photo.</string>
++    <string name="victor_food_no_items">Claude saw no food in the photos.</string>
+     <string name="victor_food_item_name">Food</string>
+     <string name="victor_food_item_portion">Portion</string>
+     <string name="victor_food_item_kcal">kcal</string>
+@@ -68,13 +68,30 @@
+     <string name="victor_food_err_offline">No internet connection.</string>
+     <string name="victor_food_err_timeout">Claude took too long to answer. Try again.</string>
+     <string name="victor_food_err_network">Network error while reaching Anthropic.</string>
+-    <string name="victor_food_err_refusal">Claude declined to analyse this photo. Try another one or fill it in by hand.</string>
++    <string name="victor_food_err_refusal">Claude would not analyse these photos. Try others or fill the numbers in by hand.</string>
+     <string name="victor_food_err_unreadable">The answer could not be read. Try again or fill it in by hand.</string>
+-    <string name="victor_food_err_image">The photo is too large to send.</string>
++    <string name="victor_food_err_image">The photos are too large to send.</string>
+ 
+     <string name="victor_food_photo_unreadable">That photo could not be opened.</string>
+     <string name="victor_food_save_failed">The meal could not be saved.</string>
+     <string name="victor_food_delete_failed">The meal could not be deleted.</string>
+     <string name="victor_food_no_camera">No camera app found.</string>
+     <string name="victor_food_camera_denied">Camera permission denied.</string>
++
++    <string name="victor_food_when">When</string>
++    <string name="victor_food_meal_breakfast">Breakfast</string>
++    <string name="victor_food_meal_mid_morning">Mid-morning snack</string>
++    <string name="victor_food_meal_lunch">Lunch</string>
++    <string name="victor_food_meal_snack">Afternoon snack</string>
++    <string name="victor_food_meal_dinner">Dinner</string>
++    <string name="victor_food_meal_nibble">Nibbles</string>
++    <string name="victor_food_day_other">Other day…</string>
++    <string name="victor_food_add_camera">Another photo</string>
++    <string name="victor_food_add_gallery">From gallery</string>
++    <string name="victor_food_photo_count">%1$d of %2$d photos</string>
++    <string name="victor_food_photo_remove">Remove photo</string>
++    <string name="victor_food_photo_limit">Up to 4 photos per meal; the rest were left out.</string>
++    <string name="victor_food_eaten_label">How much did you eat?</string>
++    <string name="victor_food_eaten_all">All</string>
++    <string name="victor_food_eaten_result">Eaten: %1$s kcal · %2$s</string>
+ </resources>
+diff --git a/android/app/src/test/java/com/noop/food/FoodLogTest.kt b/android/app/src/test/java/com/noop/food/FoodLogTest.kt
+index b48d0d07..1f2175b2 100644
+--- a/android/app/src/test/java/com/noop/food/FoodLogTest.kt
++++ b/android/app/src/test/java/com/noop/food/FoodLogTest.kt
+@@ -11,10 +11,13 @@ import java.time.ZoneId
+ /** victor:food — day totals, the review draft's number handling, the nutrition-lane plan and the Coach line. */
+ class FoodLogTest {
+ 
+-    private fun entry(id: String, day: String, kcal: Double, p: Double = 10.0, c: Double = 20.0, f: Double = 5.0, ts: Long = 0L) =
++    private fun entry(
++        id: String, day: String, kcal: Double, p: Double = 10.0, c: Double = 20.0, f: Double = 5.0, ts: Long = 0L,
++        meal: MealType = MealType.LUNCH,
++    ) =
+         FoodEntry(
+             id = id, timestamp = ts, day = day, note = "", items = emptyList(),
+-            kcal = kcal, proteinG = p, carbsG = c, fatG = f, thumbnailPath = null,
++            kcal = kcal, proteinG = p, carbsG = c, fatG = f, thumbnailPaths = emptyList(), meal = meal,
+         )
+ 
+     // MARK: - Day totals
+@@ -65,6 +68,45 @@ class FoodLogTest {
+         assertEquals("2026-10-17", FoodDays.dayOf(ts, ZoneId.of("Asia/Tokyo")))
+     }
+ 
++    @Test
++    fun theClockPicksASpanishMealButNeverNibbles() {
++        fun at(h: Int, m: Int = 0) = MealType.forTime(java.time.LocalTime.of(h, m))
++        assertEquals(MealType.DINNER, at(1, 30))
++        assertEquals(MealType.BREAKFAST, at(4))
++        assertEquals(MealType.BREAKFAST, at(10, 29))
++        assertEquals(MealType.MID_MORNING, at(10, 30))
++        assertEquals(MealType.LUNCH, at(13))
++        assertEquals(MealType.LUNCH, at(16, 29))
++        assertEquals(MealType.SNACK, at(16, 30))
++        assertEquals(MealType.DINNER, at(20))
++        assertTrue((0 until 24 * 60).none { at(it / 60, it % 60) == MealType.NIBBLE })
++    }
++
++    @Test
++    fun aDayGroupsByMealInTheOrderOfTheDay() {
++        val log = listOf(
++            entry("cena", "2026-10-16", 1.0, ts = 900, meal = MealType.DINNER),
++            entry("cafe", "2026-10-16", 1.0, ts = 100, meal = MealType.BREAKFAST),
++            entry("postre", "2026-10-16", 1.0, ts = 600, meal = MealType.LUNCH),
++            entry("plato", "2026-10-16", 1.0, ts = 500, meal = MealType.LUNCH),
++            // Logged late, filed under breakfast by the wearer: still with breakfast.
++            entry("tostada", "2026-10-16", 1.0, ts = 950, meal = MealType.BREAKFAST),
++        )
++        val g = FoodDays.groupedByMeal(log)
++        assertEquals(listOf(MealType.BREAKFAST, MealType.LUNCH, MealType.DINNER), g.map { it.first })
++        assertEquals(listOf("cafe", "tostada"), g[0].second.map { it.id })
++        assertEquals(listOf("plato", "postre"), g[1].second.map { it.id })
++    }
++
++    @Test
++    fun movingToAnotherDayKeepsTheTimeOfDay() {
++        val madrid = ZoneId.of("Europe/Madrid")
++        val ts = 1792186200000L // 2026-10-16 23:30 Madrid
++        val moved = FoodDays.moveToDay(ts, "2026-10-15", madrid)
++        assertEquals("2026-10-15", FoodDays.dayOf(moved, madrid))
++        assertEquals(ts - 24 * 3600 * 1000L, moved)
++    }
++
+     // MARK: - Review draft numbers
+ 
+     @Test
+@@ -79,6 +121,21 @@ class FoodLogTest {
+         assertEquals(item, FoodItemDraft.of(item).toItem())
+     }
+ 
++    @Test
++    fun eatenScalesTheServedPortionAndReopensAtTheWholePortion() {
++        val served = FoodItemDraft("Filete", "200 g", "350", "52", "0", "15.5")
++        val half = served.copy(eaten = 0.5).toItem()
++        assertEquals(FoodItem("Filete", "200 g", 175.0, 26.0, 0.0, 7.8, eaten = 0.5), half)
++        // Reopened for editing: back to the whole steak, so another fraction scales from it.
++        val reopened = FoodItemDraft.of(half)
++        assertEquals("350", reopened.kcal)
++        assertEquals("52", reopened.protein)
++        assertEquals(0.5, reopened.eaten, 0.0)
++        assertEquals(262.5, reopened.copy(eaten = 0.75).toItem().kcal, 0.0)
++        // A fraction from a damaged file never divides by zero.
++        assertEquals(1.0, FoodItemDraft.of(half.copy(eaten = 0.0)).eaten, 0.0)
++    }
++
+     // MARK: - Nutrition lane plan
+ 
+     private val keys = FoodNutritionSync.KEYS
+@@ -141,9 +198,9 @@ class FoodLogTest {
+     @Test
+     fun coachLineSummarisesTodayAndThePreviousWeek() {
+         val log = listOf(
+-            entry("t1", "2026-10-16", 600.0, 40.0, 60.0, 20.0),
++            entry("t1", "2026-10-16", 600.0, 40.0, 60.0, 20.0, meal = MealType.BREAKFAST),
+             entry("t2", "2026-10-16", 800.0, 50.0, 70.0, 25.0),
+-            entry("t3", "2026-10-16", 450.0, 30.0, 50.0, 15.0),
++            entry("t3", "2026-10-16", 450.0, 30.0, 50.0, 15.0, meal = MealType.DINNER),
+             entry("y1", "2026-10-15", 2000.0),
+             entry("y2", "2026-10-15", 200.0),
+             entry("d3", "2026-10-13", 1900.0),
+@@ -151,8 +208,8 @@ class FoodLogTest {
+             entry("d9", "2026-10-08", 9999.0), // 8 days before: outside
+         )
+         assertEquals(
+-            "FOOD LOG (photo estimates): today 1850 kcal (P 120 g, C 180 g, F 60 g) from 3 meals; " +
+-                "previous 7 days avg 2200 kcal/day over 3 logged days",
++            "FOOD LOG (photo estimates): today 1850 kcal (P 120 g, C 180 g, F 60 g) from 3 meals " +
++                "(breakfast 600, lunch 800, dinner 450 kcal); previous 7 days avg 2200 kcal/day over 3 logged days",
+             FoodCoachContext.line(log, today),
+         )
+     }
+@@ -164,7 +221,7 @@ class FoodLogTest {
+             FoodCoachContext.line(listOf(entry("y", "2026-10-15", 2000.0)), today),
+         )
+         assertEquals(
+-            "FOOD LOG (photo estimates): today 500 kcal (P 10 g, C 20 g, F 5 g) from 1 meal",
++            "FOOD LOG (photo estimates): today 500 kcal (P 10 g, C 20 g, F 5 g) from 1 meal (lunch 500 kcal)",
+             FoodCoachContext.line(listOf(entry("t", "2026-10-16", 500.0)), today),
+         )
+     }
+diff --git a/android/app/src/test/java/com/noop/food/FoodStoreCodecTest.kt b/android/app/src/test/java/com/noop/food/FoodStoreCodecTest.kt
+index 8369ae42..c0acc9ac 100644
+--- a/android/app/src/test/java/com/noop/food/FoodStoreCodecTest.kt
++++ b/android/app/src/test/java/com/noop/food/FoodStoreCodecTest.kt
+@@ -14,19 +14,21 @@ class FoodStoreCodecTest {
+         note = "media ración, sin aceite \"casero\"",
+         items = listOf(
+             FoodItem("Lentejas con chorizo", "1 plato (300 g)", 420.0, 22.5, 48.0, 14.3),
+-            FoodItem("Pan", "1 rebanada", 80.0, 2.7, 15.0, 0.9),
++            FoodItem("Pan", "1 rebanada", 40.0, 1.4, 7.5, 0.5, eaten = 0.5),
+         ),
+-        kcal = 500.0, proteinG = 25.2, carbsG = 63.0, fatG = 15.2,
+-        thumbnailPath = "thumbs/e1.jpg",
++        kcal = 460.0, proteinG = 23.9, carbsG = 55.5, fatG = 14.8,
++        thumbnailPaths = listOf("thumbs/e1-0.jpg", "thumbs/e1-1.jpg"),
+         confidence = "medium",
+         aiNotes = "Ración estimada por el tamaño del plato.",
++        meal = MealType.DINNER,
+     )
+ 
+     private val bare = FoodEntry(
+         id = "e2", timestamp = 1792100000000L, day = "2026-10-15", note = "",
+         items = listOf(FoodItem("Café con leche", "", 60.0, 3.0, 5.0, 3.0)),
+         kcal = 60.0, proteinG = 3.0, carbsG = 5.0, fatG = 3.0,
+-        thumbnailPath = null,
++        thumbnailPaths = emptyList(),
++        meal = MealType.NIBBLE,
+     )
+ 
+     @Test
+@@ -35,13 +37,24 @@ class FoodStoreCodecTest {
+             entries = listOf(bare, full),
+             synced = mapOf(
+                 "2026-10-15" to FoodTotals(60.0, 3.0, 5.0, 3.0),
+-                "2026-10-16" to FoodTotals(500.0, 25.2, 63.0, 15.2),
++                "2026-10-16" to FoodTotals(460.0, 23.9, 55.5, 14.8),
+             ),
+         )
+         val decoded = FoodStoreCodec.decode(FoodStoreCodec.encode(state))
+         assertEquals(state, decoded)
+         assertEquals(null, decoded.entries[0].confidence)
+-        assertEquals(null, decoded.entries[0].thumbnailPath)
++        assertEquals(emptyList<String>(), decoded.entries[0].thumbnailPaths)
++    }
++
++    @Test
++    fun aLogFromBeforeMealsAndSeveralPhotosStillReads() {
++        // 2026-10-16 08:00 in Madrid; no "meal", one "thumb", no "eaten".
++        val json = """{"version":1,"entries":[{"id":"old","ts":1792130400000,"day":"2026-10-16",
++            "thumb":"thumbs/old.jpg","items":[{"name":"Tostada","portion":"1","kcal":120}],"kcal":120}]}"""
++        val e = FoodStoreCodec.decode(json).entries.single()
++        assertEquals(listOf("thumbs/old.jpg"), e.thumbnailPaths)
++        assertEquals(MealType.forTimestamp(1792130400000L), e.meal)
++        assertEquals(1.0, e.items.single().eaten, 0.0)
+     }
+ 
+     @Test
+diff --git a/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt b/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
+index d05e6ef9..de70a88a 100644
+--- a/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
++++ b/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
+@@ -97,7 +97,7 @@ class FoodVisionReplyTest {
+     @Test
+     fun outputConfigRejectionRetriesOncePlain() = runBlocking {
+         val sent = ArrayList<JSONObject>()
+-        val result = FoodVision.run("old-model", "x", "") { body ->
++        val result = FoodVision.run("old-model", listOf("x"), "") { body ->
+             sent += JSONObject(body)
+             if (sent.size == 1) {
+                 400 to """{"type":"error","error":{"type":"invalid_request_error","message":"output_config.format: not supported for this model"}}"""
+@@ -115,7 +115,7 @@ class FoodVisionReplyTest {
+     fun otherFailuresMapWithoutRetry() = runBlocking {
+         fun statusRun(code: Int, body: String = "{}"): Pair<FoodResult, Int> {
+             var calls = 0
+-            val r = runBlocking { FoodVision.run("m", "x", "") { calls++; code to body } }
++            val r = runBlocking { FoodVision.run("m", listOf("x"), "") { calls++; code to body } }
+             return r to calls
+         }
+         val imageError = """{"type":"error","error":{"message":"Could not process image: unsupported image format"}}"""
+@@ -126,9 +126,9 @@ class FoodVisionReplyTest {
+         assertEquals(FoodError.SERVER, (statusRun(500).first as FoodResult.Failed).error)
+         assertEquals(FoodError.IMAGE, (statusRun(413).first as FoodResult.Failed).error)
+ 
+-        val offline = FoodVision.run("m", "x", "") { throw UnknownHostException("api.anthropic.com") }
++        val offline = FoodVision.run("m", listOf("x"), "") { throw UnknownHostException("api.anthropic.com") }
+         assertEquals(FoodResult.Failed(FoodError.OFFLINE), offline)
+-        val slow = FoodVision.run("m", "x", "") { throw SocketTimeoutException("timeout") }
++        val slow = FoodVision.run("m", listOf("x"), "") { throw SocketTimeoutException("timeout") }
+         assertEquals(FoodResult.Failed(FoodError.TIMEOUT), slow)
+     }
+ }
+diff --git a/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt b/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
+index d7802def..9c56bd76 100644
+--- a/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
++++ b/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
+@@ -13,7 +13,7 @@ class FoodVisionRequestTest {
+ 
+     @Test
+     fun structuredBodyCarriesImageThenTextAndTheSchema() {
+-        val body = FoodVision.buildRequestBody("claude-opus-5-5", "QUJD", "media ración", structured = true)
++        val body = FoodVision.buildRequestBody("claude-opus-5-5", listOf("QUJD"), "media ración", structured = true)
+ 
+         assertEquals(setOf("model", "max_tokens", "messages", "output_config"), body.keySet())
+         assertEquals("claude-opus-5-5", body.getString("model"))
+@@ -46,7 +46,7 @@ class FoodVisionRequestTest {
+     @Test
+     fun neverSendsParamsClaude5Rejects() {
+         for (structured in listOf(true, false)) {
+-            val body = FoodVision.buildRequestBody("m", "x", "", structured)
++            val body = FoodVision.buildRequestBody("m", listOf("x"), "", structured)
+             for (k in banned) assertFalse("$k must not be sent", body.has(k))
+             assertFalse(body.toString().contains("\"temperature\""))
+         }
+@@ -54,7 +54,7 @@ class FoodVisionRequestTest {
+ 
+     @Test
+     fun fallbackBodyDropsOutputConfigAndAsksForJsonInThePrompt() {
+-        val body = FoodVision.buildRequestBody("m", "x", "  ", structured = false)
++        val body = FoodVision.buildRequestBody("m", listOf("x"), "  ", structured = false)
+         assertEquals(setOf("model", "max_tokens", "messages"), body.keySet())
+         val prompt = body.getJSONArray("messages").getJSONObject(0).getJSONArray("content")
+             .getJSONObject(1).getString("text")
+@@ -63,6 +63,24 @@ class FoodVisionRequestTest {
+         assertTrue(prompt.contains("\"total_kcal\""))
+     }
+ 
++    @Test
++    fun severalPhotosGoInOneTurnBeforeTheTextAndAreCountedOnce() {
++        val body = FoodVision.buildRequestBody("m", listOf("AAA", "BBB", "CCC"), "", structured = true)
++        val content = body.getJSONArray("messages").getJSONObject(0).getJSONArray("content")
++        assertEquals(4, content.length())
++        assertEquals(
++            listOf("AAA", "BBB", "CCC"),
++            (0 until 3).map { content.getJSONObject(it).getJSONObject("source").getString("data") },
++        )
++        val prompt = content.getJSONObject(3).getString("text")
++        assertTrue(prompt.contains("these 3 photos"))
++        assertTrue(prompt.contains("count each food only once"))
++        assertTrue(prompt.contains("half the steak"))
++        val single = FoodVision.buildRequestBody("m", listOf("AAA"), "", structured = true)
++            .getJSONArray("messages").getJSONObject(0).getJSONArray("content").getJSONObject(1).getString("text")
++        assertTrue(single.startsWith("Estimate the nutrition of the meal in this photo."))
++    }
++
+     @Test
+     fun schemaIsStrictAndRequiresEveryField() {
+         val schema = FoodVision.outputSchema()
+-- 
+2.54.0
+
