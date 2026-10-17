@@ -1,0 +1,1120 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Sat, 17 Oct 2026 18:15:55 +0200
+Subject: [PATCH] feat(day): "My day" on Today (weigh-in, calendar, Google
+ Tasks) and a quieter Today
+
+- TodayMyDaySection, right after the hero: this morning's weigh-in read
+  straight from Health Connect (no wait for the 12-hour import), today's
+  agenda from the phone's calendar store (READ_CALENDAR, nothing sent), and
+  Google Tasks due today or overdue (opt-in, read-only, Play services'
+  Authorization API with scope tasks.readonly). Weight and agenda re-read on
+  every resume. Long-press the tasks block to disconnect.
+- VictorTodayQuiet: the long explainer notes (scores building, calibrating
+  baseline, carried sleep, new here) start dismissed, once per install; a
+  test fails if upstream renames their card ids.
+- play-services-auth 21.2.0 with its lock state and sha256 verification.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ android/app/build.gradle.kts                  |   3 +
+ android/app/gradle.lockfile                   |  11 +
+ android/app/src/main/AndroidManifest.xml      |   2 +
+ .../src/main/java/com/noop/NoopApplication.kt |   1 +
+ .../src/main/java/com/noop/day/DayAgenda.kt   |  80 +++++
+ .../src/main/java/com/noop/day/DayWeight.kt   |  56 ++++
+ .../src/main/java/com/noop/day/GoogleTasks.kt | 145 ++++++++
+ .../java/com/noop/day/TodayMyDaySection.kt    | 310 ++++++++++++++++++
+ .../java/com/noop/day/VictorTodayQuiet.kt     |  25 ++
+ .../src/main/java/com/noop/ui/TodayScreen.kt  |   1 +
+ .../main/res/values-es/strings_victor_day.xml |  23 ++
+ .../main/res/values/strings_victor_day.xml    |  23 ++
+ .../src/test/java/com/noop/day/MyDayTest.kt   | 128 ++++++++
+ android/gradle/verification-metadata.xml      |  91 +++++
+ 14 files changed, 899 insertions(+)
+ create mode 100644 android/app/src/main/java/com/noop/day/DayAgenda.kt
+ create mode 100644 android/app/src/main/java/com/noop/day/DayWeight.kt
+ create mode 100644 android/app/src/main/java/com/noop/day/GoogleTasks.kt
+ create mode 100644 android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
+ create mode 100644 android/app/src/main/java/com/noop/day/VictorTodayQuiet.kt
+ create mode 100644 android/app/src/main/res/values-es/strings_victor_day.xml
+ create mode 100644 android/app/src/main/res/values/strings_victor_day.xml
+ create mode 100644 android/app/src/test/java/com/noop/day/MyDayTest.kt
+
+diff --git a/android/app/build.gradle.kts b/android/app/build.gradle.kts
+index 5bb70425..7ced6af0 100644
+--- a/android/app/build.gradle.kts
++++ b/android/app/build.gradle.kts
+@@ -292,6 +292,9 @@ dependencies {
+     // Pinned to alpha07: alpha11+ require compileSdk 35; this module is compileSdk 34.
+     implementation("androidx.health.connect:connect-client:1.1.0-alpha07")
+ 
++    // victor:day — opt-in Google Tasks on Today: Play services' Authorization API for a tasks.readonly token.
++    implementation("com.google.android.gms:play-services-auth:21.2.0")
++
+     // --- Unit / instrumentation tests ---
+     testImplementation("junit:junit:4.13.2")
+     testImplementation("org.jacoco:org.jacoco.core:0.8.12")
+diff --git a/android/app/gradle.lockfile b/android/app/gradle.lockfile
+index b546e7b7..19148339 100644
+--- a/android/app/gradle.lockfile
++++ b/android/app/gradle.lockfile
+@@ -69,11 +69,13 @@ androidx.core:core-ktx:1.13.1=demoDebugAndroidTestCompileClasspath,demoDebugAndr
+ androidx.core:core-remoteviews:1.1.0=demoDebugRuntimeClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestRuntimeClasspath
+ androidx.core:core:1.13.1=demoDebugAndroidTestCompileClasspath,demoDebugAndroidTestRuntimeClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugAndroidTestRuntimeClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ androidx.customview:customview-poolingcontainer:1.0.0=demoDebugAndroidTestRuntimeClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestRuntimeClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestRuntimeClasspath
++androidx.customview:customview:1.0.0=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ androidx.datastore:datastore-core:1.0.0=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ androidx.datastore:datastore-preferences-core:1.0.0=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ androidx.datastore:datastore-preferences:1.0.0=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ androidx.datastore:datastore:1.0.0=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ androidx.emoji2:emoji2:1.3.0=demoDebugAndroidTestRuntimeClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestRuntimeClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestRuntimeClasspath
++androidx.fragment:fragment:1.5.7=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ androidx.glance:glance-appwidget-external-protobuf:1.1.1=demoDebugRuntimeClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestRuntimeClasspath
+ androidx.glance:glance-appwidget-proto:1.1.1=demoDebugRuntimeClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestRuntimeClasspath
+ androidx.glance:glance-appwidget:1.1.1=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+@@ -101,6 +103,7 @@ androidx.lifecycle:lifecycle-viewmodel-compose:2.8.2=demoDebugAndroidTestCompile
+ androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.2=demoDebugAndroidTestCompileClasspath,demoDebugAndroidTestRuntimeClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugAndroidTestRuntimeClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ androidx.lifecycle:lifecycle-viewmodel-savedstate:2.8.2=demoDebugAndroidTestCompileClasspath,demoDebugAndroidTestRuntimeClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugAndroidTestRuntimeClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ androidx.lifecycle:lifecycle-viewmodel:2.8.2=demoDebugAndroidTestCompileClasspath,demoDebugAndroidTestRuntimeClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugAndroidTestRuntimeClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
++androidx.loader:loader:1.1.0=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ androidx.navigation:navigation-common-ktx:2.7.7=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ androidx.navigation:navigation-common:2.7.7=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ androidx.navigation:navigation-compose:2.7.7=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+@@ -132,6 +135,7 @@ androidx.test:monitor:1.7.1=demoDebugUnitTestCompileClasspath,demoDebugUnitTestR
+ androidx.test:runner:1.5.2=androidTestImplementationDependenciesMetadata,demoDebugAndroidTestCompileClasspath,demoDebugAndroidTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugAndroidTestRuntimeClasspath
+ androidx.tracing:tracing:1.0.0=androidTestImplementationDependenciesMetadata,demoDebugAndroidTestCompileClasspath,demoDebugAndroidTestRuntimeClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugAndroidTestRuntimeClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestRuntimeClasspath
+ androidx.versionedparcelable:versionedparcelable:1.1.1=demoDebugAndroidTestCompileClasspath,demoDebugAndroidTestRuntimeClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugAndroidTestRuntimeClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
++androidx.viewpager:viewpager:1.0.0=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ androidx.work:work-runtime-ktx:2.9.0=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ androidx.work:work-runtime:2.9.0=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ com.almworks.sqlite4java:sqlite4java:1.0.392=demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,testImplementationDependenciesMetadata
+@@ -160,6 +164,13 @@ com.android.tools.utp:android-test-plugin-result-listener-gradle:31.5.2=_interna
+ com.android.tools.utp:utp-common:31.5.2=_internal-unified-test-platform-android-test-plugin-host-additional-test-output,_internal-unified-test-platform-android-test-plugin-host-device-info,_internal-unified-test-platform-android-test-plugin-host-logcat,_internal-unified-test-platform-android-test-plugin-host-retention
+ com.android.tools:annotations:31.5.2=_internal-unified-test-platform-android-device-provider-ddmlib,_internal-unified-test-platform-android-device-provider-gradle,_internal-unified-test-platform-android-test-plugin-host-additional-test-output,_internal-unified-test-platform-android-test-plugin-host-apk-installer,_internal-unified-test-platform-android-test-plugin-host-coverage,_internal-unified-test-platform-android-test-plugin-host-device-info,_internal-unified-test-platform-android-test-plugin-host-emulator-control,_internal-unified-test-platform-android-test-plugin-host-logcat,_internal-unified-test-platform-android-test-plugin-host-retention,_internal-unified-test-platform-android-test-plugin-result-listener-gradle
+ com.android.tools:common:31.5.2=_internal-unified-test-platform-android-device-provider-ddmlib,_internal-unified-test-platform-android-device-provider-gradle,_internal-unified-test-platform-android-test-plugin-host-additional-test-output,_internal-unified-test-platform-android-test-plugin-host-apk-installer,_internal-unified-test-platform-android-test-plugin-host-coverage,_internal-unified-test-platform-android-test-plugin-host-device-info,_internal-unified-test-platform-android-test-plugin-host-emulator-control,_internal-unified-test-platform-android-test-plugin-host-logcat,_internal-unified-test-platform-android-test-plugin-host-retention,_internal-unified-test-platform-android-test-plugin-result-listener-gradle
++com.google.android.gms:play-services-auth-api-phone:18.0.2=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
++com.google.android.gms:play-services-auth-base:18.0.10=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
++com.google.android.gms:play-services-auth:21.2.0=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
++com.google.android.gms:play-services-base:18.3.0=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
++com.google.android.gms:play-services-basement:18.3.0=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
++com.google.android.gms:play-services-fido:20.0.1=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
++com.google.android.gms:play-services-tasks:18.1.0=demoDebugAndroidTestCompileClasspath,demoDebugCompileClasspath,demoDebugRuntimeClasspath,demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseCompileClasspath,demoReleaseRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugAndroidTestCompileClasspath,fullDebugCompileClasspath,fullDebugRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseCompileClasspath,fullReleaseRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,implementationDependenciesMetadata
+ com.google.android:annotations:4.1.1.4=_internal-unified-test-platform-android-test-plugin-host-emulator-control,_internal-unified-test-platform-android-test-plugin-host-retention,_internal-unified-test-platform-android-test-plugin-result-listener-gradle
+ com.google.api.grpc:proto-google-common-protos:2.17.0=_internal-unified-test-platform-android-test-plugin-host-emulator-control,_internal-unified-test-platform-android-test-plugin-host-retention,_internal-unified-test-platform-android-test-plugin-result-listener-gradle
+ com.google.auto.value:auto-value-annotations:1.11.0=demoDebugUnitTestCompileClasspath,demoDebugUnitTestRuntimeClasspath,demoReleaseUnitTestCompileClasspath,demoReleaseUnitTestRuntimeClasspath,fullDebugUnitTestCompileClasspath,fullDebugUnitTestRuntimeClasspath,fullReleaseUnitTestCompileClasspath,fullReleaseUnitTestRuntimeClasspath,testImplementationDependenciesMetadata
+diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
+index 08b2041f..588639d6 100644
+--- a/android/app/src/main/AndroidManifest.xml
++++ b/android/app/src/main/AndroidManifest.xml
+@@ -9,6 +9,8 @@
+       NOOP server, telemetry, or network dependency is introduced by this permission.
+     -->
+     <uses-permission android:name="android.permission.INTERNET" />
++    <!-- victor:day: today's agenda on Today, read from the phone's calendar store -->
++    <uses-permission android:name="android.permission.READ_CALENDAR" />
+ 
+     <!-- Android 12+ (API 31+) Bluetooth runtime permissions.
+          neverForLocation: we do not derive physical location from BLE scans, so we
+diff --git a/android/app/src/main/java/com/noop/NoopApplication.kt b/android/app/src/main/java/com/noop/NoopApplication.kt
+index 9f1ee809..9643ab03 100644
+--- a/android/app/src/main/java/com/noop/NoopApplication.kt
++++ b/android/app/src/main/java/com/noop/NoopApplication.kt
+@@ -44,6 +44,7 @@ class NoopApplication : Application() {
+ 
+     override fun onCreate() {
+         super.onCreate()
++        com.noop.day.VictorTodayQuiet.applyOnce(this)   // victor:day
+         // Install before any app-owned startup work so even an early failure is preserved for the
+         // recovery screen on the next launch.
+         CrashCapture.install(this)
+diff --git a/android/app/src/main/java/com/noop/day/DayAgenda.kt b/android/app/src/main/java/com/noop/day/DayAgenda.kt
+new file mode 100644
+index 00000000..8f1f01b8
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/day/DayAgenda.kt
+@@ -0,0 +1,80 @@
++package com.noop.day
++
++import android.Manifest
++import android.content.ContentUris
++import android.content.Context
++import android.content.pm.PackageManager
++import android.provider.CalendarContract
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import java.time.Instant
++import java.time.LocalDate
++import java.time.ZoneId
++import java.time.ZoneOffset
++
++/** victor:day — one calendar entry of today. [begin]/[end] are epoch ms; all-day ones are UTC midnights. */
++data class AgendaEvent(val title: String, val begin: Long, val end: Long, val allDay: Boolean)
++
++/**
++ * victor:day — today's agenda from the phone's own calendar store (CalendarContract): every calendar the
++ * wearer shows in their calendar app, Google Calendar included, with no sign-in and nothing sent anywhere.
++ */
++object DayAgendaSource {
++
++    fun hasPermission(ctx: Context): Boolean =
++        ctx.checkSelfPermission(Manifest.permission.READ_CALENDAR) == PackageManager.PERMISSION_GRANTED
++
++    /** Today's events of visible calendars, not declined, in [inDayOrder]. Empty without the permission. */
++    suspend fun today(ctx: Context, day: LocalDate = LocalDate.now(), zone: ZoneId = ZoneId.systemDefault()): List<AgendaEvent> =
++        withContext(Dispatchers.IO) {
++            if (!hasPermission(ctx)) return@withContext emptyList()
++            val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
++            val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
++            val uri = CalendarContract.Instances.CONTENT_URI.buildUpon().also {
++                ContentUris.appendId(it, start)
++                ContentUris.appendId(it, end)
++            }.build()
++            val projection = arrayOf(
++                CalendarContract.Instances.TITLE,
++                CalendarContract.Instances.BEGIN,
++                CalendarContract.Instances.END,
++                CalendarContract.Instances.ALL_DAY,
++            )
++            val selection = "${CalendarContract.Instances.VISIBLE} = 1 AND " +
++                "${CalendarContract.Instances.SELF_ATTENDEE_STATUS} != ${CalendarContract.Attendees.ATTENDEE_STATUS_DECLINED}"
++            val events = ArrayList<AgendaEvent>()
++            runCatching {
++                ctx.contentResolver.query(uri, projection, selection, null, "${CalendarContract.Instances.BEGIN} ASC")?.use { c ->
++                    while (c.moveToNext()) {
++                        events += AgendaEvent(
++                            title = c.getString(0)?.trim().orEmpty(),
++                            begin = c.getLong(1),
++                            end = c.getLong(2),
++                            allDay = c.getInt(3) == 1,
++                        )
++                    }
++                }
++            }
++            inDayOrder(events.filter { isOnDay(it, day, zone) })
++        }
++
++    /**
++     * Pure. A timed event belongs to [day] when it overlaps the local day. An all-day event is stored as UTC
++     * midnights, so it belongs when [day] falls in its UTC date range (the Instances window, being local,
++     * would otherwise also return yesterday's all-day events east of UTC).
++     */
++    internal fun isOnDay(e: AgendaEvent, day: LocalDate, zone: ZoneId): Boolean {
++        if (e.allDay) {
++            val from = Instant.ofEpochMilli(e.begin).atOffset(ZoneOffset.UTC).toLocalDate()
++            val until = Instant.ofEpochMilli(e.end).atOffset(ZoneOffset.UTC).toLocalDate()
++            return !day.isBefore(from) && day.isBefore(maxOf(until, from.plusDays(1)))
++        }
++        val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
++        val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
++        return e.begin < end && (e.end > start || e.begin >= start)
++    }
++
++    /** Pure. All-day entries first, then by start time; untitled ones keep their place. */
++    internal fun inDayOrder(events: List<AgendaEvent>): List<AgendaEvent> =
++        events.sortedWith(compareBy<AgendaEvent> { !it.allDay }.thenBy { it.begin }.thenBy { it.title })
++}
+diff --git a/android/app/src/main/java/com/noop/day/DayWeight.kt b/android/app/src/main/java/com/noop/day/DayWeight.kt
+new file mode 100644
+index 00000000..71da741b
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/day/DayWeight.kt
+@@ -0,0 +1,56 @@
++package com.noop.day
++
++import android.content.Context
++import androidx.health.connect.client.HealthConnectClient
++import androidx.health.connect.client.permission.HealthPermission
++import androidx.health.connect.client.records.WeightRecord
++import androidx.health.connect.client.request.ReadRecordsRequest
++import androidx.health.connect.client.time.TimeRangeFilter
++import com.noop.ingest.HealthConnectImporter
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import java.time.Instant
++import java.time.ZoneId
++import java.time.temporal.ChronoUnit
++
++/** victor:day — the latest weigh-in and the last one from an earlier day (for the change). */
++data class DayWeight(val kg: Double, val at: Instant, val previousKg: Double?)
++
++/**
++ * victor:day — the morning weigh-in, read straight from Health Connect when Today opens, so the scale's
++ * reading (Hume → Samsung Health → Health Connect) shows without waiting for the 12-hour import. Uses the
++ * READ_WEIGHT permission the wearer already granted for the body-composition import.
++ */
++object DayWeightSource {
++
++    private const val LOOKBACK_DAYS = 14L
++
++    /** Null when Health Connect is unavailable, the permission is missing, or nothing was logged lately. */
++    suspend fun latest(ctx: Context, now: Instant = Instant.now()): DayWeight? = withContext(Dispatchers.IO) {
++        runCatching {
++            if (HealthConnectImporter.sdkStatus(ctx) != HealthConnectClient.SDK_AVAILABLE) return@runCatching null
++            val client = HealthConnectImporter.client(ctx)
++            val granted = client.permissionController.getGrantedPermissions()
++            if (HealthPermission.getReadPermission(WeightRecord::class) !in granted) return@runCatching null
++            val records = client.readRecords(
++                ReadRecordsRequest(
++                    WeightRecord::class,
++                    TimeRangeFilter.between(now.minus(LOOKBACK_DAYS, ChronoUnit.DAYS), now.plusSeconds(60)),
++                ),
++            ).records
++            summarize(records.map { it.time to it.weight.inKilograms })
++        }.getOrNull()
++    }
++
++    /**
++     * Pure. The newest plausible sample, and the newest one from an EARLIER local day (two weigh-ins the
++     * same morning are not a change).
++     */
++    internal fun summarize(samples: List<Pair<Instant, Double>>, zone: ZoneId = ZoneId.systemDefault()): DayWeight? {
++        val sorted = samples.filter { it.second.isFinite() && it.second in 20.0..400.0 }.sortedBy { it.first }
++        val last = sorted.lastOrNull() ?: return null
++        val lastDay = last.first.atZone(zone).toLocalDate()
++        val previous = sorted.lastOrNull { it.first.atZone(zone).toLocalDate() < lastDay }
++        return DayWeight(last.second, last.first, previous?.second)
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/day/GoogleTasks.kt b/android/app/src/main/java/com/noop/day/GoogleTasks.kt
+new file mode 100644
+index 00000000..6c8aa4b2
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/day/GoogleTasks.kt
+@@ -0,0 +1,145 @@
++package com.noop.day
++
++import android.content.Context
++import com.google.android.gms.auth.api.identity.AuthorizationRequest
++import com.google.android.gms.auth.api.identity.AuthorizationResult
++import com.google.android.gms.auth.api.identity.Identity
++import com.google.android.gms.common.api.Scope
++import com.google.android.gms.tasks.Task
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.suspendCancellableCoroutine
++import kotlinx.coroutines.withContext
++import okhttp3.HttpUrl.Companion.toHttpUrl
++import okhttp3.OkHttpClient
++import okhttp3.Request
++import org.json.JSONObject
++import java.time.LocalDate
++import java.util.concurrent.TimeUnit
++import kotlin.coroutines.resume
++import kotlin.coroutines.resumeWithException
++
++/** victor:day — one open Google Task. [due] is the task's date (Google Tasks keeps no time), or null. */
++data class DayTask(val title: String, val due: LocalDate?, val list: String)
++
++/** What the Google Tasks block can show. */
++sealed interface TasksState {
++    /** The wearer has not connected Google Tasks. */
++    object NotConnected : TasksState
++    object Loading : TasksState
++    /** Google needs the wearer's OK again (first connection, or the grant was withdrawn). */
++    object NeedsConsent : TasksState
++    /** Open tasks due today or earlier, overdue first. */
++    data class Ready(val tasks: List<DayTask>) : TasksState
++    data class Failed(val reason: TasksError) : TasksState
++}
++
++enum class TasksError { NOT_CONFIGURED, OFFLINE, SERVER }
++
++/**
++ * victor:day — read-only Google Tasks (where Google's reminders now live too). Opt-in: nothing is asked of
++ * Google until the wearer taps Connect. The token comes from Google Play services' Authorization API
++ * (scope tasks.readonly), which needs an Android OAuth client for this package + signing certificate in
++ * the family's Google Cloud project (see LEEME); no client id or secret ships in the APK.
++ */
++object GoogleTasksSource {
++
++    const val SCOPE = "https://www.googleapis.com/auth/tasks.readonly"
++    private const val PREFS = "noop_prefs"
++    private const val KEY_CONNECTED = "victor.gtasks.connected"
++    private const val API = "https://tasks.googleapis.com/tasks/v1"
++    private const val CACHE_MS = 5 * 60 * 1000L
++
++    private val http = OkHttpClient.Builder()
++        .connectTimeout(15, TimeUnit.SECONDS)
++        .readTimeout(20, TimeUnit.SECONDS)
++        .build()
++
++    /** Last good fetch, so switching tabs does not refetch; dropped after [CACHE_MS] or on disconnect. */
++    @Volatile private var cache: Pair<Long, List<DayTask>>? = null
++
++    fun isConnected(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_CONNECTED, false)
++
++    fun setConnected(ctx: Context, on: Boolean) {
++        prefs(ctx).edit().putBoolean(KEY_CONNECTED, on).apply()
++        if (!on) cache = null
++    }
++
++    fun request(): AuthorizationRequest =
++        AuthorizationRequest.builder().setRequestedScopes(listOf(Scope(SCOPE))).build()
++
++    /** Ask Play services for a token; the result either has one or carries the consent screen to launch. */
++    suspend fun authorize(ctx: Context): AuthorizationResult =
++        Identity.getAuthorizationClient(ctx).authorize(request()).await()
++
++    /** A fresh cached list, or null when it has to be fetched. */
++    fun cached(): List<DayTask>? = cache?.takeIf { System.currentTimeMillis() - it.first < CACHE_MS }?.second
++
++    /** Every open task of every list, then [forDay]. Throws on HTTP/network failure. */
++    suspend fun fetch(token: String, today: LocalDate = LocalDate.now()): List<DayTask> = withContext(Dispatchers.IO) {
++        val all = ArrayList<DayTask>()
++        for ((id, title) in parseLists(get("$API/users/@me/lists", token, mapOf("maxResults" to "100")))) {
++            var page: String? = null
++            do {
++                val params = mutableMapOf("showCompleted" to "false", "showHidden" to "false", "maxResults" to "100")
++                page?.let { params["pageToken"] = it }
++                val (tasks, next) = parseTasks(get("$API/lists/$id/tasks", token, params), title)
++                all += tasks
++                page = next
++            } while (page != null)
++        }
++        forDay(all, today).also { cache = System.currentTimeMillis() to it }
++    }
++
++    /** Thrown for a non-2xx answer; 401/403 mean the token or the grant is no longer good. */
++    class HttpError(val code: Int) : Exception("HTTP $code")
++
++    private fun get(url: String, token: String, params: Map<String, String>): String {
++        val full = url.toHttpUrl().newBuilder().apply { params.forEach { (k, v) -> addQueryParameter(k, v) } }.build()
++        val req = Request.Builder().url(full).header("Authorization", "Bearer $token").build()
++        http.newCall(req).execute().use { resp ->
++            val body = resp.body?.string().orEmpty()
++            if (!resp.isSuccessful) throw HttpError(resp.code)
++            return body
++        }
++    }
++
++    // MARK: - Pure
++
++    /** (id, title) of each task list. */
++    internal fun parseLists(json: String): List<Pair<String, String>> {
++        val items = JSONObject(json).optJSONArray("items") ?: return emptyList()
++        return (0 until items.length()).mapNotNull { i ->
++            val o = items.optJSONObject(i) ?: return@mapNotNull null
++            val id = o.optString("id").takeIf { it.isNotBlank() } ?: return@mapNotNull null
++            id to o.optString("title")
++        }
++    }
++
++    /** One page of a list: its open, titled tasks and the next page token. */
++    internal fun parseTasks(json: String, list: String): Pair<List<DayTask>, String?> {
++        val root = JSONObject(json)
++        val items = root.optJSONArray("items")
++        val tasks = if (items == null) emptyList() else (0 until items.length()).mapNotNull { i ->
++            val o = items.optJSONObject(i) ?: return@mapNotNull null
++            if (o.optBoolean("deleted") || o.optString("status") == "completed") return@mapNotNull null
++            val title = o.optString("title").trim().takeIf { it.isNotEmpty() } ?: return@mapNotNull null
++            // "2026-10-17T00:00:00.000Z": Google stores the date only; the time part is always midnight UTC.
++            val due = o.optString("due").takeIf { it.length >= 10 }?.let { runCatching { LocalDate.parse(it.substring(0, 10)) }.getOrNull() }
++            DayTask(title, due, list)
++        }
++        return tasks to root.optString("nextPageToken").takeIf { it.isNotBlank() }
++    }
++
++    /** What is for [today]: due today or overdue, oldest due first, then by title. Undated ones wait. */
++    internal fun forDay(tasks: List<DayTask>, today: LocalDate): List<DayTask> =
++        tasks.filter { it.due != null && !it.due.isAfter(today) }
++            .sortedWith(compareBy<DayTask> { it.due }.thenBy { it.title.lowercase() })
++
++    private fun prefs(ctx: Context) = ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
++}
++
++private suspend fun <T> Task<T>.await(): T = suspendCancellableCoroutine { cont ->
++    addOnSuccessListener { cont.resume(it) }
++    addOnFailureListener { cont.resumeWithException(it) }
++    addOnCanceledListener { cont.cancel() }
++}
+diff --git a/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
+new file mode 100644
+index 00000000..e06ecf6c
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
+@@ -0,0 +1,310 @@
++package com.noop.day
++
++import android.Manifest
++import android.app.Activity
++import android.content.ActivityNotFoundException
++import android.content.Context
++import android.content.Intent
++import android.net.Uri
++import android.provider.CalendarContract
++import android.text.format.DateFormat
++import androidx.activity.compose.rememberLauncherForActivityResult
++import androidx.activity.result.IntentSenderRequest
++import androidx.activity.result.contract.ActivityResultContracts
++import androidx.compose.foundation.ExperimentalFoundationApi
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.combinedClickable
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.width
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.outlined.Event
++import androidx.compose.material.icons.outlined.MonitorWeight
++import androidx.compose.material.icons.outlined.TaskAlt
++import androidx.compose.material3.AlertDialog
++import androidx.compose.material3.CircularProgressIndicator
++import androidx.compose.material3.Icon
++import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.produceState
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.vector.ImageVector
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.dp
++import androidx.lifecycle.compose.LifecycleResumeEffect
++import com.google.android.gms.auth.api.identity.Identity
++import com.google.android.gms.common.api.ApiException
++import com.google.android.gms.common.api.CommonStatusCodes
++import com.noop.R
++import com.noop.ui.Metrics
++import com.noop.ui.NoopCard
++import com.noop.ui.NoopType
++import com.noop.ui.Overline
++import com.noop.ui.Palette
++import com.noop.ui.uiString
++import kotlinx.coroutines.launch
++import java.io.IOException
++import java.time.LocalDate
++import java.time.ZoneId
++import java.util.Date
++import java.util.Locale
++import kotlin.math.abs
++
++private const val MAX_EVENTS = 5
++private const val MAX_TASKS = 6
++
++/**
++ * victor:day — "Mi día" at the top of Today: this morning's weigh-in, today's calendar and the Google
++ * Tasks due today. Each block shows only once it has something (or a one-tap way to switch it on); the
++ * weight and agenda re-read every time the app comes back to the front, so stepping off the scale and
++ * opening NOOP is enough. Registered by a one-line hook in TodayScreen.
++ */
++@Composable
++internal fun TodayMyDaySection() {
++    val ctx = LocalContext.current
++    val scope = rememberCoroutineScope()
++    var resumes by remember { mutableIntStateOf(0) }
++    LifecycleResumeEffect(Unit) {
++        resumes++
++        onPauseOrDispose { }
++    }
++
++    val weight by produceState<DayWeight?>(null, resumes) { value = DayWeightSource.latest(ctx) }
++
++    var calendarAllowed by remember { mutableStateOf(DayAgendaSource.hasPermission(ctx)) }
++    val calendarPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
++        calendarAllowed = granted
++    }
++    val agenda by produceState(emptyList<AgendaEvent>(), calendarAllowed, resumes) {
++        value = if (calendarAllowed) DayAgendaSource.today(ctx) else emptyList()
++    }
++
++    var tasks by remember {
++        mutableStateOf(
++            if (!GoogleTasksSource.isConnected(ctx)) TasksState.NotConnected
++            else GoogleTasksSource.cached()?.let { TasksState.Ready(it) } ?: TasksState.Loading,
++        )
++    }
++    suspend fun load(token: String) {
++        tasks = try {
++            TasksState.Ready(GoogleTasksSource.fetch(token))
++        } catch (e: GoogleTasksSource.HttpError) {
++            if (e.code == 401 || e.code == 403) TasksState.NeedsConsent else TasksState.Failed(TasksError.SERVER)
++        } catch (e: IOException) {
++            TasksState.Failed(TasksError.OFFLINE)
++        }
++    }
++    val consent = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { res ->
++        val token = if (res.resultCode == Activity.RESULT_OK) {
++            runCatching { Identity.getAuthorizationClient(ctx).getAuthorizationResultFromIntent(res.data).accessToken }.getOrNull()
++        } else {
++            null
++        }
++        if (token != null) {
++            GoogleTasksSource.setConnected(ctx, true)
++            scope.launch { load(token) }
++        } else {
++            tasks = if (GoogleTasksSource.isConnected(ctx)) TasksState.NeedsConsent else TasksState.NotConnected
++        }
++    }
++    /** [interactive]: a tap may open Google's consent screen; on open it only uses an existing grant. */
++    fun connect(interactive: Boolean) = scope.launch {
++        tasks = TasksState.Loading
++        val result = try {
++            GoogleTasksSource.authorize(ctx)
++        } catch (e: ApiException) {
++            tasks = TasksState.Failed(if (e.statusCode == CommonStatusCodes.DEVELOPER_ERROR) TasksError.NOT_CONFIGURED else TasksError.SERVER)
++            return@launch
++        } catch (e: Exception) {
++            tasks = TasksState.Failed(TasksError.SERVER)
++            return@launch
++        }
++        val pending = result.pendingIntent
++        when {
++            result.hasResolution() && pending != null ->
++                if (interactive) consent.launch(IntentSenderRequest.Builder(pending.intentSender).build())
++                else tasks = TasksState.NeedsConsent
++            result.accessToken != null -> {
++                GoogleTasksSource.setConnected(ctx, true)
++                load(result.accessToken!!)
++            }
++            else -> tasks = TasksState.Failed(TasksError.SERVER)
++        }
++    }
++    LaunchedEffect(resumes) {
++        if (GoogleTasksSource.isConnected(ctx) && GoogleTasksSource.cached() == null) connect(interactive = false)
++    }
++    var confirmDisconnect by remember { mutableStateOf(false) }
++
++    NoopCard(tint = Palette.accent) {
++        Column(verticalArrangement = Arrangement.spacedBy(Metrics.space12)) {
++            Overline(uiString(R.string.victor_day_title))
++            weight?.let { WeightRow(it) }
++            Block(Icons.Outlined.Event, onClick = { openCalendar(ctx) }) {
++                when {
++                    !calendarAllowed -> Action(uiString(R.string.victor_day_calendar_allow)) {
++                        calendarPermission.launch(Manifest.permission.READ_CALENDAR)
++                    }
++                    agenda.isEmpty() -> Quiet(uiString(R.string.victor_day_calendar_empty))
++                    else -> AgendaLines(agenda)
++                }
++            }
++            Block(
++                Icons.Outlined.TaskAlt,
++                onClick = { openTasks(ctx) },
++                onLongClick = { if (GoogleTasksSource.isConnected(ctx)) confirmDisconnect = true },
++            ) {
++                when (val t = tasks) {
++                    TasksState.NotConnected -> Action(uiString(R.string.victor_day_tasks_connect)) { connect(interactive = true) }
++                    TasksState.NeedsConsent -> Action(uiString(R.string.victor_day_tasks_reconnect)) { connect(interactive = true) }
++                    TasksState.Loading -> CircularProgressIndicator(color = Palette.accent, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
++                    is TasksState.Ready -> if (t.tasks.isEmpty()) Quiet(uiString(R.string.victor_day_tasks_empty)) else TaskLines(t.tasks)
++                    is TasksState.Failed -> Quiet(
++                        uiString(
++                            when (t.reason) {
++                                TasksError.NOT_CONFIGURED -> R.string.victor_day_tasks_not_configured
++                                TasksError.OFFLINE -> R.string.victor_day_tasks_offline
++                                TasksError.SERVER -> R.string.victor_day_tasks_failed
++                            },
++                        ),
++                    )
++                }
++            }
++        }
++    }
++
++    if (confirmDisconnect) {
++        AlertDialog(
++            onDismissRequest = { confirmDisconnect = false },
++            containerColor = Palette.surfaceOverlay,
++            title = { Text(uiString(R.string.victor_day_tasks_disconnect_title), style = NoopType.title2, color = Palette.textPrimary) },
++            text = { Text(uiString(R.string.victor_day_tasks_disconnect_body), style = NoopType.subhead, color = Palette.textSecondary) },
++            confirmButton = {
++                TextButton(onClick = {
++                    GoogleTasksSource.setConnected(ctx, false)
++                    tasks = TasksState.NotConnected
++                    confirmDisconnect = false
++                }) { Text(uiString(R.string.victor_day_disconnect), style = NoopType.body, color = Palette.statusCritical) }
++            },
++            dismissButton = {
++                TextButton(onClick = { confirmDisconnect = false }) {
++                    Text(uiString(R.string.victor_day_cancel), style = NoopType.body, color = Palette.textSecondary)
++                }
++            },
++        )
++    }
++}
++
++@Composable
++private fun WeightRow(w: DayWeight) {
++    val ctx = LocalContext.current
++    val locale = Locale.getDefault()
++    val day = w.at.atZone(ZoneId.systemDefault()).toLocalDate()
++    val today = LocalDate.now()
++    val stamp = when (day) {
++        today -> uiString(R.string.victor_day_weight_today, DateFormat.getTimeFormat(ctx).format(Date(w.at.toEpochMilli())))
++        today.minusDays(1) -> uiString(R.string.victor_day_weight_yesterday)
++        else -> uiString(R.string.victor_day_weight_on, day.format(java.time.format.DateTimeFormatter.ofPattern("d MMM", locale)))
++    }
++    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space12)) {
++        Icon(Icons.Outlined.MonitorWeight, contentDescription = null, tint = Palette.accent, modifier = Modifier.size(Metrics.iconSmall))
++        Text(uiString(R.string.victor_day_kg, String.format(locale, "%.1f", w.kg)), style = NoopType.headline, color = Palette.textPrimary)
++        val change = w.previousKg?.let { w.kg - it }
++        val parts = listOfNotNull(stamp, change?.takeIf { abs(it) >= 0.05 }?.let { (if (it > 0) "+" else "−") + String.format(locale, "%.1f", abs(it)) })
++        Text(parts.joinToString(" · "), style = NoopType.subhead, color = Palette.textSecondary)
++    }
++}
++
++@Composable
++private fun AgendaLines(events: List<AgendaEvent>) {
++    val ctx = LocalContext.current
++    val now = System.currentTimeMillis()
++    val fmt = remember { DateFormat.getTimeFormat(ctx) }
++    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space6)) {
++        events.take(MAX_EVENTS).forEach { e ->
++            val past = !e.allDay && e.end < now
++            Row(horizontalArrangement = Arrangement.spacedBy(Metrics.space8)) {
++                // An all-day entry simply has no time: the empty column says it, no extra words.
++                Text(
++                    if (e.allDay) "" else fmt.format(Date(e.begin)),
++                    style = NoopType.bodyNumber,
++                    color = if (past) Palette.textTertiary else Palette.textSecondary,
++                    maxLines = 1,
++                    modifier = Modifier.width(72.dp),
++                )
++                Text(
++                    e.title.ifBlank { "—" },
++                    style = NoopType.body,
++                    color = if (past) Palette.textTertiary else Palette.textPrimary,
++                    maxLines = 1,
++                    overflow = TextOverflow.Ellipsis,
++                )
++            }
++        }
++        if (events.size > MAX_EVENTS) Quiet(uiString(R.string.victor_day_more, events.size - MAX_EVENTS))
++    }
++}
++
++@Composable
++private fun TaskLines(tasks: List<DayTask>) {
++    val today = LocalDate.now()
++    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space6)) {
++        tasks.take(MAX_TASKS).forEach { t ->
++            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space8)) {
++                Text(t.title, style = NoopType.body, color = Palette.textPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
++                if (t.due != null && t.due.isBefore(today)) {
++                    Text(uiString(R.string.victor_day_tasks_overdue), style = NoopType.subhead, color = Palette.statusWarning)
++                }
++            }
++        }
++        if (tasks.size > MAX_TASKS) Quiet(uiString(R.string.victor_day_more, tasks.size - MAX_TASKS))
++    }
++}
++
++@OptIn(ExperimentalFoundationApi::class)
++@Composable
++private fun Block(icon: ImageVector, onClick: () -> Unit, onLongClick: (() -> Unit)? = null, content: @Composable () -> Unit) {
++    Row(
++        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick),
++        horizontalArrangement = Arrangement.spacedBy(Metrics.space12),
++    ) {
++        Icon(icon, contentDescription = null, tint = Palette.accent, modifier = Modifier.size(Metrics.iconSmall))
++        Column(Modifier.weight(1f)) { content() }
++    }
++}
++
++@Composable
++private fun Quiet(text: String) = Text(text, style = NoopType.subhead, color = Palette.textSecondary)
++
++/** A one-tap switch-on, sized like a line of the card rather than a button. */
++@Composable
++private fun Action(text: String, onClick: () -> Unit) =
++    Text(text, style = NoopType.headline, color = Palette.accent, modifier = Modifier.clickable(onClick = onClick))
++
++private fun openCalendar(ctx: Context) {
++    val uri = CalendarContract.CONTENT_URI.buildUpon().appendPath("time").appendPath(System.currentTimeMillis().toString()).build()
++    tryStart(ctx, Intent(Intent.ACTION_VIEW, uri))
++}
++
++private fun openTasks(ctx: Context) = tryStart(ctx, Intent(Intent.ACTION_VIEW, Uri.parse("https://tasks.google.com/")))
++
++private fun tryStart(ctx: Context, intent: Intent) {
++    try {
++        ctx.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
++    } catch (_: ActivityNotFoundException) {
++    } catch (_: SecurityException) {
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/day/VictorTodayQuiet.kt b/android/app/src/main/java/com/noop/day/VictorTodayQuiet.kt
+new file mode 100644
+index 00000000..5a9b09c5
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/day/VictorTodayQuiet.kt
+@@ -0,0 +1,25 @@
++package com.noop.day
++
++import android.content.Context
++import com.noop.ui.TodayCardDismissal
++
++/**
++ * victor:day — Today without the long explainer notes ("Building your baseline…", "Live now. Your scores
++ * are building…", the carried "Latest sleep" note, "New here"). Marks them dismissed ONCE per install, so
++ * the wearer starts clean but any card restored from Updates stays restored.
++ */
++object VictorTodayQuiet {
++
++    private const val PREFS = "noop_prefs"
++    private const val KEY_DONE = "victor.today.quietCards.v1"
++
++    /** Upstream's stable Today info-card ids (TodayScreen CARD_*), the ones that are long text. */
++    internal val QUIET_CARDS = listOf("scoresBuilding", "calibratingBaseline", "carriedSleep", "newHere")
++
++    fun applyOnce(ctx: Context) {
++        val prefs = ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
++        if (prefs.getBoolean(KEY_DONE, false)) return
++        QUIET_CARDS.forEach { TodayCardDismissal.setDismissed(ctx, it, true) }
++        prefs.edit().putBoolean(KEY_DONE, true).apply()
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/ui/TodayScreen.kt b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
+index 6615b4f5..03f25678 100644
+--- a/android/app/src/main/java/com/noop/ui/TodayScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
+@@ -1671,6 +1671,7 @@ fun TodayScreen(
+                 else -> true
+             }
+             if (section == TodaySection.WORKOUTS && selectedDayOffset == 0) item(key = "victor:food") { com.noop.food.TodayFoodSection(viewModel, onOpenFood) }   // victor:food
++            if (section == TodaySection.LIVE_SESSION && selectedDayOffset == 0) item(key = "victor:day") { com.noop.day.TodayMyDaySection() }   // victor:day
+             if (!sectionVisible) return@forEach
+             item(key = TODAY_SECTION_KEY_PREFIX + section.raw) {
+                 TodayReorderableSection(
+diff --git a/android/app/src/main/res/values-es/strings_victor_day.xml b/android/app/src/main/res/values-es/strings_victor_day.xml
+new file mode 100644
+index 00000000..0100d8ee
+--- /dev/null
++++ b/android/app/src/main/res/values-es/strings_victor_day.xml
+@@ -0,0 +1,23 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- victor:day — tarjeta «Mi día» del fork en Hoy (peso, calendario y Google Tasks). -->
++<resources>
++    <string name="victor_day_title">Mi día</string>
++    <string name="victor_day_kg">%1$s kg</string>
++    <string name="victor_day_weight_today">hoy %1$s</string>
++    <string name="victor_day_weight_yesterday">ayer</string>
++    <string name="victor_day_weight_on">el %1$s</string>
++    <string name="victor_day_calendar_allow">Ver mi calendario</string>
++    <string name="victor_day_calendar_empty">Nada en el calendario hoy</string>
++    <string name="victor_day_more">+%1$d más</string>
++    <string name="victor_day_tasks_connect">Conectar Google Tasks</string>
++    <string name="victor_day_tasks_reconnect">Volver a conectar Google Tasks</string>
++    <string name="victor_day_tasks_empty">Nada pendiente para hoy</string>
++    <string name="victor_day_tasks_overdue">vencida</string>
++    <string name="victor_day_tasks_not_configured">Google aún no reconoce esta app: falta darla de alta una vez en Google Cloud.</string>
++    <string name="victor_day_tasks_offline">Sin conexión con Google.</string>
++    <string name="victor_day_tasks_failed">Google Tasks no ha respondido. Prueba más tarde.</string>
++    <string name="victor_day_tasks_disconnect_title">¿Desconectar Google Tasks?</string>
++    <string name="victor_day_tasks_disconnect_body">Tus tareas dejan de verse aquí. También puedes quitar el acceso en myaccount.google.com → Seguridad.</string>
++    <string name="victor_day_disconnect">Desconectar</string>
++    <string name="victor_day_cancel">Cancelar</string>
++</resources>
+diff --git a/android/app/src/main/res/values/strings_victor_day.xml b/android/app/src/main/res/values/strings_victor_day.xml
+new file mode 100644
+index 00000000..215e7fad
+--- /dev/null
++++ b/android/app/src/main/res/values/strings_victor_day.xml
+@@ -0,0 +1,23 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- victor:day — the fork's "My day" card on Today (weigh-in, calendar, Google Tasks). -->
++<resources>
++    <string name="victor_day_title">My day</string>
++    <string name="victor_day_kg">%1$s kg</string>
++    <string name="victor_day_weight_today">today %1$s</string>
++    <string name="victor_day_weight_yesterday">yesterday</string>
++    <string name="victor_day_weight_on">on %1$s</string>
++    <string name="victor_day_calendar_allow">Show my calendar</string>
++    <string name="victor_day_calendar_empty">Nothing in the calendar today</string>
++    <string name="victor_day_more">+%1$d more</string>
++    <string name="victor_day_tasks_connect">Connect Google Tasks</string>
++    <string name="victor_day_tasks_reconnect">Reconnect Google Tasks</string>
++    <string name="victor_day_tasks_empty">Nothing due today</string>
++    <string name="victor_day_tasks_overdue">overdue</string>
++    <string name="victor_day_tasks_not_configured">Google does not recognise this app yet: its access has to be set up once in Google Cloud.</string>
++    <string name="victor_day_tasks_offline">No connection to Google.</string>
++    <string name="victor_day_tasks_failed">Google Tasks did not answer. Try again later.</string>
++    <string name="victor_day_tasks_disconnect_title">Disconnect Google Tasks?</string>
++    <string name="victor_day_tasks_disconnect_body">Your tasks stop showing here. You can also remove the access at myaccount.google.com → Security.</string>
++    <string name="victor_day_disconnect">Disconnect</string>
++    <string name="victor_day_cancel">Cancel</string>
++</resources>
+diff --git a/android/app/src/test/java/com/noop/day/MyDayTest.kt b/android/app/src/test/java/com/noop/day/MyDayTest.kt
+new file mode 100644
+index 00000000..4b224367
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/day/MyDayTest.kt
+@@ -0,0 +1,128 @@
++package com.noop.day
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.io.File
++import java.time.Instant
++import java.time.LocalDate
++import java.time.ZoneId
++
++/** victor:day — the "Mi día" card's pure parts: which calendar entries are today, weigh-ins, Google Tasks. */
++class MyDayTest {
++
++    private val madrid = ZoneId.of("Europe/Madrid")
++    private val day = LocalDate.of(2026, 10, 17)
++    private fun at(h: Int, m: Int = 0, d: LocalDate = day) = d.atTime(h, m).atZone(madrid).toInstant().toEpochMilli()
++    private fun utcMidnight(d: LocalDate) = d.atStartOfDay(ZoneId.of("UTC")).toInstant().toEpochMilli()
++
++    // MARK: - Agenda
++
++    @Test
++    fun timedEventsOverlappingTheLocalDayAreToday() {
++        assertTrue(DayAgendaSource.isOnDay(AgendaEvent("Gym", at(9), at(10), false), day, madrid))
++        // Started last night, still running after midnight.
++        assertTrue(DayAgendaSource.isOnDay(AgendaEvent("Late", at(23, d = day.minusDays(1)), at(1), false), day, madrid))
++        // Ended exactly at midnight: yesterday's.
++        assertFalse(DayAgendaSource.isOnDay(AgendaEvent("Cena", at(22, d = day.minusDays(1)), at(0), false), day, madrid))
++        assertFalse(DayAgendaSource.isOnDay(AgendaEvent("Mañana", at(9, d = day.plusDays(1)), at(10, d = day.plusDays(1)), false), day, madrid))
++    }
++
++    @Test
++    fun allDayEventsUseTheirUtcDatesNotTheLocalWindow() {
++        val today = AgendaEvent("Cumple de Isa", utcMidnight(day), utcMidnight(day.plusDays(1)), true)
++        val yesterday = AgendaEvent("Ayer", utcMidnight(day.minusDays(1)), utcMidnight(day), true)
++        val trip = AgendaEvent("Viaje", utcMidnight(day.minusDays(2)), utcMidnight(day.plusDays(2)), true)
++        assertTrue(DayAgendaSource.isOnDay(today, day, madrid))
++        assertFalse("UTC+2 overlaps yesterday's all-day event by two hours", DayAgendaSource.isOnDay(yesterday, day, madrid))
++        assertTrue(DayAgendaSource.isOnDay(trip, day, madrid))
++    }
++
++    @Test
++    fun allDayFirstThenByStart() {
++        val ordered = DayAgendaSource.inDayOrder(
++            listOf(
++                AgendaEvent("B", at(13), at(14), false),
++                AgendaEvent("Festivo", utcMidnight(day), utcMidnight(day.plusDays(1)), true),
++                AgendaEvent("A", at(9), at(10), false),
++            ),
++        )
++        assertEquals(listOf("Festivo", "A", "B"), ordered.map { it.title })
++    }
++
++    // MARK: - Weigh-in
++
++    @Test
++    fun latestWeighInAndTheChangeFromAnEarlierDay() {
++        fun i(d: LocalDate, h: Int) = d.atTime(h, 0).atZone(madrid).toInstant()
++        val w = DayWeightSource.summarize(
++            listOf(
++                i(day.minusDays(2), 7) to 79.0,
++                i(day.minusDays(1), 7) to 78.7,
++                i(day, 7) to 78.5,
++                i(day, 8) to 78.4, // second weigh-in the same morning: still compared with yesterday
++                i(day, 9) to Double.NaN,
++                i(day, 10) to 4.0, // a child on the scale, or a bad reading
++            ),
++            madrid,
++        )!!
++        assertEquals(78.4, w.kg, 0.0)
++        assertEquals(78.7, w.previousKg!!, 0.0)
++        assertEquals(i(day, 8), w.at)
++        assertNull(DayWeightSource.summarize(emptyList(), madrid))
++        assertNull(DayWeightSource.summarize(listOf(Instant.now() to 78.0), madrid)!!.previousKg)
++    }
++
++    // MARK: - Google Tasks
++
++    @Test
++    fun parsesListsAndOnlyOpenTitledTasks() {
++        assertEquals(
++            listOf("L1" to "Mis tareas", "L2" to "Casa"),
++            GoogleTasksSource.parseLists("""{"items":[{"id":"L1","title":"Mis tareas"},{"id":"L2","title":"Casa"},{"title":"sin id"}]}"""),
++        )
++        val (tasks, next) = GoogleTasksSource.parseTasks(
++            """{"nextPageToken":"p2","items":[
++              {"title":"Llamar a la gestoría","due":"2026-10-17T00:00:00.000Z","status":"needsAction"},
++              {"title":"Hecha","due":"2026-10-17T00:00:00.000Z","status":"completed"},
++              {"title":"Borrada","deleted":true},
++              {"title":"  "},
++              {"title":"Sin fecha","status":"needsAction"}]}""",
++            "Mis tareas",
++        )
++        assertEquals("p2", next)
++        assertEquals(
++            listOf(DayTask("Llamar a la gestoría", day, "Mis tareas"), DayTask("Sin fecha", null, "Mis tareas")),
++            tasks,
++        )
++        assertNull(GoogleTasksSource.parseTasks("""{"kind":"tasks#tasks"}""", "x").second)
++    }
++
++    @Test
++    fun todayMeansDueTodayOrOverdueOldestFirst() {
++        val all = listOf(
++            DayTask("mañana", day.plusDays(1), "L"),
++            DayTask("hoy b", day, "L"),
++            DayTask("Hoy a", day, "L"),
++            DayTask("vencida", day.minusDays(3), "L"),
++            DayTask("sin fecha", null, "L"),
++        )
++        assertEquals(listOf("vencida", "Hoy a", "hoy b"), GoogleTasksSource.forDay(all, day).map { it.title })
++    }
++
++    // MARK: - Quiet Today
++
++    @Test
++    fun quietCardIdsStillExistInTodayScreen() {
++        // The ids are upstream's private CARD_* constants; if upstream renames one, this fails instead of the
++        // card silently coming back.
++        val userDir = File(System.getProperty("user.dir") ?: ".")
++        val today = listOf("src", "app/src", "android/app/src")
++            .map { File(userDir, "$it/main/java/com/noop/ui/TodayScreen.kt") }
++            .first { it.exists() }
++            .readText()
++        for (id in VictorTodayQuiet.QUIET_CARDS) assertTrue(id, today.contains("= \"$id\""))
++    }
++}
+diff --git a/android/gradle/verification-metadata.xml b/android/gradle/verification-metadata.xml
+index 12b39b0c..07fbbeec 100644
+--- a/android/gradle/verification-metadata.xml
++++ b/android/gradle/verification-metadata.xml
+@@ -582,6 +582,14 @@
+             <sha256 value="a568af4ec8126bb629a1a3d5cad533a1f5d8662ef47335db826ca79c177114ad" origin="Generated by Gradle"/>
+          </artifact>
+       </component>
++      <component group="androidx.customview" name="customview" version="1.0.0">
++         <artifact name="customview-1.0.0.aar">
++            <sha256 value="20e5b8f6526a34595a604f56718da81167c0b40a7a94a57daa355663f2594df2" origin="Generated by Gradle"/>
++         </artifact>
++         <artifact name="customview-1.0.0.pom">
++            <sha256 value="ce9e47b87184f5bd5e139e9becd5b26476d42d78c31bf2fdedc37acb41b9ad49" origin="Generated by Gradle"/>
++         </artifact>
++      </component>
+       <component group="androidx.customview" name="customview-poolingcontainer" version="1.0.0">
+          <artifact name="customview-poolingcontainer-1.0.0.aar">
+             <sha256 value="3584102fc49bf399c56e3b7be4bfe12000c46112320cd8cf85cc0a8f93f3e752" origin="Generated by Gradle"/>
+@@ -651,6 +659,14 @@
+             <sha256 value="ddc851edba65fd15a7a1bc3ad18648e2f732dd5ad8ef3602224bce0647f5b4d1" origin="Generated by Gradle"/>
+          </artifact>
+       </component>
++      <component group="androidx.fragment" name="fragment" version="1.5.7">
++         <artifact name="fragment-1.5.7.aar">
++            <sha256 value="59c74110b99378885ed06242f8a26da305ea4dca53ed60163540dd0e2e3c6675" origin="Generated by Gradle"/>
++         </artifact>
++         <artifact name="fragment-1.5.7.module">
++            <sha256 value="f0f077fff74af8158cb2f08e1c1986065f3161a29f64ef3ac0df10d10480fd3c" origin="Generated by Gradle"/>
++         </artifact>
++      </component>
+       <component group="androidx.glance" name="glance" version="1.1.1">
+          <artifact name="glance-1.1.1.aar">
+             <sha256 value="fbd512725b341e36ec56bc01e99f7210d4ad3aab7a6419df2e8841862bd3a8dc" origin="Generated by Gradle"/>
+@@ -855,6 +871,9 @@
+          </artifact>
+       </component>
+       <component group="androidx.lifecycle" name="lifecycle-viewmodel" version="2.8.2">
++         <artifact name="lifecycle-viewmodel-2.8.2.aar">
++            <sha256 value="43d28a6c6da9c1cb72bfb5cc1b511a7937b2db8b79d52f37d0b7f14c79b090dd" origin="Generated by Gradle"/>
++         </artifact>
+          <artifact name="lifecycle-viewmodel-2.8.2.module">
+             <sha256 value="72985daed5ac9f371b7328787d853bac6a95792461c5fae6243fa61e3d3f5608" origin="Generated by Gradle"/>
+          </artifact>
+@@ -907,6 +926,14 @@
+             <sha256 value="d8ea7b73e8c300339417d1fff1e9af396c819f8bd24ad189d455158e0ce78783" origin="Generated by Gradle"/>
+          </artifact>
+       </component>
++      <component group="androidx.loader" name="loader" version="1.1.0">
++         <artifact name="loader-1.1.0.aar">
++            <sha256 value="a83b597cd2409dc177f7f932f7c4082ef7b5508b69b6c4ba71607e75dbd99971" origin="Generated by Gradle"/>
++         </artifact>
++         <artifact name="loader-1.1.0.pom">
++            <sha256 value="2c74ecc13bd93b8c2a48340057f3fd083b88ff51e9169ae70d63f998d686a2dc" origin="Generated by Gradle"/>
++         </artifact>
++      </component>
+       <component group="androidx.navigation" name="navigation-common" version="2.7.7">
+          <artifact name="navigation-common-2.7.7.aar">
+             <sha256 value="39d9bd3bf88185bad78aaed01d8893f375dc9f0e699e5097ff6441a2dd8aaf29" origin="Generated by Gradle"/>
+@@ -1173,6 +1200,14 @@
+             <sha256 value="5f51e65873ca612de3838fa90d2ee95b8d040efd31b9c390a19bf94d615cdb2f" origin="Generated by Gradle"/>
+          </artifact>
+       </component>
++      <component group="androidx.viewpager" name="viewpager" version="1.0.0">
++         <artifact name="viewpager-1.0.0.aar">
++            <sha256 value="147af4e14a1984010d8f155e5e19d781f03c1d70dfed02a8e0d18428b8fc8682" origin="Generated by Gradle"/>
++         </artifact>
++         <artifact name="viewpager-1.0.0.pom">
++            <sha256 value="1f72f836339d03c6eb013f65075e76ca87075a577578eb4f95f74a3a5d253128" origin="Generated by Gradle"/>
++         </artifact>
++      </component>
+       <component group="androidx.work" name="work-runtime" version="2.9.0">
+          <artifact name="work-runtime-2.9.0.aar">
+             <sha256 value="8b85f38aa826d902e8a88d2af9dc73a5f43f6618720485f16e742692c5a18f6f" origin="Generated by Gradle"/>
+@@ -1720,6 +1755,62 @@
+             <sha256 value="e4bb54753c36a27a0e5d70154a5034fedd8feac4282295034bfd483d6c7aae78" origin="Generated by Gradle"/>
+          </artifact>
+       </component>
++      <component group="com.google.android.gms" name="play-services-auth" version="21.2.0">
++         <artifact name="play-services-auth-21.2.0.aar">
++            <sha256 value="265b7e3424cd06bc98e8db74a5b84b99ac3a05b56a80ca69319d7835c28316d0" origin="Generated by Gradle"/>
++         </artifact>
++         <artifact name="play-services-auth-21.2.0.pom">
++            <sha256 value="d2d48bb276168a4ab2903e0693c9633f62afb59401ea9c8a8c92466ee8f67ecf" origin="Generated by Gradle"/>
++         </artifact>
++      </component>
++      <component group="com.google.android.gms" name="play-services-auth-api-phone" version="18.0.2">
++         <artifact name="play-services-auth-api-phone-18.0.2.aar">
++            <sha256 value="bfdf380e7400a9d950cba4dedc152b1bce614a87353009e851087428927cc240" origin="Generated by Gradle"/>
++         </artifact>
++         <artifact name="play-services-auth-api-phone-18.0.2.pom">
++            <sha256 value="9e0b47a568a8deb9cb0b82f3c176d69c14d603bca78bb367bb37010b4a64b184" origin="Generated by Gradle"/>
++         </artifact>
++      </component>
++      <component group="com.google.android.gms" name="play-services-auth-base" version="18.0.10">
++         <artifact name="play-services-auth-base-18.0.10.aar">
++            <sha256 value="d8bff2c98d239633fb550229e527779425bfb51ff04b96ac0f12d3acba0b1f42" origin="Generated by Gradle"/>
++         </artifact>
++         <artifact name="play-services-auth-base-18.0.10.pom">
++            <sha256 value="853ea5c46999d5435c923f7021b033bd5ec0a2f37f995b9b7a13a565518d700a" origin="Generated by Gradle"/>
++         </artifact>
++      </component>
++      <component group="com.google.android.gms" name="play-services-base" version="18.3.0">
++         <artifact name="play-services-base-18.3.0.aar">
++            <sha256 value="94066a46047e3d593eb652383e7767e0630385ecd75133e68c21124aa96b8dc2" origin="Generated by Gradle"/>
++         </artifact>
++         <artifact name="play-services-base-18.3.0.pom">
++            <sha256 value="f6d2bf5e81d80cf9d1b07ea6950fb72d206336c52fab5ce605937e545867a034" origin="Generated by Gradle"/>
++         </artifact>
++      </component>
++      <component group="com.google.android.gms" name="play-services-basement" version="18.3.0">
++         <artifact name="play-services-basement-18.3.0.aar">
++            <sha256 value="6c11ae3eb2dd7f17373f919c4c557a70e4cf891bc0c9b66926a0a6445d654352" origin="Generated by Gradle"/>
++         </artifact>
++         <artifact name="play-services-basement-18.3.0.pom">
++            <sha256 value="9cef5dc9a6950ff09a85ff522b476f855eb7ef2373aa4c17339cb114ac5397e2" origin="Generated by Gradle"/>
++         </artifact>
++      </component>
++      <component group="com.google.android.gms" name="play-services-fido" version="20.0.1">
++         <artifact name="play-services-fido-20.0.1.aar">
++            <sha256 value="b3526f0caedaa96c526cc4c9ba94b229dad5afe31f32f46f6cd668a03624fd42" origin="Generated by Gradle"/>
++         </artifact>
++         <artifact name="play-services-fido-20.0.1.pom">
++            <sha256 value="f2e38c39d300961c9ab771a4e3c781aab18e7cf547450846682a0a81eb30ce88" origin="Generated by Gradle"/>
++         </artifact>
++      </component>
++      <component group="com.google.android.gms" name="play-services-tasks" version="18.1.0">
++         <artifact name="play-services-tasks-18.1.0.aar">
++            <sha256 value="d60575eae39350e6234858bc9d7d775375707ae82a684e6caf7f3e41a12e25a2" origin="Generated by Gradle"/>
++         </artifact>
++         <artifact name="play-services-tasks-18.1.0.pom">
++            <sha256 value="cf29ed846108d7a8f2c17d8ef5b63399735757c5a09bb663d7e784e02ad84bcd" origin="Generated by Gradle"/>
++         </artifact>
++      </component>
+       <component group="com.google.api.grpc" name="proto-google-common-protos" version="2.17.0">
+          <artifact name="proto-google-common-protos-2.17.0.jar">
+             <sha256 value="4ef1fe0c327fc1521d1d753b0b1c4a875a54bd14ebded3afff0ca395320b6ea9" origin="Generated by Gradle"/>
+-- 
+2.54.0
+
