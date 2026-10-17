@@ -12,7 +12,10 @@ con extras propios y firma propia estable:
   las comidas. Cada uno pega su propia clave en el móvil (nunca va dentro del APK).
 - **Báscula** (p. ej. Hume vía Samsung Health → Health Connect): peso, grasa, masa magra, ósea, agua y
   metabolismo basal en una tarjeta de Health.
-- **Comida por foto**: Más → Food; Claude estima calorías y macros, editables antes de guardar.
+- **Comida por foto**: pestaña Comida; Claude estima calorías y macros (varias fotos, tipo de comida,
+  día y porción comida), editables antes de guardar.
+- **Mi día** en Hoy: peso de la báscula, agenda del calendario del móvil y Google Tasks de hoy.
+- **Toda la app en español**, con el español de upstream repasado.
 - **Auto-actualización**: cada versión nueva del proyecto original se reconstruye y firma aquí
   automáticamente. Si el build falla, no se publica nada — el móvil se queda en la última buena.
 
@@ -45,3 +48,20 @@ con extras propios y firma propia estable:
 
 Workflow `sync-release`: comprueba upstream 2×/día, aplica los parches, compila, pasa tests y lint,
 verifica la firma y publica. Un fallo abre un Issue en este repo y NO publica nada.
+
+## Privacidad
+
+La app (nombre en Google: **NOOP familia**) guarda todos los datos de salud en el propio móvil; no hay
+servidor, cuenta ni telemetría de este proyecto. Solo sale algo del móvil cuando el usuario lo activa:
+
+- **Google Tasks** (opcional): con el permiso de solo lectura `tasks.readonly`, la app consulta las
+  tareas del usuario directamente a Google desde su móvil para mostrar las de hoy en la pantalla Hoy.
+  No las guarda fuera del móvil, no las modifica, no las comparte con nadie y no las usa para nada más.
+  El acceso se retira desde la app o en myaccount.google.com → Seguridad.
+- **Calendario**: se lee del propio móvil; no se envía a ningún sitio.
+- **Coach IA y comida por foto** (opcional): el resumen o la foto van a Anthropic con la clave del
+  propio usuario, solo al pulsar el botón correspondiente.
+
+El uso de la información recibida de las APIs de Google cumple la
+[Política de Datos del Usuario de los Servicios de las APIs de Google](https://developers.google.com/terms/api-services-user-data-policy),
+incluidos los requisitos de uso limitado. Contacto: mompletvictor@gmail.com.
