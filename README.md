@@ -8,8 +8,9 @@ con extras propios y firma propia estable:
   al Lab Book de la app (Data Sources → Health Connect → Sync).
 - **Tasker**: Tasker puede hacer vibrar la pulsera (con token) y recibe un aviso al acabar cada
   sincronización (Automations → Tasker; apagado de serie).
-- **Coach IA con Claude**: Anthropic + Claude Opus 5.5 por defecto; el coach ve también la báscula y
-  las comidas. Cada uno pega su propia clave en el móvil (nunca va dentro del APK).
+- **Coach IA con Claude**: Anthropic + Claude Opus 5.5 por defecto; el coach ve también la báscula,
+  las comidas, el estrés como la pantalla Estrés, el agua y el VO₂máx, todo releído al momento (el
+  pesaje de esta mañana incluido). Cada uno pega su propia clave en el móvil (nunca va dentro del APK).
 - **Báscula** (p. ej. Hume vía Samsung Health → Health Connect): peso, grasa, masa magra, ósea, agua y
   metabolismo basal en una tarjeta de Health.
 - **Comida por foto**: pestaña Comida; Claude estima calorías y macros (varias fotos, tipo de comida,

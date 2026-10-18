@@ -1,0 +1,1013 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Sun, 18 Oct 2026 09:50:26 +0200
+Subject: [PATCH] feat(coach): fresh Health Connect figures everywhere and the
+ full picture for the coach
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The coach quoted yesterday's weight after a morning weigh-in: «Mi día» reads
+Health Connect live, but the coach, Food balance and profile read the store,
+which the full import refreshes only on app open every 6-24 h (10-year read).
+
+- VictorHcRefresh: two-day top-up of steps, calories, the smart-scale weigh-in
+  (weight, fat, lean, bone, water, BMR, BMI) and blood pressure, with the full
+  import's rules; fills or updates columns, never blanks. Throttled (2 min),
+  runs on Today resume, on opening Food and before every coach reply (8 s cap).
+- Coach context: DATA AS OF line (the block rides in the first turn, so it
+  states it supersedes figures quoted earlier), weigh-in time in BODY, the
+  Settings weight left out when the scale has one, STRESS as the Stress screen
+  scores it (0-3, recent days, today by the hour), WATER and FITNESS
+  (VO2max, fitness age).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../app/src/main/java/com/noop/ai/AiCoach.kt  |   2 +
+ .../java/com/noop/ai/ScaleCoachContext.kt     |  11 +-
+ .../java/com/noop/ai/VictorCoachExtras.kt     |  66 +++++-
+ .../java/com/noop/ai/VictorCoachStress.kt     | 109 +++++++++
+ .../java/com/noop/ai/VictorCoachVitals.kt     |  56 ++++-
+ .../java/com/noop/day/TodayMyDaySection.kt    |  11 +-
+ .../src/main/java/com/noop/food/FoodScreen.kt |   8 +-
+ .../java/com/noop/food/TodayFoodSection.kt    |   5 +-
+ .../main/java/com/noop/ingest/ScaleImport.kt  |  21 +-
+ .../java/com/noop/ingest/VictorHcRefresh.kt   | 218 ++++++++++++++++++
+ .../java/com/noop/ai/VictorCoachBlockTest.kt  |  75 ++++++
+ .../java/com/noop/ai/VictorCoachExtrasTest.kt |  15 ++
+ .../java/com/noop/ai/VictorCoachStressTest.kt |  38 +++
+ .../java/com/noop/ai/VictorCoachVitalsTest.kt |  28 +++
+ .../com/noop/ingest/VictorHcRefreshTest.kt    |  50 ++++
+ 15 files changed, 683 insertions(+), 30 deletions(-)
+ create mode 100644 android/app/src/main/java/com/noop/ai/VictorCoachStress.kt
+ create mode 100644 android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt
+ create mode 100644 android/app/src/test/java/com/noop/ai/VictorCoachBlockTest.kt
+ create mode 100644 android/app/src/test/java/com/noop/ai/VictorCoachStressTest.kt
+ create mode 100644 android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/ai/AiCoach.kt b/android/app/src/main/java/com/noop/ai/AiCoach.kt
+index 2f73785c..e6ebb79f 100644
+--- a/android/app/src/main/java/com/noop/ai/AiCoach.kt
++++ b/android/app/src/main/java/com/noop/ai/AiCoach.kt
+@@ -112,6 +112,7 @@ class AiCoach(
+ 
+         // Include the user's data ONLY with explicit consent; otherwise a note, never their numbers.
+         val groundedFull = if (consent) {
++            VictorCoachExtras.refresh(ctx, repo)   // victor:fresh — today's Health Connect figures first
+             // Merged read, NOT raw days(): a live-strap user's scores live under "my-whoop-noop"
+             // and a raw read misses them, the coach then claimed it had no data. (#124)
+             val days = runCatching { repo.daysMerged(activeStrapId()) }.getOrDefault(emptyList())
+@@ -205,6 +206,7 @@ class AiCoach(
+         require(history.last().role == "user") { "The last message must be your question." }
+ 
+         val groundedFull = if (consent) {
++            VictorCoachExtras.refresh(ctx, repo)   // victor:fresh — today's Health Connect figures first
+             val days = runCatching { repo.daysMerged(activeStrapId()) }.getOrDefault(emptyList())
+             val stress = runCatching { stressLineToday() }.getOrNull()
+             val signals = if (includeSignals) runCatching { buildSignalsContext() }.getOrNull() else null
+diff --git a/android/app/src/main/java/com/noop/ai/ScaleCoachContext.kt b/android/app/src/main/java/com/noop/ai/ScaleCoachContext.kt
+index e1198114..d1bc154b 100644
+--- a/android/app/src/main/java/com/noop/ai/ScaleCoachContext.kt
++++ b/android/app/src/main/java/com/noop/ai/ScaleCoachContext.kt
+@@ -3,6 +3,9 @@ package com.noop.ai
+ import com.noop.analytics.ScaleBody
+ import com.noop.data.WhoopRepository
+ import com.noop.ingest.ScaleImport
++import java.time.Instant
++import java.time.ZoneId
++import java.time.format.DateTimeFormatter
+ import java.util.Locale
+ import kotlin.math.roundToInt
+ 
+@@ -14,6 +17,7 @@ import kotlin.math.roundToInt
+  * (-0.3 pp vs 7d), lean mass 61.0 kg, bone 3.1 kg, water 45.2 kg, BMR 1780 kcal`
+  *
+  * Null when there is no scale data, so the caller can simply skip it. Not wired here: AiCoach calls it.
++ * The weigh-in's clock time follows the day when the importer knows it (`latest 2026-10-15 at 07:42`).
+  * Metric units always (kg, %, kcal) since this is prompt text, not display. A metric whose newest reading
+  * is older than the headline day says so ("as of ..."); a missing figure is omitted, never dashed.
+  */
+@@ -23,7 +27,7 @@ object ScaleCoachContext {
+     suspend fun line(repo: WhoopRepository): String? = line(ScaleImport.snapshot(repo))
+ 
+     /** Pure formatter behind [line]; null for a null snapshot or one with no metric. */
+-    fun line(snapshot: ScaleBody.Snapshot?): String? {
++    fun line(snapshot: ScaleBody.Snapshot?, zone: ZoneId = ZoneId.systemDefault()): String? {
+         val s = snapshot ?: return null
+         val parts = ArrayList<String>()
+         s.weight?.let { parts += item("weight", "${f1(it.value)} kg", it, s.day, "kg") }
+@@ -33,7 +37,8 @@ object ScaleCoachContext {
+         s.bodyWater?.let { parts += item("water", "${f1(it.value)} kg", it, s.day, null) }
+         s.bmr?.let { parts += item("BMR", "${it.value.roundToInt()} kcal", it, s.day, null) }
+         if (parts.isEmpty()) return null
+-        return "BODY (smart scale, latest ${s.day}): " + parts.joinToString(", ")
++        val at = s.readingAt?.let { " at " + HHMM.format(Instant.ofEpochSecond(it).atZone(zone)) }.orEmpty()
++        return "BODY (smart scale, latest ${s.day}$at): " + parts.joinToString(", ")
+     }
+ 
+     private fun item(label: String, value: String, m: ScaleBody.Metric, day: String, deltaUnit: String?): String {
+@@ -46,6 +51,8 @@ object ScaleCoachContext {
+         return if (notes.isEmpty()) "$label $value" else "$label $value (${notes.joinToString(", ")})"
+     }
+ 
++    private val HHMM = DateTimeFormatter.ofPattern("HH:mm")
++
+     private fun f1(v: Double): String = String.format(Locale.US, "%.1f", v)
+ 
+     /** "+0.4" / "-0.6"; a change that rounds to zero reads "+0.0", never "-0.0". */
+diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+index 359a24a8..bf567dd8 100644
+--- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
++++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+@@ -12,35 +12,83 @@ import com.noop.food.FoodStore
+ import com.noop.goals.VictorGoals
+ import com.noop.goals.VictorGoalsStore
+ import com.noop.ingest.ScaleImport
++import com.noop.ingest.VictorHcRefresh
+ import com.noop.ui.stepsForDay
++import java.time.Instant
+ import java.time.LocalDate
++import java.time.LocalDateTime
+ import java.time.LocalTime
++import java.time.ZoneId
+ import java.time.format.DateTimeFormatter
+ import kotlin.math.roundToInt
++import kotlinx.coroutines.withTimeoutOrNull
+ 
+ /**
+  * victor:coach-extras — fork-only context for the AI Coach, appended by [AiCoach] under the same
+- * `consent` gate as the strap metrics: the PROFILE, TODAY (steps, energy out, eaten, balance so far and
+- * where the day closes), the last week's ENERGY BALANCE, the MEASURED EXPENDITURE from intake + weight,
+- * NIGHTS (bed/wake times + in-sleep vitals), BLOOD PRESSURE ([VictorCoachVitals]), the smart-scale BODY
+- * line, the photo FOOD LOG line and the wearer's GOALS. Each line is best-effort and simply absent when
+- * there is no data.
++ * `consent` gate as the strap metrics: when the data was read (DATA AS OF), the PROFILE, TODAY (steps,
++ * energy out, eaten, balance so far and where the day closes), the last week's ENERGY BALANCE, the
++ * MEASURED EXPENDITURE from intake + weight, NIGHTS (bed/wake times + in-sleep vitals), STRESS as the
++ * Stress screen scores it ([VictorCoachStress]), BLOOD PRESSURE and FITNESS ([VictorCoachVitals]), the
++ * smart-scale BODY line, the photo FOOD LOG line, WATER and the wearer's GOALS. Each line is best-effort
++ * and simply absent when there is no data.
+  */
+ internal object VictorCoachExtras {
++
++    /** A slow Health Connect provider must never hold a reply; past this the stored figures are used. */
++    private const val REFRESH_TIMEOUT_MS = 8_000L
++
++    /**
++     * victor:fresh — called by [AiCoach] before it reads anything, so today's weigh-in, steps, calories and
++     * blood pressure in Health Connect reach this message, not the last 6-24 h import.
++     */
++    suspend fun refresh(ctx: Context, repo: WhoopRepository) {
++        withTimeoutOrNull(REFRESH_TIMEOUT_MS) { VictorHcRefresh.refresh(ctx, repo) }
++    }
++
+     suspend fun block(ctx: Context, repo: WhoopRepository, strapId: String): String? {
+-        val today = LocalDate.now().toString()
+-        val scale = runCatching { ScaleImport.snapshot(repo) }.getOrNull()
++        val now = LocalDateTime.now()
++        val today = now.toLocalDate().toString()
++        val scale = runCatching { ScaleImport.snapshot(repo, ScaleImport.newestReading(ctx)) }.getOrNull()
++        val strapAt = runCatching { newestStrapSample(repo, strapId) }.getOrNull()
+         return listOfNotNull(
+-            VictorCoachVitals.profileLine(ctx),
++            freshnessLine(now, strapAt, ZoneId.systemDefault()),
++            VictorCoachVitals.profileLine(ctx, scaleHasWeight = scale?.weight != null),
+             runCatching { todayLine(ctx, repo, strapId, today) }.getOrNull(),
+             runCatching { weekBalanceLine(ctx, repo, strapId, LocalDate.now()) }.getOrNull(),
+             runCatching { adaptiveLine(FoodAdaptive.load(ctx, repo, strapId)) }.getOrNull(),
+             runCatching { VictorCoachVitals.nightsBlock(repo, strapId) }.getOrNull(),
++            runCatching { VictorCoachStress.line(ctx, repo, strapId) }.getOrNull(),
+             runCatching { VictorCoachVitals.bloodPressureLine(repo, strapId) }.getOrNull(),
++            runCatching { VictorCoachVitals.fitnessLine(repo, strapId) }.getOrNull(),
+             ScaleCoachContext.line(scale),
+             runCatching { FoodCoachContext.line(ctx) }.getOrNull(),
++            runCatching { VictorCoachVitals.waterLine(repo) }.getOrNull(),
+             runCatching { VictorGoals.coachLine(VictorGoalsStore.load(ctx), scale?.weight?.value) }.getOrNull(),
+-        ).takeIf { it.isNotEmpty() }?.joinToString("\n")
++        ).takeIf { it.size > 1 }?.joinToString("\n")
++    }
++
++    /** Epoch seconds of the newest strap heart-rate sample in the last two days (active id ∪ canonical). */
++    private suspend fun newestStrapSample(repo: WhoopRepository, strapId: String): Long? {
++        val now = System.currentTimeMillis() / 1000L
++        return listOf(strapId, WhoopRepository.WHOOP_SOURCE).distinct()
++            .maxOf { repo.hrFingerprintWindow(it, now - 2 * 86_400L, now).second }
++            .takeIf { it > 0 }
++    }
++
++    /**
++     * Pure: when this data was read. The context is rebuilt for every message but rides in the FIRST turn
++     * of the conversation, so without this a model can keep quoting yesterday's figure from its own
++     * earlier reply.
++     */
++    internal fun freshnessLine(now: LocalDateTime, strapAt: Long?, zone: ZoneId): String {
++        val strap = strapAt?.let {
++            val at = Instant.ofEpochSecond(it).atZone(zone)
++            val day = if (at.toLocalDate() == now.toLocalDate()) "" else "${at.toLocalDate()} "
++            "; newest strap data $day${at.format(HHMM)}"
++        }.orEmpty()
++        return "DATA AS OF ${now.toLocalDate()} ${now.format(HHMM)} (phone time$strap). This whole data block was " +
++            "re-read for the current message: where an earlier turn of the conversation quotes a different " +
++            "figure, these are the current ones."
+     }
+ 
+     private suspend fun todayLine(ctx: Context, repo: WhoopRepository, strapId: String, today: String): String? {
+diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachStress.kt b/android/app/src/main/java/com/noop/ai/VictorCoachStress.kt
+new file mode 100644
+index 00000000..e2059096
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/ai/VictorCoachStress.kt
+@@ -0,0 +1,109 @@
++package com.noop.ai
++
++import android.content.Context
++import com.noop.analytics.DaytimeStress
++import com.noop.data.WhoopRepository
++import com.noop.ui.NoopPrefs
++import com.noop.ui.StressBand
++import com.noop.ui.StressModel
++import com.noop.ui.selectedDaytimeStressMode
++import com.noop.ui.stressLocalDayWindowContaining
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import java.time.Instant
++import java.time.ZoneId
++import java.util.Locale
++import kotlin.math.roundToInt
++
++/**
++ * victor:coach-stress — the STRESS line: the same 0-3 score, band and recent days the Stress screen shows
++ * ([StressModel], resting HR up + HRV down against the previous 30 days), plus today hour by hour from the
++ * same [DaytimeStress] read the screen draws. Upstream's coach only had a Baevsky index over today's beats,
++ * a different number from the one on screen, so the coach and the app could disagree about the same day.
++ */
++internal object VictorCoachStress {
++
++    private const val TREND_DAYS = 7
++
++    suspend fun line(ctx: Context, repo: WhoopRepository, strapId: String, zone: ZoneId = ZoneId.systemDefault()): String? {
++        val days = repo.daysMerged(strapId)
++        // The screen's own read: the stored daily "stress" values under the canonical id, 0-3.
++        val stored = runCatching { repo.metricSeries(WhoopRepository.WHOOP_SOURCE, "stress", "0000-01-01", "9999-12-31") }
++            .getOrDefault(emptyList())
++            .associate { it.day to it.value.coerceIn(0.0, 3.0) }
++        val model = StressModel.build(days, stored)
++        val today = runCatching { todayByHour(ctx, repo, strapId, zone) }.getOrNull()
++        val daily = model?.let { m ->
++            Daily(
++                day = m.fullTrend.lastOrNull()?.day,
++                score = m.score,
++                rhrDelta = m.rhrDelta,
++                hrvDelta = m.hrvDelta,
++                trend = m.fullTrend.dropLast(1).takeLast(TREND_DAYS - 1).map { it.day to it.value },
++            )
++        }
++        return line(daily, today, zone)
++    }
++
++    internal data class Daily(
++        val day: String?,
++        val score: Double,
++        val rhrDelta: Double?,
++        val hrvDelta: Double?,
++        /** Earlier days, oldest first. */
++        val trend: List<Pair<String, Double>>,
++    )
++
++    /** Pure: null when there is neither a daily score nor a scored hour today. */
++    internal fun line(daily: Daily?, today: DaytimeStress.Result?, zone: ZoneId): String? {
++        val parts = ArrayList<String>()
++        daily?.let { d ->
++            val deltas = listOfNotNull(
++                d.rhrDelta?.let { "resting HR ${signed(it)} bpm" },
++                d.hrvDelta?.let { "HRV ${signed(it)} ms" },
++            )
++            val vs = if (deltas.isEmpty()) "" else " (${deltas.joinToString(", ")} vs baseline)"
++            parts += "${d.day ?: "latest"} ${f1(d.score)} ${band(d.score)}$vs"
++            if (d.trend.isNotEmpty()) {
++                parts += "earlier days " + d.trend.joinToString(", ") { (day, v) -> "${day.substring(5)} ${f1(v)}" }
++            }
++        }
++        today?.takeIf { it.dayMean != null }?.let { t ->
++            val bits = buildList {
++                add("average ${f1(t.dayMean!!)}")
++                t.peak?.let { p -> p.level?.let { add("peak ${f1(it)} at ${"%02d".format(Locale.ROOT, p.hour)}:00") } }
++                add("${t.highStressMinutes} min in high")
++                if (t.activityMaskedHours > 0) add("${t.activityMaskedHours} h left out as exercise")
++                if (t.sustainedHigh) add("high for the last ${t.sustainedRun} h")
++            }
++            parts += "today by the hour (waking hours, " + bits.joinToString(", ") + ")"
++        }
++        if (parts.isEmpty()) return null
++        return "STRESS (the app's Stress screen, 0-3: under 1 low, 1-2 medium, 2+ high; resting HR up and HRV " +
++            "down vs the user's previous 30 days): " + parts.joinToString("; ")
++    }
++
++    /** The screen's intraday read ([DaytimeStress], hourly), without the half-hour display timeline. */
++    private suspend fun todayByHour(ctx: Context, repo: WhoopRepository, strapId: String, zone: ZoneId): DaytimeStress.Result? =
++        withContext(Dispatchers.Default) {
++            val now = System.currentTimeMillis() / 1000L
++            val window = stressLocalDayWindowContaining(now, zone)
++            val hr = repo.hrSamplesUnion(strapId, window.fromEpochSecond, now, limit = 200_000)
++            if (hr.size < DaytimeStress.minHourHrSamples) return@withContext null
++            val rr = repo.rrIntervalsUnion(strapId, window.fromEpochSecond, now, limit = 200_000)
++            val gravity = repo.gravitySamplesUnion(strapId, window.fromEpochSecond, now, limit = 200_000)
++            val tz = zone.rules.getOffset(Instant.ofEpochSecond(now)).totalSeconds.toLong()
++            val mode = selectedDaytimeStressMode(repo, strapId, window.day, zone, NoopPrefs.stressPersonalBaseline(ctx))
++            DaytimeStress.analyze(hr, rr, gravity, tz, mode)
++        }
++
++    private fun band(score: Double) = when (StressBand.forScore(score)) {
++        StressBand.Low -> "low"
++        StressBand.Medium -> "medium"
++        StressBand.High -> "high"
++    }
++
++    private fun f1(v: Double) = String.format(Locale.ROOT, "%.1f", v)
++
++    private fun signed(v: Double): String = v.roundToInt().let { if (it > 0) "+$it" else "$it" }
++}
+diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt b/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
+index f0d8a410..65677edd 100644
+--- a/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
++++ b/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
+@@ -2,6 +2,7 @@ package com.noop.ai
+ 
+ import android.content.Context
+ import com.noop.analytics.HrZones
++import com.noop.analytics.HydrationStore
+ import com.noop.analytics.LabBookProjection
+ import com.noop.analytics.LabMarkerCategory
+ import com.noop.analytics.VitalBands
+@@ -20,30 +21,37 @@ import kotlin.math.roundToInt
+ /**
+  * victor:coach-vitals — what the AI Coach could not see before: the PROFILE (age, sex, height, weight,
+  * max HR), one line per night with bed/wake times and the in-sleep vitals (SpO₂, respiration, skin
+- * temperature), and BLOOD PRESSURE from the Lab Book. Appended by [VictorCoachExtras] under the same
+- * `consent` gate, so blood pressure no longer needs the second "signals" switch. A missing figure is
+- * omitted, never dashed.
++ * temperature), BLOOD PRESSURE from the Lab Book, logged WATER and the app's FITNESS estimates. Appended
++ * by [VictorCoachExtras] under the same `consent` gate, so blood pressure no longer needs the second
++ * "signals" switch. A missing figure is omitted, never dashed.
+  */
+ internal object VictorCoachVitals {
+ 
+     private const val NIGHTS = 14
+     private const val BP_WINDOW_DAYS = 30L
+     private const val BP_MAX_READINGS = 10
++    private const val WATER_DAYS = 7
++    private const val FITNESS_LOOKBACK_DAYS = 120L
+ 
+     /** The Lab Book's own read id ("my-whoop", where Health Connect writes blood pressure). */
+     private const val LAB_DEVICE_ID = WhoopRepository.WHOOP_SOURCE
+ 
+-    fun profileLine(ctx: Context): String? = runCatching {
++    /**
++     * [scaleHasWeight]: the BODY line carries the latest weigh-in, so the Settings weight (often typed once
++     * and never updated) is left out rather than giving the coach two weights to choose from.
++     */
++    fun profileLine(ctx: Context, scaleHasWeight: Boolean): String? = runCatching {
+         val p = ProfileStore.from(ctx)
+-        profileLine(p.age, p.sex, p.heightCm, p.weightKg, p.hrMaxOverride)
++        profileLine(p.age, p.sex, p.heightCm, p.weightKg.takeUnless { scaleHasWeight }, p.hrMaxOverride)
+     }.getOrNull()
+ 
+-    /** Pure. [hrMaxOverride] 0 = automatic (Tanaka), the same rule the HR zones use. */
+-    internal fun profileLine(age: Int, sex: String, heightCm: Double, weightKg: Double, hrMaxOverride: Int): String {
++    /** Pure. [hrMaxOverride] 0 = automatic (Tanaka), the same rule the HR zones use; null [weightKg] = see BODY. */
++    internal fun profileLine(age: Int, sex: String, heightCm: Double, weightKg: Double?, hrMaxOverride: Int): String {
+         val maxHr = if (hrMaxOverride > 0) "$hrMaxOverride bpm (set by the user)"
+         else "${HrZones.tanakaMaxHR(age.toDouble()).roundToInt()} bpm (age formula)"
++        val weight = weightKg?.let { "${f1(it)} kg" } ?: "weight: see BODY"
+         return "PROFILE (from the app's Settings): age $age, $sex, ${heightCm.roundToInt()} cm, " +
+-            "${f1(weightKg)} kg, max HR $maxHr"
++            "$weight, max HR $maxHr"
+     }
+ 
+     suspend fun nightsBlock(repo: WhoopRepository, strapId: String): String? {
+@@ -120,6 +128,38 @@ internal object VictorCoachVitals {
+         return sb.toString()
+     }
+ 
++    suspend fun waterLine(repo: WhoopRepository): String? = waterLine(HydrationStore.history(repo, WATER_DAYS + 1))
++
++    /** Pure: [history] oldest first, today last (HydrationStore.history); null when nothing was logged. */
++    internal fun waterLine(history: List<Pair<String, Double>>): String? {
++        val today = history.lastOrNull()?.second ?: return null
++        val logged = history.dropLast(1).map { it.second }.filter { it > 0 }
++        if (today <= 0 && logged.isEmpty()) return null
++        val prior = if (logged.isEmpty()) "" else
++            "; previous $WATER_DAYS days avg ${logged.average().roundToInt()} ml/day over ${logged.size} logged days"
++        return "WATER: today ${today.roundToInt()} ml so far$prior"
++    }
++
++    /** The app's own VO₂max and fitness-age estimates (Health screen), newest of the last 120 days. */
++    suspend fun fitnessLine(repo: WhoopRepository, strapId: String): String? {
++        val to = LocalDate.now().toString()
++        val from = LocalDate.now().minusDays(FITNESS_LOOKBACK_DAYS).toString()
++        suspend fun latest(key: String) = runCatching {
++            repo.resolvedSeries(key, LAB_DEVICE_ID, from, to, strapDeviceId = strapId).points.lastOrNull { it.value > 0 }
++        }.getOrNull()?.let { it.day to it.value }
++        return fitnessLine(latest("vo2max_est"), latest("fitness_age"))
++    }
++
++    /** Pure: (day, value) of each estimate; null when neither exists. */
++    internal fun fitnessLine(vo2max: Pair<String, Double>?, fitnessAge: Pair<String, Double>?): String? {
++        val parts = listOfNotNull(
++            vo2max?.let { "VO₂max ~${it.second.roundToInt()} ml/kg/min (${it.first})" },
++            fitnessAge?.let { "fitness age ${it.second.roundToInt()} (${it.first})" },
++        )
++        if (parts.isEmpty()) return null
++        return "FITNESS (the app's own estimates from resting HR and profile): " + parts.joinToString("; ")
++    }
++
+     private data class Bp(val ts: Long, val sys: Double, val dia: Double, val pulse: Double?)
+ 
+     private fun format(r: Bp, zone: ZoneId): String {
+diff --git a/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
+index 68eb73ac..74673fba 100644
+--- a/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
++++ b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
+@@ -51,7 +51,10 @@ import com.google.android.gms.auth.api.identity.Identity
+ import com.google.android.gms.common.api.ApiException
+ import com.google.android.gms.common.api.CommonStatusCodes
+ import com.noop.R
++import com.noop.data.WhoopDatabase
++import com.noop.data.WhoopRepository
+ import com.noop.food.FoodChip
++import com.noop.ingest.VictorHcRefresh
+ import com.noop.ui.Metrics
+ import com.noop.ui.NoopCard
+ import com.noop.ui.NoopType
+@@ -85,7 +88,13 @@ internal fun TodayMyDaySection() {
+         onPauseOrDispose { }
+     }
+ 
+-    val weight by produceState<DayWeight?>(null, resumes) { value = DayWeightSource.latest(ctx) }
++    val repo = remember { WhoopRepository(WhoopDatabase.get(ctx.applicationContext)) }
++    val weight by produceState<DayWeight?>(null, resumes) {
++        value = DayWeightSource.latest(ctx)
++        // victor:fresh — the same weigh-in, steps, calories and blood pressure into the store, so the coach,
++        // Food and Health read what this card shows instead of the last 6-24 h import.
++        VictorHcRefresh.refresh(ctx, repo)
++    }
+ 
+     var calendarAllowed by remember { mutableStateOf(DayAgendaSource.hasPermission(ctx)) }
+     val calendarPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+index b1482785..1ad43f65 100644
+--- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
++++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+@@ -57,6 +57,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import androidx.lifecycle.viewmodel.compose.viewModel
+ import com.noop.R
+ import com.noop.goals.VictorGoalsStore
++import com.noop.ingest.VictorHcRefresh
+ import com.noop.ui.AppViewModel
+ import com.noop.ui.LazyScreenScaffold
+ import com.noop.ui.Metrics
+@@ -105,10 +106,13 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+     val previous = grouped.filter { it.first != today }
+     val todayTotals = FoodTotals.ofEntries(todayEntries)
+ 
+-    val energy by produceState<FoodEnergy?>(null, today, entries) {
++    // victor:fresh — re-read today's Health Connect figures on open; the balance reloads when they land.
++    val hcVersion by VictorHcRefresh.version.collectAsStateWithLifecycle()
++    LaunchedEffect(Unit) { VictorHcRefresh.refresh(ctx, vm.repo) }
++    val energy by produceState<FoodEnergy?>(null, today, entries, hcVersion) {
+         value = withContext(Dispatchers.IO) { runCatching { FoodEnergy.load(ctx, vm.repo, vm.activeStrapId, today) }.getOrNull() }
+     }
+-    val adaptive by produceState<AdaptiveState?>(null, entries) {
++    val adaptive by produceState<AdaptiveState?>(null, entries, hcVersion) {
+         value = withContext(Dispatchers.IO) { runCatching { FoodAdaptive.load(ctx, vm.repo, vm.activeStrapId) }.getOrNull() }
+     }
+ 
+diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+index 8666f167..218f6be6 100644
+--- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
++++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+@@ -4,8 +4,10 @@ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.produceState
+ import androidx.compose.ui.platform.LocalContext
++import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import com.noop.R
+ import com.noop.goals.VictorGoalsStore
++import com.noop.ingest.VictorHcRefresh
+ import com.noop.ui.AppViewModel
+ import com.noop.ui.uiString
+ import kotlinx.coroutines.Dispatchers
+@@ -23,7 +25,8 @@ internal fun TodayFoodSection(vm: AppViewModel, onOpenFood: () -> Unit) {
+     val entries by produceState(emptyList<FoodEntry>(), today) {
+         value = runCatching { FoodStore.load(ctx) }.getOrDefault(emptyList())
+     }
+-    val energy by produceState<FoodEnergy?>(null, today, entries) {
++    val hcVersion by VictorHcRefresh.version.collectAsStateWithLifecycle()   // victor:fresh
++    val energy by produceState<FoodEnergy?>(null, today, entries, hcVersion) {
+         value = withContext(Dispatchers.IO) { runCatching { FoodEnergy.load(ctx, vm.repo, vm.activeStrapId, today) }.getOrNull() }
+     }
+     val todays = entries.filter { it.day == today }
+diff --git a/android/app/src/main/java/com/noop/ingest/ScaleImport.kt b/android/app/src/main/java/com/noop/ingest/ScaleImport.kt
+index 301478c2..b680cba2 100644
+--- a/android/app/src/main/java/com/noop/ingest/ScaleImport.kt
++++ b/android/app/src/main/java/com/noop/ingest/ScaleImport.kt
+@@ -147,16 +147,23 @@ object ScaleImport {
+                 stamp(r)?.let { (time, offset) -> acc.seen(dayOf(time, offset), time.epochSecond) }
+             }
+         }
+-        val at = acc.newestAt
+-        val day = acc.newestDay
+-        if (at != null && day != null) {
+-            runCatching {
+-                prefs(context).edit().putLong(KEY_NEWEST_AT, at).putString(KEY_NEWEST_DAY, day).apply()
+-            }
+-        }
++        rememberNewest(context, acc)
+         return acc.rows(deviceId)
+     }
+ 
++    /**
++     * Store the newest reading [acc] saw. [onlyNewer] is for the two-day top-up ([VictorHcRefresh]), whose
++     * short window must never move the stored time back to an older reading.
++     */
++    internal fun rememberNewest(context: Context, acc: Accumulator, onlyNewer: Boolean = false) {
++        val at = acc.newestAt ?: return
++        val day = acc.newestDay ?: return
++        if (onlyNewer && (newestReading(context)?.first ?: Long.MIN_VALUE) >= at) return
++        runCatching {
++            prefs(context).edit().putLong(KEY_NEWEST_AT, at).putString(KEY_NEWEST_DAY, day).apply()
++        }
++    }
++
+     /** The (epoch seconds, local day) of the newest scale reading the last import saw, or null. */
+     fun newestReading(context: Context): Pair<Long, String>? {
+         val p = prefs(context)
+diff --git a/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt b/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt
+new file mode 100644
+index 00000000..d67f03bd
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt
+@@ -0,0 +1,218 @@
++package com.noop.ingest
++
++import android.content.Context
++import androidx.health.connect.client.HealthConnectClient
++import androidx.health.connect.client.records.ActiveCaloriesBurnedRecord
++import androidx.health.connect.client.records.BloodPressureRecord
++import androidx.health.connect.client.records.BodyFatRecord
++import androidx.health.connect.client.records.LeanBodyMassRecord
++import androidx.health.connect.client.records.Record
++import androidx.health.connect.client.records.StepsRecord
++import androidx.health.connect.client.records.TotalCaloriesBurnedRecord
++import androidx.health.connect.client.records.WeightRecord
++import androidx.health.connect.client.request.ReadRecordsRequest
++import androidx.health.connect.client.time.TimeRangeFilter
++import com.noop.analytics.ScaleBody
++import com.noop.data.AppleDaily
++import com.noop.data.LabMarkerRow
++import com.noop.data.MetricSeriesRow
++import com.noop.data.WhoopRepository
++import com.noop.ui.HealthConnectWeightSync
++import com.noop.ui.ProfileStore
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import kotlinx.coroutines.sync.Mutex
++import kotlinx.coroutines.sync.withLock
++import kotlinx.coroutines.withContext
++import java.time.Instant
++import java.time.LocalDate
++import java.time.ZoneId
++import kotlin.math.round
++import kotlin.reflect.KClass
++
++/**
++ * victor:fresh — keeps what changes during the day current between the full Health Connect imports, which
++ * run on app open at most every 6-24 h and read ten years. This reads the last two local days of steps and
++ * calories, the smart-scale weigh-in (weight, body fat, lean mass, bone, water, BMR) and blood pressure, so
++ * it can run every time Today comes to the front and before every AI Coach reply: a morning weigh-in then
++ * reaches the coach, the Food balance and the profile weight, not only the «Mi día» card.
++ *
++ * Same rules as [HealthConnectImporter.import] for the days it touches (per-source sums with the max across
++ * sources, the latest reading of the day, our own writes skipped), the same category selection and grants,
++ * and it only ever fills or updates columns: a zero or a missing read never blanks a stored figure.
++ */
++object VictorHcRefresh {
++
++    /** Today's screen and the coach can both ask within seconds; one read serves both. */
++    private const val MIN_INTERVAL_MS = 2 * 60_000L
++    private const val PAGE_SIZE = 5000
++
++    private val lock = Mutex()
++    @Volatile private var lastRunMs = 0L
++
++    private val _version = MutableStateFlow(0)
++    /** Bumped after every refresh that wrote something, so screens that read the store can reload. */
++    val version: StateFlow<Int> = _version.asStateFlow()
++
++    /** Best-effort; true when it wrote something. Never throws. */
++    suspend fun refresh(ctx: Context, repo: WhoopRepository): Boolean = withContext(Dispatchers.IO) {
++        lock.withLock {
++            if (System.currentTimeMillis() - lastRunMs < MIN_INTERVAL_MS) return@withLock false
++            val wrote = runCatching { run(ctx.applicationContext, repo) }.getOrDefault(false)
++            lastRunMs = System.currentTimeMillis()
++            if (wrote) _version.value++
++            wrote
++        }
++    }
++
++    private class DayAcc {
++        val steps = HashMap<String, Long>()
++        val totalKcal = HashMap<String, Double>()
++        val activeKcal = HashMap<String, Double>()
++    }
++
++    private suspend fun run(ctx: Context, repo: WhoopRepository): Boolean {
++        if (HealthConnectImporter.sdkStatus(ctx) != HealthConnectClient.SDK_AVAILABLE) return false
++        val client = HealthConnectImporter.client(ctx)
++        val granted = client.permissionController.getGrantedPermissions()
++        val types = HealthConnectImporter.readableRecordTypes(HealthConnectImporter.selectedCategories(ctx), granted)
++        if (types.isEmpty()) return false
++
++        val zone = ZoneId.systemDefault()
++        val today = LocalDate.now(zone)
++        val days = listOf(today.minusDays(1).toString(), today.toString())
++        // #1002 slack, as upstream's live steps top-up: a record keyed by its own offset can start before
++        // the phone's midnight. Only records that land on [days] are kept, so each kept day is read whole.
++        val filter = TimeRangeFilter.between(today.minusDays(2).atStartOfDay(zone).toInstant(), Instant.now())
++        val self = ctx.packageName
++        fun dayOf(at: Instant, offset: java.time.ZoneOffset?): String? =
++            HealthConnectImporter.localDayKey(at, offset, zone).takeIf { it in days }
++
++        suspend fun <T : Record> read(type: KClass<T>, onRecord: (T) -> Unit) {
++            if (type in types) readAll(client, type, filter, self, onRecord)
++        }
++
++        val acc = days.associateWith { DayAcc() }
++        read(StepsRecord::class) { r ->
++            dayOf(r.startTime, r.startZoneOffset)?.let { acc.getValue(it).steps.merge(r.metadata.dataOrigin.packageName, r.count) { a, b -> a + b } }
++        }
++        read(TotalCaloriesBurnedRecord::class) { r ->
++            dayOf(r.startTime, r.startZoneOffset)?.let {
++                acc.getValue(it).totalKcal.merge(r.metadata.dataOrigin.packageName, r.energy.inKilocalories) { a, b -> a + b }
++            }
++        }
++        read(ActiveCaloriesBurnedRecord::class) { r ->
++            dayOf(r.startTime, r.startZoneOffset)?.let {
++                acc.getValue(it).activeKcal.merge(r.metadata.dataOrigin.packageName, r.energy.inKilocalories) { a, b -> a + b }
++            }
++        }
++
++        val scale = ScaleImport.Accumulator()
++        read(WeightRecord::class) { r ->
++            dayOf(r.time, r.zoneOffset)?.let { scale.add(it, ScaleBody.KEY_WEIGHT, r.time.epochSecond, r.weight.inKilograms) }
++        }
++        read(BodyFatRecord::class) { r ->
++            dayOf(r.time, r.zoneOffset)?.let { scale.add(it, ScaleBody.KEY_BODY_FAT, r.time.epochSecond, r.percentage.value) }
++        }
++        read(LeanBodyMassRecord::class) { r ->
++            dayOf(r.time, r.zoneOffset)?.let { scale.add(it, ScaleBody.KEY_LEAN_MASS, r.time.epochSecond, r.mass.inKilograms) }
++        }
++        for (type in ScaleImport.RECORD_TYPES) {
++            @Suppress("UNCHECKED_CAST")
++            read(type as KClass<Record>) { r ->
++                val e = ScaleImport.entry(r)
++                val at = ScaleImport.stamp(r)
++                if (e != null && at != null) dayOf(at.first, at.second)?.let { scale.add(it, e.first, at.first.epochSecond, e.second) }
++            }
++        }
++
++        val bloodPressure = ArrayList<LabMarkerRow>()
++        read(BloodPressureRecord::class) { r ->
++            if (dayOf(r.time, r.zoneOffset) != null) {
++                bloodPressure += HealthConnectImporter.bloodPressureRows(
++                    r.systolic.inMillimetersOfMercury, r.diastolic.inMillimetersOfMercury, r.time,
++                )
++            }
++        }
++
++        val scaleRows = scale.rows(HealthConnectImporter.HC_DEVICE)
++        val weightByDay = scaleRows.filter { it.key == ScaleBody.KEY_WEIGHT }.associate { it.day to it.value }
++        val existing = repo.appleDaily(HealthConnectImporter.HC_DEVICE, days.first(), days.last()).associateBy { it.day }
++        val apple = days.mapNotNull { day ->
++            val a = acc.getValue(day)
++            merge(
++                existing[day], day,
++                steps = HealthConnectImporter.maxSourceLong(a.steps),
++                totalKcal = HealthConnectImporter.maxSourceDouble(a.totalKcal),
++                activeKcal = HealthConnectImporter.maxSourceDouble(a.activeKcal),
++                weightKg = weightByDay[day],
++            )
++        }
++        val heightCm = runCatching { ProfileStore.from(ctx).heightCm }.getOrDefault(0.0)
++        val series = scaleRows + weightByDay.mapNotNull { (day, kg) ->
++            HealthConnectImporter.derivedBmi(kg, heightCm)?.let { MetricSeriesRow(HealthConnectImporter.HC_DEVICE, day, "bmi", it) }
++        }
++
++        if (apple.isNotEmpty()) {
++            repo.upsertDevice(HealthConnectImporter.HC_DEVICE, name = "Health Connect")
++            repo.upsertAppleDaily(apple)
++        }
++        if (series.isNotEmpty()) repo.upsertMetricSeries(series)
++        if (bloodPressure.isNotEmpty()) repo.upsertLabMarkers(bloodPressure)
++        ScaleImport.rememberNewest(ctx, scale, onlyNewer = true)
++        if (weightByDay.isNotEmpty()) runCatching { HealthConnectWeightSync.syncFromRepository(ctx, repo) }
++        return apple.isNotEmpty() || series.isNotEmpty() || bloodPressure.isNotEmpty()
++    }
++
++    /**
++     * Pure: [existing] (the stored Health Connect row for [day], or null) with the fresh figures laid over
++     * it, exactly as the full import would write them; null when nothing changes. A zero or null figure
++     * keeps the stored one: "nothing read" must never wipe a good number.
++     */
++    internal fun merge(
++        existing: AppleDaily?,
++        day: String,
++        steps: Long,
++        totalKcal: Double,
++        activeKcal: Double,
++        weightKg: Double?,
++    ): AppleDaily? {
++        val base = existing ?: AppleDaily(deviceId = HealthConnectImporter.HC_DEVICE, day = day)
++        val basal = if (totalKcal > 0.0) (totalKcal - activeKcal).takeIf { it > 0.0 }?.let(::round1) else null
++        val updated = base.copy(
++            steps = if (steps > 0L) steps.toInt() else base.steps,
++            activeKcal = if (activeKcal > 0.0) round1(activeKcal) else base.activeKcal,
++            basalKcal = basal ?: base.basalKcal,
++            weightKg = weightKg?.let(::round2) ?: base.weightKg,
++        )
++        return updated.takeIf { it != base }
++    }
++
++    private suspend fun <T : Record> readAll(
++        client: HealthConnectClient,
++        type: KClass<T>,
++        filter: TimeRangeFilter,
++        selfPackage: String,
++        onRecord: (T) -> Unit,
++    ) {
++        var pageToken: String? = null
++        try {
++            do {
++                val response = client.readRecords(ReadRecordsRequest(type, filter, pageSize = PAGE_SIZE, pageToken = pageToken))
++                for (record in response.records) {
++                    if (HealthConnectImporter.isSelfWritten(record.metadata.dataOrigin.packageName, selfPackage)) continue
++                    onRecord(record)
++                }
++                pageToken = response.pageToken
++            } while (pageToken != null)
++        } catch (e: Exception) {
++            // A type that fails is simply left as stored, like the full import's per-type catch (#34).
++            if (e is kotlin.coroutines.cancellation.CancellationException) throw e
++        }
++    }
++
++    private fun round1(x: Double) = round(x * 10.0) / 10.0
++    private fun round2(x: Double) = round(x * 100.0) / 100.0
++}
+diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachBlockTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachBlockTest.kt
+new file mode 100644
+index 00000000..5afa95b2
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/ai/VictorCoachBlockTest.kt
+@@ -0,0 +1,75 @@
++package com.noop.ai
++
++import android.content.Context
++import androidx.room.Room
++import com.noop.analytics.HydrationStore
++import com.noop.data.DailyMetric
++import com.noop.data.MetricSeriesRow
++import com.noop.data.WhoopDatabase
++import com.noop.data.WhoopRepository
++import com.noop.ui.ProfileStore
++import kotlinx.coroutines.runBlocking
++import org.junit.After
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Before
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.robolectric.RobolectricTestRunner
++import org.robolectric.RuntimeEnvironment
++import org.robolectric.annotation.Config
++import java.time.LocalDate
++
++/**
++ * victor:fresh — the coach's data block end to end over a real (in-memory) store: once this morning's
++ * weigh-in is in the store, the coach quotes it, and the Settings weight no longer competes with it.
++ */
++@RunWith(RobolectricTestRunner::class)
++@Config(sdk = [34], manifest = Config.NONE)
++class VictorCoachBlockTest {
++
++    private val ctx: Context = RuntimeEnvironment.getApplication()
++    private lateinit var db: WhoopDatabase
++    private lateinit var repo: WhoopRepository
++
++    @Before
++    fun setUp() {
++        db = Room.inMemoryDatabaseBuilder(ctx, WhoopDatabase::class.java).allowMainThreadQueries().build()
++        repo = WhoopRepository(db)
++    }
++
++    @After
++    fun tearDown() = db.close()
++
++    @Test
++    fun todaysWeighInReachesTheCoachAndEverySectionIsThere() = runBlocking {
++        val today = LocalDate.now()
++        ProfileStore.from(ctx).weightKg = 80.0   // typed once in Settings, never updated
++        repo.upsertMetricSeries(
++            listOf(
++                MetricSeriesRow("health-connect", today.minusDays(1).toString(), "weight", 79.1),
++                MetricSeriesRow("health-connect", today.toString(), "weight", 78.4),
++            ),
++        )
++        // A fortnight of strap days, so the Stress screen's score has a baseline to compare with.
++        repo.upsertDailyMetrics(
++            (0..14).map { i ->
++                DailyMetric(
++                    deviceId = "my-whoop", day = today.minusDays(14L - i).toString(),
++                    totalSleepMin = 420.0, restingHr = 55 + i % 3, avgHrv = 60.0 + i % 5,
++                )
++            },
++        )
++        HydrationStore.log(repo, 500)
++
++        val block = VictorCoachExtras.block(ctx, repo, "my-whoop")!!
++
++        assertTrue(block, block.startsWith("DATA AS OF $today"))
++        assertTrue(block, block.contains("weight: see BODY"))
++        assertTrue(block, block.contains("BODY (smart scale, latest $today"))
++        assertTrue(block, block.contains("weight 78.4 kg"))
++        assertFalse(block, block.contains("80.0 kg"))
++        assertTrue(block, block.contains("STRESS (the app's Stress screen"))
++        assertTrue(block, block.contains("WATER: today 500 ml so far"))
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
+index f1db8d8c..83667bf9 100644
+--- a/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
++++ b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
+@@ -55,4 +55,19 @@ class VictorCoachExtrasTest {
+         )
+         assertNull(VictorCoachExtras.adaptiveLine(AdaptiveState.Building(4, 2)))
+     }
++
++    @Test
++    fun freshnessSaysWhenAndThatItSupersedesEarlierTurns() {
++        val zone = java.time.ZoneId.of("Europe/Madrid")
++        val now = java.time.LocalDateTime.of(2026, 10, 18, 9, 14)
++        val strapAt = now.minusMinutes(12).atZone(zone).toEpochSecond()
++        assertEquals(
++            "DATA AS OF 2026-10-18 09:14 (phone time; newest strap data 09:02). This whole data block was re-read " +
++                "for the current message: where an earlier turn of the conversation quotes a different figure, these " +
++                "are the current ones.",
++            VictorCoachExtras.freshnessLine(now, strapAt, zone),
++        )
++        val yesterday = now.minusDays(1).atZone(zone).toEpochSecond()
++        assertEquals(true, VictorCoachExtras.freshnessLine(now, yesterday, zone).contains("newest strap data 2026-10-17 09:14"))
++    }
+ }
+diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachStressTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachStressTest.kt
+new file mode 100644
+index 00000000..3b1df082
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/ai/VictorCoachStressTest.kt
+@@ -0,0 +1,38 @@
++package com.noop.ai
++
++import com.noop.analytics.DaytimeStress
++import java.time.ZoneId
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Test
++
++/** victor:coach-stress — the coach sees the Stress screen's own 0-3 score. */
++class VictorCoachStressTest {
++    private val zone = ZoneId.of("Europe/Madrid")
++
++    @Test
++    fun dailyScoreTrendAndTodayByTheHour() {
++        val peak = DaytimeStress.HourPoint(hour = 11, startTs = 0, level = 2.61, meanHr = 88.0, rmssd = 22.0)
++        val today = DaytimeStress.Result(
++            hours = listOf(peak), sustainedHigh = true, sustainedRun = 2, dayMean = 1.44, peak = peak,
++            activityMaskedHours = 1, highStressMinutes = 120,
++        )
++        val daily = VictorCoachStress.Daily(
++            day = "2026-10-18", score = 1.23, rhrDelta = 3.4, hrvDelta = -8.2,
++            trend = listOf("2026-10-16" to 0.8, "2026-10-17" to 1.06),
++        )
++        assertEquals(
++            "STRESS (the app's Stress screen, 0-3: under 1 low, 1-2 medium, 2+ high; resting HR up and HRV down vs " +
++                "the user's previous 30 days): 2026-10-18 1.2 medium (resting HR +3 bpm, HRV -8 ms vs baseline); " +
++                "earlier days 10-16 0.8, 10-17 1.1; today by the hour (waking hours, average 1.4, peak 2.6 at 11:00, " +
++                "120 min in high, 1 h left out as exercise, high for the last 2 h)",
++            VictorCoachStress.line(daily, today, zone),
++        )
++    }
++
++    @Test
++    fun noScoreAndNoScoredHourMeansNoLine() {
++        assertNull(VictorCoachStress.line(null, null, zone))
++        assertNull(VictorCoachStress.line(null, DaytimeStress.Result.EMPTY, zone))
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
+index 828e79b5..f1a536b9 100644
+--- a/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
++++ b/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
+@@ -85,4 +85,32 @@ class VictorCoachVitalsTest {
+         )
+         assertNull(VictorCoachVitals.bloodPressureLine(emptyList(), LocalDate.of(2026, 10, 16), zone))
+     }
++
++    @Test
++    fun profileLeavesTheWeightToTheScaleWhenThereIsOne() {
++        assertEquals(
++            "PROFILE (from the app's Settings): age 26, male, 178 cm, weight: see BODY, max HR 190 bpm (age formula)",
++            VictorCoachVitals.profileLine(26, "male", 178.0, null, 0),
++        )
++    }
++
++    @Test
++    fun waterTodayAndThePreviousWeek() {
++        val history = listOf("2026-10-16" to 1500.0, "2026-10-17" to 0.0, "2026-10-18" to 750.0)
++        assertEquals(
++            "WATER: today 750 ml so far; previous 7 days avg 1500 ml/day over 1 logged days",
++            VictorCoachVitals.waterLine(history),
++        )
++        assertNull(VictorCoachVitals.waterLine(listOf("2026-10-17" to 0.0, "2026-10-18" to 0.0)))
++    }
++
++    @Test
++    fun fitnessEstimates() {
++        assertEquals(
++            "FITNESS (the app's own estimates from resting HR and profile): VO₂max ~46 ml/kg/min (2026-10-14); " +
++                "fitness age 23 (2026-10-14)",
++            VictorCoachVitals.fitnessLine("2026-10-14" to 45.6, "2026-10-14" to 23.2),
++        )
++        assertNull(VictorCoachVitals.fitnessLine(null, null))
++    }
+ }
+diff --git a/android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt b/android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt
+new file mode 100644
+index 00000000..c3126426
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt
+@@ -0,0 +1,50 @@
++package com.noop.ingest
++
++import com.noop.data.AppleDaily
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Test
++
++/** victor:fresh — the two-day Health Connect top-up only ever fills or updates, never blanks. */
++class VictorHcRefreshTest {
++
++    private val stored = AppleDaily(
++        deviceId = "health-connect", day = "2026-10-18",
++        steps = 1200, activeKcal = 80.0, basalKcal = 600.0, vo2max = 44.0, avgHr = 71, weightKg = 79.10,
++    )
++
++    @Test
++    fun morningWeighInReplacesYesterdaysWeightAndKeepsEverythingElse() {
++        val row = VictorHcRefresh.merge(stored, "2026-10-18", steps = 3400, totalKcal = 900.0, activeKcal = 150.0, weightKg = 78.456)!!
++        assertEquals(3400, row.steps)
++        assertEquals(150.0, row.activeKcal!!, 0.0)
++        assertEquals(750.0, row.basalKcal!!, 0.0)
++        assertEquals(78.46, row.weightKg!!, 0.0)
++        assertEquals(44.0, row.vo2max!!, 0.0)
++        assertEquals(71, row.avgHr)
++    }
++
++    @Test
++    fun nothingReadNeverWipesAStoredFigure() {
++        assertNull(VictorHcRefresh.merge(stored, "2026-10-18", steps = 0, totalKcal = 0.0, activeKcal = 0.0, weightKg = null))
++    }
++
++    @Test
++    fun aDayWithNoStoredRowStartsOne() {
++        val row = VictorHcRefresh.merge(null, "2026-10-18", steps = 0, totalKcal = 0.0, activeKcal = 0.0, weightKg = 78.4)!!
++        assertEquals("health-connect", row.deviceId)
++        assertEquals("2026-10-18", row.day)
++        assertEquals(78.4, row.weightKg!!, 0.0)
++        assertNull(row.steps)
++    }
++
++    @Test
++    fun basalIsTotalMinusActiveLikeTheFullImport() {
++        val onlyTotal = VictorHcRefresh.merge(null, "2026-10-18", steps = 0, totalKcal = 1500.0, activeKcal = 0.0, weightKg = null)!!
++        assertEquals(1500.0, onlyTotal.basalKcal!!, 0.0)
++        assertNull(onlyTotal.activeKcal)
++        val activeAboveTotal = VictorHcRefresh.merge(stored, "2026-10-18", steps = 0, totalKcal = 100.0, activeKcal = 300.0, weightKg = null)!!
++        assertEquals(600.0, activeAboveTotal.basalKcal!!, 0.0)
++        assertEquals(300.0, activeAboveTotal.activeKcal!!, 0.0)
++    }
++}
+-- 
+2.54.0
+
