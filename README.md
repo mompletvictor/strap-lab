@@ -10,7 +10,8 @@ con extras propios y firma propia estable:
   sincronización (Automations → Tasker; apagado de serie).
 - **Coach IA con Claude**: Anthropic + Claude Opus 5.5 por defecto; el coach ve también la báscula,
   las comidas, el estrés como la pantalla Estrés, el agua y el VO₂máx, todo releído al momento (el
-  pesaje de esta mañana incluido). Cada uno pega su propia clave en el móvil (nunca va dentro del APK).
+  pesaje de esta mañana incluido) y, si se activa, la agenda y las tareas. Cada uno pega su propia clave
+  en el móvil (nunca va dentro del APK).
 - **Báscula** (p. ej. Hume vía Samsung Health → Health Connect): peso, grasa, masa magra, ósea, agua y
   metabolismo basal en una tarjeta de Health.
 - **Comida por foto**: pestaña Comida; Claude estima calorías y macros (varias fotos, tipo de comida,
@@ -57,11 +58,14 @@ servidor, cuenta ni telemetría de este proyecto. Solo sale algo del móvil cuan
 
 - **Google Tasks** (opcional): con el permiso de solo lectura `tasks.readonly`, la app consulta las
   tareas del usuario directamente a Google desde su móvil para mostrar las de hoy en la pantalla Hoy.
-  No las guarda fuera del móvil, no las modifica, no las comparte con nadie y no las usa para nada más.
+  No las guarda fuera del móvil ni las modifica. Solo si el usuario activa «Agenda y tareas» en los
+  ajustes del coach (apagado de serie), los títulos de las tareas de hoy y mañana van al coach IA (ver
+  abajo); no se comparten con nadie más ni se usan para nada más.
   El acceso se retira desde la app o en myaccount.google.com → Seguridad.
-- **Calendario**: se lee del propio móvil; no se envía a ningún sitio.
+- **Calendario**: se lee del propio móvil; solo sale de él si el usuario activa «Agenda y tareas» en el
+  coach (títulos y horas de hoy y mañana).
 - **Coach IA y comida por foto** (opcional): el resumen o la foto van a Anthropic con la clave del
-  propio usuario, solo al pulsar el botón correspondiente.
+  propio usuario, solo al pulsar el botón correspondiente. Anthropic no entrena con los datos de su API.
 
 El uso de la información recibida de las APIs de Google cumple la
 [Política de Datos del Usuario de los Servicios de las APIs de Google](https://developers.google.com/terms/api-services-user-data-policy),
