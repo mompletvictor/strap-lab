@@ -1,0 +1,720 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Mon, 19 Oct 2026 16:32:41 +0200
+Subject: [PATCH] feat(weekly): last week's food, training and overall marks on
+ Today
+
+Once a week is over (Monday to Sunday), Claude reviews it as a whole: food
+(quality, protein, regularity, portions and the energy balance against the
+goals), training (volume, frequency, balance, intensity against recovery,
+rest, consistency) and overall, each 0-10 with one reason, plus the one thing
+to focus on this week. It reads the week's meals with their marks, the burn per
+day, every workout (strap, imports, logged) with its exercises and session
+mark and, under the coach's consent, profile, scale, goals and the strap's
+daily table. A week with fewer than three days of meals and no workout is not
+reviewed; an area with too little to judge shows a dash.
+
+'Tu semana' sits under the Today food card as one line of three marks; a tap
+opens the reasons and the focus. The coach gets a LAST WEEK REVIEW line.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../java/com/noop/ai/VictorCoachExtras.kt     |   7 +
+ .../java/com/noop/food/TodayFoodSection.kt    |  22 +-
+ .../main/java/com/noop/weekly/WeeklyCard.kt   | 105 ++++++++
+ .../main/java/com/noop/weekly/WeeklyReview.kt | 228 ++++++++++++++++++
+ .../java/com/noop/weekly/WeeklyReviewer.kt    | 147 +++++++++++
+ .../res/values-es/strings_victor_weekly.xml   |   9 +
+ .../main/res/values/strings_victor_weekly.xml |   9 +
+ .../java/com/noop/weekly/WeeklyReviewTest.kt  |  78 ++++++
+ 8 files changed, 597 insertions(+), 8 deletions(-)
+ create mode 100644 android/app/src/main/java/com/noop/weekly/WeeklyCard.kt
+ create mode 100644 android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
+ create mode 100644 android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
+ create mode 100644 android/app/src/main/res/values-es/strings_victor_weekly.xml
+ create mode 100644 android/app/src/main/res/values/strings_victor_weekly.xml
+ create mode 100644 android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+index eff28c1b..abf138a3 100644
+--- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
++++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+@@ -66,12 +66,19 @@ internal object VictorCoachExtras {
+             ScaleCoachContext.line(scale),
+             runCatching { FoodCoachContext.line(ctx) }.getOrNull(),
+             runCatching { TrainingCoachContext.line(ctx, repo, strapId) }.getOrNull(),
++            runCatching { weeklyLine(ctx) }.getOrNull(),
+             runCatching { VictorCoachVitals.waterLine(repo) }.getOrNull(),
+             runCatching { VictorGoals.coachLine(VictorGoalsStore.load(ctx), scale?.weight?.value) }.getOrNull(),
+             runCatching { DayCoachContext.line(ctx) }.getOrNull(),
+         ).takeIf { it.size > 1 }?.joinToString("\n")
+     }
+ 
++    /** victor:weekly — last week's review, when there is one for the week that just ended. */
++    private suspend fun weeklyLine(ctx: Context): String? {
++        val start = com.noop.weekly.WeeklyReviews.lastWeekStart(LocalDate.now()).toString()
++        return com.noop.weekly.WeeklyReviewer.load(ctx).lastOrNull { it.weekStart == start }?.let { com.noop.weekly.WeeklyReviews.coachLine(it) }
++    }
++
+     /** Epoch seconds of the newest strap heart-rate sample in the last two days (active id ∪ canonical). */
+     private suspend fun newestStrapSample(repo: WhoopRepository, strapId: String): Long? {
+         val now = System.currentTimeMillis() / 1000L
+diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+index 9f351372..82e8ef42 100644
+--- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
++++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+@@ -1,5 +1,7 @@
+ package com.noop.food
+ 
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.getValue
+@@ -10,6 +12,7 @@ import com.noop.R
+ import com.noop.goals.VictorGoalsStore
+ import com.noop.ingest.VictorHcRefresh
+ import com.noop.ui.AppViewModel
++import com.noop.ui.Metrics
+ import com.noop.ui.uiString
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.withContext
+@@ -33,12 +36,15 @@ internal fun TodayFoodSection(vm: AppViewModel, onOpenFood: () -> Unit) {
+         value = withContext(Dispatchers.IO) { runCatching { FoodEnergy.load(ctx, vm.repo, vm.activeStrapId, today) }.getOrNull() }
+     }
+     val todays = entries.filter { it.day == today }
+-    FoodDayCard(
+-        totals = FoodTotals.ofEntries(todays),
+-        meals = todays.size,
+-        energy = energy,
+-        title = uiString(R.string.victor_food_nav),
+-        kcalTarget = VictorGoalsStore.load(ctx).dailyKcalTarget,
+-        onAdd = onOpenFood,
+-    )
++    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space16)) {
++        FoodDayCard(
++            totals = FoodTotals.ofEntries(todays),
++            meals = todays.size,
++            energy = energy,
++            title = uiString(R.string.victor_food_nav),
++            kcalTarget = VictorGoalsStore.load(ctx).dailyKcalTarget,
++            onAdd = onOpenFood,
++        )
++        com.noop.weekly.WeeklyCard()   // victor:weekly — last week's marks
++    }
+ }
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt b/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt
+new file mode 100644
+index 00000000..adf42c32
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt
+@@ -0,0 +1,105 @@
++package com.noop.weekly
++
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.size
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.filled.KeyboardArrowDown
++import androidx.compose.material.icons.filled.KeyboardArrowUp
++import androidx.compose.material3.Icon
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.saveable.rememberSaveable
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalConfiguration
++import androidx.compose.ui.platform.LocalContext
++import androidx.lifecycle.compose.collectAsStateWithLifecycle
++import com.noop.R
++import com.noop.training.ScoreBadge
++import com.noop.ui.Metrics
++import com.noop.ui.NoopCard
++import com.noop.ui.NoopType
++import com.noop.ui.Overline
++import com.noop.ui.Palette
++import com.noop.ui.uiString
++import java.time.LocalDate
++import java.time.format.DateTimeFormatter
++import java.util.Locale
++
++/**
++ * victor:weekly — "Tu semana" on Today: last week's three marks in one line (food, training, overall); a tap
++ * opens the reasons and the focus for this week. Shows only the review of the week that just ended, so it
++ * changes once a week; nothing at all until that review exists.
++ */
++@Composable
++fun WeeklyCard() {
++    val ctx = LocalContext.current
++    val reviews by WeeklyReviewer.reviews.collectAsStateWithLifecycle()
++    LaunchedEffect(Unit) {
++        WeeklyReviewer.load(ctx)
++        WeeklyReviewer.ensure(ctx)
++    }
++    val start = WeeklyReviews.lastWeekStart(LocalDate.now())
++    val r = reviews.lastOrNull { it.weekStart == start.toString() } ?: return
++    val locale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
++    var open by rememberSaveable { mutableStateOf(false) }
++    NoopCard(modifier = Modifier.clickable { open = !open }) {
++        Column(verticalArrangement = Arrangement.spacedBy(Metrics.space12)) {
++            Row(verticalAlignment = Alignment.CenterVertically) {
++                Overline(uiString(R.string.victor_weekly_title, weekLabel(start, locale)), modifier = Modifier.weight(1f))
++                Icon(
++                    if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
++                    contentDescription = null,
++                    tint = Palette.textTertiary,
++                    modifier = Modifier.size(Metrics.iconSmall),
++                )
++            }
++            Row(Modifier.fillMaxWidth()) {
++                Mark(uiString(R.string.victor_weekly_food), r.food, Modifier.weight(1f))
++                Mark(uiString(R.string.victor_weekly_training), r.training, Modifier.weight(1f))
++                Mark(uiString(R.string.victor_weekly_overall), r.overall, Modifier.weight(1f))
++            }
++            if (open) {
++                Reason(uiString(R.string.victor_weekly_food), r.food?.let { r.foodNote })
++                Reason(uiString(R.string.victor_weekly_training), r.training?.let { r.trainingNote })
++                Reason(uiString(R.string.victor_weekly_overall), r.overallNote)
++                if (r.focus.isNotBlank()) {
++                    Text(uiString(R.string.victor_weekly_focus, r.focus), style = NoopType.headline, color = Palette.textPrimary)
++                }
++            }
++        }
++    }
++}
++
++@Composable
++private fun Mark(label: String, score: Int?, modifier: Modifier) {
++    Column(modifier, verticalArrangement = Arrangement.spacedBy(Metrics.space4)) {
++        Text(label, style = NoopType.caption, color = Palette.textSecondary)
++        if (score != null) ScoreBadge(score) else Text("—", style = NoopType.bodyNumber, color = Palette.textTertiary)
++    }
++}
++
++@Composable
++private fun Reason(label: String, text: String?) {
++    if (text.isNullOrBlank()) return
++    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space2)) {
++        Text(label, style = NoopType.caption, color = Palette.textSecondary)
++        Text(text, style = NoopType.subhead, color = Palette.textPrimary)
++    }
++}
++
++/** "12–18 oct" (or across months, "29 sept – 5 oct"). */
++private fun weekLabel(start: LocalDate, locale: Locale): String {
++    val end = start.plusDays(6)
++    val month = DateTimeFormatter.ofPattern("MMM", locale)
++    return if (start.month == end.month) "${start.dayOfMonth}–${end.dayOfMonth} ${end.format(month)}"
++    else "${start.dayOfMonth} ${start.format(month)} – ${end.dayOfMonth} ${end.format(month)}"
++}
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
+new file mode 100644
+index 00000000..6aa2934a
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
+@@ -0,0 +1,228 @@
++package com.noop.weekly
++
++import com.noop.data.WorkoutRow
++import com.noop.food.FoodDays
++import com.noop.food.FoodEnergy
++import com.noop.food.FoodEntry
++import com.noop.food.FoodTotals
++import com.noop.food.MealScore
++import com.noop.food.MealScoring
++import com.noop.food.MealType
++import com.noop.training.TrainingFormat
++import com.noop.training.TrainingSession
++import org.json.JSONArray
++import org.json.JSONObject
++import java.time.DayOfWeek
++import java.time.Instant
++import java.time.LocalDate
++import java.time.ZoneId
++import java.time.format.DateTimeFormatter
++import java.time.temporal.TemporalAdjusters
++import java.util.Locale
++import kotlin.math.roundToInt
++
++/**
++ * victor:weekly — Claude's marks for one finished week (Monday to Sunday): food, training and the two
++ * together, each 0-10 with its reason, and one thing to focus on next. [food]/[training] are null when the
++ * week had too little of it to judge.
++ */
++data class WeeklyReview(
++    /** The Monday, yyyy-MM-dd. */
++    val weekStart: String,
++    val food: Int?,
++    val foodNote: String,
++    val training: Int?,
++    val trainingNote: String,
++    val overall: Int,
++    val overallNote: String,
++    val focus: String,
++    val atMs: Long,
++)
++
++/**
++ * victor:weekly — the pure half of the weekly review: which week is due, what Claude is told about it, the
++ * answer's shape, and the JSON on disk.
++ */
++object WeeklyReviews {
++
++    /** The last finished week's Monday: on any day of this week, the Monday before this one. */
++    fun lastWeekStart(today: LocalDate): LocalDate =
++        today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY)).minusWeeks(1)
++
++    /** Enough to judge: three days with meals, or any workout. */
++    fun hasEnough(foodDays: Int, workouts: Int): Boolean = foodDays >= 3 || workouts > 0
++
++    fun schema(): JSONObject {
++        fun t(type: String) = JSONObject().put("type", type)
++        val props = JSONObject()
++            .put("food_score", t("integer"))
++            .put("food_note", t("string"))
++            .put("training_score", t("integer"))
++            .put("training_note", t("string"))
++            .put("overall_score", t("integer"))
++            .put("overall_note", t("string"))
++            .put("focus", t("string"))
++        return JSONObject()
++            .put("type", "object")
++            .put("properties", props)
++            .put("required", JSONArray(props.keys().asSequence().toList()))
++            .put("additionalProperties", false)
++    }
++
++    /**
++     * The request. [weekFood] / [weekWorkouts] / [sessions] are the week's own records; [energy] the burn per
++     * day; [personLines] (profile, scale, goals, the strap's daily table) only with the coach's consent.
++     */
++    internal fun prompt(
++        weekStart: LocalDate,
++        weekFood: List<FoodEntry>,
++        mealScores: Map<String, MealScore>,
++        energy: Map<String, FoodEnergy>,
++        kcalTarget: Int?,
++        weekWorkouts: List<WorkoutRow>,
++        sessions: List<TrainingSession>,
++        personLines: List<String>,
++        zone: ZoneId,
++    ): String = buildString {
++        val end = weekStart.plusDays(6)
++        append("Review this person's WEEK as a coach and give three marks from 0 to 10: food (how good and healthy the ")
++        append("week's eating was for them: quality, protein, regularity, portions and the energy balance against their goals), ")
++        append("training (volume, frequency, balance between muscle groups and cardio, intensity against their recovery, ")
++        append("rest days, consistency) and overall (the two together with recovery and sleep: what counts is the whole). ")
++        append("10 = excellent, 5 = acceptable but clearly improvable, 2 = poor. Judge the week as a whole, not one day. Days ")
++        append("with nothing logged mean not logged, not fasting: judge what is there and say if coverage was thin. Use -1 for ")
++        append("food_score or training_score when there is too little of it to judge. Each *_note: ONE short sentence in Spanish ")
++        append("(Spain), at most 20 words, the main reason. focus: the ONE most useful thing to change next week, in Spanish, at ")
++        append("most 15 words, concrete.\n\n")
++        append("WEEK: $weekStart (Monday) to $end (Sunday).")
++        kcalTarget?.let { append(" Daily intake target: $it kcal.") }
++        append("\n\nFOOD (photo log, estimates):\n")
++        for (i in 0..6) {
++            val day = weekStart.plusDays(i.toLong()).toString()
++            val ofDay = weekFood.filter { it.day == day }
++            val burn = energy[day]?.burnedKcal
++            if (ofDay.isEmpty()) {
++                append("- $day: nothing logged").append(burn?.let { "; burned ${it.roundToInt()} kcal" }.orEmpty()).append('\n')
++                continue
++            }
++            val t = FoodTotals.ofEntries(ofDay)
++            append("- $day: ${t.kcal.roundToInt()} kcal (P ${t.proteinG.roundToInt()} g, C ${t.carbsG.roundToInt()} g, F ${t.fatG.roundToInt()} g)")
++            burn?.let { append("; burned ${it.roundToInt()} kcal, balance ${signed(t.kcal - it)}") }
++            append(". ")
++            append(
++                FoodDays.groupedByMeal(ofDay).joinToString("; ") { (meal, list) ->
++                    val score = mealScores[MealScoring.key(day, meal)]?.takeIf { it.signature == MealScoring.signature(list) }
++                    val foods = list.flatMap { it.items }.joinToString(", ") { it.name }.take(120)
++                    "${mealName(meal)} ${FoodTotals.ofEntries(list).kcal.roundToInt()} kcal${score?.let { " [${it.score}/10]" }.orEmpty()} ($foods)"
++                },
++            )
++            append('\n')
++        }
++        append("\nWORKOUTS (strap, imports and logged):\n")
++        if (weekWorkouts.isEmpty()) append("- none recorded\n")
++        for (w in weekWorkouts.sortedBy { it.startTs }) {
++            val at = Instant.ofEpochSecond(w.startTs).atZone(zone)
++            append("- ${at.toLocalDate()} ${at.format(HHMM)} ${w.sport}, ${((w.durationS ?: (w.endTs - w.startTs).toDouble()) / 60).roundToInt()} min")
++            w.avgHr?.let { append(", HR avg $it") }
++            w.energyKcal?.let { append(", ${it.roundToInt()} kcal by HR") }
++            w.strain?.let { append(", strain ${String.format(Locale.US, "%.1f", it)}") }
++            sessions.firstOrNull { it.pairs(w) }?.let { s ->
++                append("; exercises: ")
++                append(s.exercises.joinToString("; ") { ex -> "${ex.name} ${TrainingFormat.summary(ex, s::performed, Locale.US).ifEmpty { "skipped" }}" })
++                s.analysis?.let { a ->
++                    append("; Claude ${a.totalKcal.roundToInt()} kcal")
++                    a.score?.let { append(", session score $it/10") }
++                }
++            }
++            append('\n')
++        }
++        if (personLines.isNotEmpty()) {
++            append('\n')
++            personLines.forEach { append(it).append('\n') }
++        } else {
++            append("\n(No recovery, sleep or goals shared: the coach's data consent is off.)\n")
++        }
++    }
++
++    /** The answer, clamped; -1 (or nothing) for an area means "too little to judge". */
++    fun parse(o: JSONObject, weekStart: String, nowMs: Long): WeeklyReview? {
++        fun mark(key: String): Int? = o.optDouble(key, Double.NaN).takeIf { it.isFinite() && it >= 0 }?.roundToInt()?.coerceIn(0, 10)
++        val overall = mark("overall_score") ?: return null
++        return WeeklyReview(
++            weekStart = weekStart,
++            food = mark("food_score"),
++            foodNote = o.optString("food_note").trim().take(200),
++            training = mark("training_score"),
++            trainingNote = o.optString("training_note").trim().take(200),
++            overall = overall,
++            overallNote = o.optString("overall_note").trim().take(200),
++            focus = o.optString("focus").trim().take(160),
++            atMs = nowMs,
++        )
++    }
++
++    fun encode(reviews: List<WeeklyReview>): String {
++        val arr = JSONArray()
++        for (r in reviews) {
++            arr.put(
++                JSONObject()
++                    .put("week", r.weekStart)
++                    .put("food_note", r.foodNote)
++                    .put("training_note", r.trainingNote)
++                    .put("overall", r.overall)
++                    .put("overall_note", r.overallNote)
++                    .put("focus", r.focus)
++                    .put("at", r.atMs)
++                    .apply {
++                        r.food?.let { put("food", it) }
++                        r.training?.let { put("training", it) }
++                    },
++            )
++        }
++        return JSONObject().put("version", 1).put("reviews", arr).toString()
++    }
++
++    /** Throws on text that is not a reviews document, so a corrupt file is never mistaken for empty. */
++    fun decode(text: String): List<WeeklyReview> {
++        val arr = JSONObject(text).getJSONArray("reviews")
++        return (0 until arr.length()).mapNotNull { i ->
++            val o = arr.optJSONObject(i) ?: return@mapNotNull null
++            val week = o.optString("week").takeIf { it.isNotBlank() } ?: return@mapNotNull null
++            WeeklyReview(
++                weekStart = week,
++                food = if (o.has("food")) o.optInt("food") else null,
++                foodNote = o.optString("food_note"),
++                training = if (o.has("training")) o.optInt("training") else null,
++                trainingNote = o.optString("training_note"),
++                overall = o.optInt("overall"),
++                overallNote = o.optString("overall_note"),
++                focus = o.optString("focus"),
++                atMs = o.optLong("at"),
++            )
++        }.sortedBy { it.weekStart }
++    }
++
++    /** One English line for the AI Coach. */
++    fun coachLine(r: WeeklyReview): String {
++        val parts = buildList {
++            r.food?.let { add("food $it/10 («${r.foodNote}»)") }
++            r.training?.let { add("training $it/10 («${r.trainingNote}»)") }
++            add("overall ${r.overall}/10 («${r.overallNote}»)")
++            if (r.focus.isNotBlank()) add("focus for this week: «${r.focus}»")
++        }
++        return "LAST WEEK REVIEW (week of ${r.weekStart}, by Claude): " + parts.joinToString("; ")
++    }
++
++    private fun mealName(meal: MealType): String = when (meal) {
++        MealType.BREAKFAST -> "breakfast"
++        MealType.MID_MORNING -> "mid-morning"
++        MealType.LUNCH -> "lunch"
++        MealType.SNACK -> "snack"
++        MealType.DINNER -> "dinner"
++        MealType.NIBBLE -> "nibbles"
++    }
++
++    private fun signed(v: Double): String = v.roundToInt().let { if (it > 0) "+$it" else "$it" }
++
++    private val HHMM = DateTimeFormatter.ofPattern("HH:mm", Locale.ROOT)
++}
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
+new file mode 100644
+index 00000000..70559ca1
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
+@@ -0,0 +1,147 @@
++package com.noop.weekly
++
++import android.content.Context
++import com.noop.NoopApplication
++import com.noop.ai.AiCoach
++import com.noop.ai.AiKeyStore
++import com.noop.ai.AiProvider
++import com.noop.ai.ScaleCoachContext
++import com.noop.ai.VictorCoachVitals
++import com.noop.food.FoodEnergy
++import com.noop.food.FoodStore
++import com.noop.goals.VictorGoals
++import com.noop.goals.VictorGoalsStore
++import com.noop.ingest.ScaleImport
++import com.noop.training.TrainingAi
++import com.noop.training.TrainingAiResult
++import com.noop.training.TrainingStore
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.sync.Mutex
++import kotlinx.coroutines.sync.withLock
++import kotlinx.coroutines.withContext
++import java.io.File
++import java.time.LocalDate
++import java.time.ZoneId
++import java.util.concurrent.atomic.AtomicBoolean
++
++/**
++ * victor:weekly — the reviews on disk (`files/weekly/reviews.json`, the last 12 weeks) and the pass that asks
++ * Claude for last week's once the week is over. Called when the Today food card shows: the first look on or
++ * after a Monday reviews the week before it. A week with too little logged is skipped without a request, and
++ * a failure (offline, no key) leaves it for the next look.
++ */
++object WeeklyReviewer {
++
++    private const val DIR = "weekly"
++    private const val FILE = "reviews.json"
++    private const val KEEP = 12
++
++    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
++    private val running = AtomicBoolean(false)
++    private val mutex = Mutex()
++    private var cache: List<WeeklyReview>? = null
++
++    private val _reviews = MutableStateFlow<List<WeeklyReview>>(emptyList())
++    /** Oldest first. Empty until the first [load]. */
++    val reviews: StateFlow<List<WeeklyReview>> = _reviews.asStateFlow()
++
++    suspend fun load(ctx: Context): List<WeeklyReview> = withContext(Dispatchers.IO) { mutex.withLock { state(ctx) } }
++
++    fun ensure(ctx: Context) {
++        val app = ctx.applicationContext
++        if (!running.compareAndSet(false, true)) return
++        scope.launch {
++            try {
++                runCatching { pass(app) }
++            } finally {
++                running.set(false)
++            }
++        }
++    }
++
++    private suspend fun pass(ctx: Context) {
++        val zone = ZoneId.systemDefault()
++        val start = WeeklyReviews.lastWeekStart(LocalDate.now(zone))
++        if (load(ctx).any { it.weekStart == start.toString() }) return
++        if (AiKeyStore.read(ctx, AiProvider.ANTHROPIC) == null) return
++        val app = ctx.applicationContext as NoopApplication
++        val repo = app.repository
++        val strapId = app.sourceCoordinator.activeDeviceId.value ?: app.activeDeviceId
++        val end = start.plusDays(6)
++        val fromS = start.atStartOfDay(zone).toEpochSecond()
++        val toS = end.plusDays(1).atStartOfDay(zone).toEpochSecond()
++
++        val food = FoodStore.load(ctx).filter { it.day >= start.toString() && it.day <= end.toString() }
++        val workouts = runCatching { repo.workoutsUnion(strapId, fromS, toS) }.getOrDefault(emptyList())
++            .filter { it.startTs in fromS until toS }
++        if (!WeeklyReviews.hasEnough(food.map { it.day }.distinct().size, workouts.size)) return
++
++        val sessions = TrainingStore.load(ctx).filter { !it.isLive && it.startTs in fromS until toS }
++        val energy = runCatching { FoodEnergy.loadRange(ctx, repo, strapId, start.toString(), end.toString()) }.getOrDefault(emptyMap())
++        val prompt = WeeklyReviews.prompt(
++            weekStart = start,
++            weekFood = food,
++            mealScores = FoodStore.loadScores(ctx),
++            energy = energy,
++            kcalTarget = VictorGoalsStore.load(ctx).dailyKcalTarget,
++            weekWorkouts = workouts,
++            sessions = sessions,
++            personLines = personLines(ctx, repo, strapId),
++            zone = zone,
++        )
++        val r = TrainingAi.ask(ctx, prompt, WeeklyReviews.schema()) { WeeklyReviews.parse(it, start.toString(), System.currentTimeMillis()) }
++        if (r is TrainingAiResult.Ok) save(ctx, r.value)
++    }
++
++    /** With the coach's consent only: profile, scale, goals and the strap's daily table, as the coach reads them. */
++    private suspend fun personLines(ctx: Context, repo: com.noop.data.WhoopRepository, strapId: String): List<String> {
++        if (!AiKeyStore.readConsent(ctx)) return emptyList()
++        val scale = runCatching { ScaleImport.snapshot(repo, ScaleImport.newestReading(ctx)) }.getOrNull()
++        val days = runCatching { repo.daysMerged(strapId) }.getOrDefault(emptyList())
++        return listOfNotNull(
++            runCatching { VictorCoachVitals.profileLine(ctx, scaleHasWeight = scale?.weight != null) }.getOrNull(),
++            ScaleCoachContext.line(scale),
++            runCatching { VictorGoals.coachLine(VictorGoalsStore.load(ctx), scale?.weight?.value) }.getOrNull(),
++            runCatching { AiCoach(repo) { strapId }.buildContext(days) }.getOrNull(),
++        )
++    }
++
++    private suspend fun save(ctx: Context, review: WeeklyReview) = withContext(Dispatchers.IO) {
++        mutex.withLock {
++            val next = (state(ctx).filterNot { it.weekStart == review.weekStart } + review).sortedBy { it.weekStart }.takeLast(KEEP)
++            val dir = File(ctx.applicationContext.filesDir, DIR).apply { mkdirs() }
++            val tmp = File(dir, "$FILE.tmp")
++            tmp.writeText(WeeklyReviews.encode(next))
++            if (!tmp.renameTo(File(dir, FILE))) {
++                File(dir, FILE).writeText(WeeklyReviews.encode(next))
++                tmp.delete()
++            }
++            cache = next
++            _reviews.value = next
++        }
++    }
++
++    /** Caller holds [mutex]. A corrupt file is set aside and the list starts empty. */
++    private fun state(ctx: Context): List<WeeklyReview> {
++        cache?.let { return it }
++        val dir = File(ctx.applicationContext.filesDir, DIR)
++        val file = File(dir, FILE)
++        val loaded = if (!file.exists()) {
++            emptyList()
++        } else {
++            runCatching { WeeklyReviews.decode(file.readText()) }.getOrElse {
++                runCatching { file.renameTo(File(dir, "$FILE.corrupt-${System.currentTimeMillis()}")) }
++                emptyList()
++            }
++        }
++        cache = loaded
++        _reviews.value = loaded
++        return loaded
++    }
++}
+diff --git a/android/app/src/main/res/values-es/strings_victor_weekly.xml b/android/app/src/main/res/values-es/strings_victor_weekly.xml
+new file mode 100644
+index 00000000..86aaca5b
+--- /dev/null
++++ b/android/app/src/main/res/values-es/strings_victor_weekly.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- victor:weekly — the weekly review card (fork-owned strings). -->
++<resources>
++    <string name="victor_weekly_title">Tu semana · %1$s</string>
++    <string name="victor_weekly_food">Comida</string>
++    <string name="victor_weekly_training">Entreno</string>
++    <string name="victor_weekly_overall">Global</string>
++    <string name="victor_weekly_focus">Esta semana: %1$s</string>
++</resources>
+diff --git a/android/app/src/main/res/values/strings_victor_weekly.xml b/android/app/src/main/res/values/strings_victor_weekly.xml
+new file mode 100644
+index 00000000..13c413e9
+--- /dev/null
++++ b/android/app/src/main/res/values/strings_victor_weekly.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- victor:weekly — the weekly review card (fork-owned strings). -->
++<resources>
++    <string name="victor_weekly_title">Your week · %1$s</string>
++    <string name="victor_weekly_food">Food</string>
++    <string name="victor_weekly_training">Training</string>
++    <string name="victor_weekly_overall">Overall</string>
++    <string name="victor_weekly_focus">This week: %1$s</string>
++</resources>
+diff --git a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
+new file mode 100644
+index 00000000..4316f4b0
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
+@@ -0,0 +1,78 @@
++package com.noop.weekly
++
++import com.noop.data.WorkoutRow
++import com.noop.food.FoodEntry
++import com.noop.food.FoodItem
++import com.noop.food.MealScore
++import com.noop.food.MealScoring
++import com.noop.food.MealType
++import org.json.JSONObject
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.time.LocalDate
++import java.time.ZoneId
++
++/** victor:weekly — which week, what Claude is told, how the answer is read and kept. */
++class WeeklyReviewTest {
++
++    private val madrid = ZoneId.of("Europe/Madrid")
++
++    @Test
++    fun theReviewedWeekIsTheLastFinishedMondayToSunday() {
++        // Monday 19 Oct → the week of Monday 12; Sunday 25 Oct → still the week of the 12th.
++        assertEquals(LocalDate.of(2026, 10, 12), WeeklyReviews.lastWeekStart(LocalDate.of(2026, 10, 19)))
++        assertEquals(LocalDate.of(2026, 10, 12), WeeklyReviews.lastWeekStart(LocalDate.of(2026, 10, 25)))
++        assertEquals(LocalDate.of(2026, 10, 19), WeeklyReviews.lastWeekStart(LocalDate.of(2026, 10, 26)))
++        assertTrue(WeeklyReviews.hasEnough(3, 0))
++        assertTrue(WeeklyReviews.hasEnough(0, 1))
++        assertFalse(WeeklyReviews.hasEnough(2, 0))
++    }
++
++    @Test
++    fun thePromptHasEveryDayTheMealsTheirMarksAndTheWorkouts() {
++        val day = "2026-10-14"
++        val eggs = FoodEntry(
++            "e", LocalDate.parse(day).atTime(8, 30).atZone(madrid).toInstant().toEpochMilli(), day, "",
++            listOf(FoodItem("Huevos", "2", 180.0, 12.0, 1.0, 13.0)), 180.0, 12.0, 1.0, 13.0, emptyList(), meal = MealType.BREAKFAST,
++        )
++        val start = LocalDate.of(2026, 10, 14).atTime(18, 0).atZone(madrid).toEpochSecond()
++        val gym = WorkoutRow("my-whoop", start, start + 3600, "Strength", "manual", durationS = 3600.0, energyKcal = 220.0, avgHr = 118)
++        val p = WeeklyReviews.prompt(
++            weekStart = LocalDate.of(2026, 10, 12),
++            weekFood = listOf(eggs),
++            mealScores = mapOf(MealScoring.key(day, MealType.BREAKFAST) to MealScore(8, "", MealScoring.signature(listOf(eggs)), 1L)),
++            energy = emptyMap(),
++            kcalTarget = 2200,
++            weekWorkouts = listOf(gym),
++            sessions = emptyList(),
++            personLines = emptyList(),
++            zone = madrid,
++        )
++        assertTrue(p.contains("WEEK: 2026-10-12 (Monday) to 2026-10-18 (Sunday). Daily intake target: 2200 kcal."))
++        assertTrue(p.contains("- 2026-10-12: nothing logged"))
++        assertTrue(p.contains("- 2026-10-14: 180 kcal (P 12 g, C 1 g, F 13 g). breakfast 180 kcal [8/10] (Huevos)"))
++        assertTrue(p.contains("- 2026-10-14 18:00 Strength, 60 min, HR avg 118, 220 kcal by HR"))
++        assertTrue(p.contains("the coach's data consent is off"))
++    }
++
++    @Test
++    fun theAnswerIsReadWithAreasTooThinToJudgeAndRoundTrips() {
++        val r = WeeklyReviews.parse(
++            JSONObject("""{"food_score":7.4,"food_note":"Buena proteína.","training_score":-1,"training_note":"","overall_score":6,"overall_note":"Falta entrenar.","focus":"Tres sesiones de fuerza."}"""),
++            "2026-10-12", 9L,
++        )!!
++        assertEquals(7, r.food)
++        assertNull(r.training)
++        assertEquals(6, r.overall)
++        assertEquals(listOf(r), WeeklyReviews.decode(WeeklyReviews.encode(listOf(r))))
++        assertNull(WeeklyReviews.parse(JSONObject("""{"food_score":5}"""), "2026-10-12", 9L))
++        val line = WeeklyReviews.coachLine(r)
++        assertEquals(
++            "LAST WEEK REVIEW (week of 2026-10-12, by Claude): food 7/10 («Buena proteína.»); overall 6/10 («Falta entrenar.»); focus for this week: «Tres sesiones de fuerza.»",
++            line,
++        )
++    }
++}
+-- 
+2.54.0
+

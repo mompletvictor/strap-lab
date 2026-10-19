@@ -20,7 +20,8 @@ con extras propios y firma propia estable:
   Claude lo pasa a ejercicios y series; en directo marcas cada serie, o lo registras después con su hora.
   Claude estima las calorías con los pesos, tu cuerpo y el pulso, y lo que el pulso no ve se suma al día.
   Y si no sabes qué hacer, **Sugiéreme**: Claude propone el entreno según cómo estás y tu historial.
-- **Notas de 0 a 10**: Claude puntúa cada entreno y cada comida entera (desayuno, comida, cena…) al terminar.
+- **Notas de 0 a 10**: Claude puntúa cada entreno y cada comida entera (desayuno, comida, cena…) al terminar,
+  y cada lunes la semana anterior (comida, entreno y global) en Hoy.
 - **Mi día** en Hoy: peso de la báscula, agenda del calendario del móvil y Google Tasks de hoy.
 - **Toda la app en español**, con el español de upstream repasado.
 - **Auto-actualización**: cada versión nueva del proyecto original se reconstruye y firma aquí
@@ -71,7 +72,7 @@ servidor, cuenta ni telemetría de este proyecto. Solo sale algo del móvil cuan
   coach (títulos y horas de hoy y mañana).
 - **Coach IA, comida por foto y entrenos** (opcional): el resumen, la foto o la descripción del entreno
   (al pedir una sugerencia, el mismo resumen de datos que usa el coach, con su mismo permiso; para la nota de
-  una comida, sus alimentos y, con ese permiso, perfil y objetivos)
+  una comida o de la semana, sus comidas y entrenos y, con ese permiso, perfil, objetivos y datos de la pulsera)
   van a Anthropic con la clave del propio usuario: al pulsar el botón correspondiente y, en un entreno con
   ejercicios, al terminarlo (un resumen de series, perfil, báscula y pulso para estimar sus calorías).
   Anthropic no entrena con los datos de su API.
