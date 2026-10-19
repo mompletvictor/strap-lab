@@ -1,0 +1,218 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Mon, 19 Oct 2026 18:22:52 +0200
+Subject: [PATCH] fix(training): the day's Effort counts the muscular load of
+ the gym sessions
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The Today ring still read 18/100 after an hour of heavy lifting: the day's
+Effort is heart-rate only and the previous fix only reached the workout.
+Each analysed session's extra load, TRIMP(Claude's effort) − TRIMP(its
+heart-rate effort), is summed per day and added to the day's own TRIMP, then
+mapped back onto the 0-100 axis (the axis is logarithmic, so efforts are not
+added directly), as WHOOP's Strength Trainer adds muscular load to Day Strain.
+Applied in WhoopRepository's three merged daily readers (one line each), so
+the ring, its tiles, Trends and the coach read the same number; nothing is
+written back. The per-day extras follow TrainingStore.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../java/com/noop/data/WhoopRepository.kt     | 13 ++--
+ .../java/com/noop/training/TrainingStore.kt   |  2 +
+ .../java/com/noop/training/VictorDayEffort.kt | 64 +++++++++++++++++++
+ .../com/noop/training/VictorDayEffortTest.kt  | 53 +++++++++++++++
+ 4 files changed, 127 insertions(+), 5 deletions(-)
+ create mode 100644 android/app/src/main/java/com/noop/training/VictorDayEffort.kt
+ create mode 100644 android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/data/WhoopRepository.kt b/android/app/src/main/java/com/noop/data/WhoopRepository.kt
+index a62b4680..c3a49309 100644
+--- a/android/app/src/main/java/com/noop/data/WhoopRepository.kt
++++ b/android/app/src/main/java/com/noop/data/WhoopRepository.kt
+@@ -1997,9 +1997,12 @@ class WhoopRepository(
+         // those days the computed sleep fields win over a re-imported night. Pool the edited sessions across
+         // every computed source in the union so a re-add doesn't lose an earlier-id edit's precedence.
+         val editedSessions = computedSourceIds(deviceId).flatMap { dao.editedSleepSessions(it) }
+-        return mergeActivityFileSteps(
+-            mergeDaily(imported = imported, computed = computed, userEditedDays = userEditedDays(editedSessions)),
+-            activityFile,
++        return com.noop.training.VictorDayEffort.apply(   // victor:training — gym sessions' muscular load in the day's Effort
++            mergeActivityFileSteps(
++                mergeDaily(imported = imported, computed = computed, userEditedDays = userEditedDays(editedSessions)),
++                activityFile,
++            ),
++            com.noop.training.VictorDayEffort.boosts.value,
+         )
+     }
+ 
+@@ -2036,7 +2039,7 @@ class WhoopRepository(
+                 mergeDaily(imported = imported, computed = computed, userEditedDays = userEditedDays(edited)),
+                 activityFile,
+             )
+-        }
++        }.combine(com.noop.training.VictorDayEffort.boosts, com.noop.training.VictorDayEffort::apply)   // victor:training
+ 
+     /**
+      * #797: BOUNDED reactive merged daily metrics for the dashboard. Same per-day merge as
+@@ -2066,7 +2069,7 @@ class WhoopRepository(
+                 mergeDaily(imported = imported, computed = computed, userEditedDays = userEditedDays(edited)),
+                 activityFile,
+             )
+-        }
++        }.combine(com.noop.training.VictorDayEffort.boosts, com.noop.training.VictorDayEffort::apply)   // victor:training
+ 
+     /** Pooled user-edited sleep sessions across every computed source in the active∪canonical union, so a
+      *  re-add doesn't drop an earlier-id night's edit precedence (#509 + HIGH-2). Single-source ⇒ the plain
+diff --git a/android/app/src/main/java/com/noop/training/TrainingStore.kt b/android/app/src/main/java/com/noop/training/TrainingStore.kt
+index 634407c7..145b71cb 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingStore.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingStore.kt
+@@ -216,6 +216,7 @@ object TrainingStore {
+         }
+         cache = loaded
+         _sessions.value = loaded
++        VictorDayEffort.update(loaded)
+         return loaded
+     }
+ 
+@@ -231,5 +232,6 @@ object TrainingStore {
+         }
+         cache = sessions
+         _sessions.value = sessions
++        VictorDayEffort.update(sessions)
+     }
+ }
+diff --git a/android/app/src/main/java/com/noop/training/VictorDayEffort.kt b/android/app/src/main/java/com/noop/training/VictorDayEffort.kt
+new file mode 100644
+index 00000000..1d62d7dd
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/training/VictorDayEffort.kt
+@@ -0,0 +1,64 @@
++package com.noop.training
++
++import com.noop.analytics.StrainScorer
++import com.noop.data.DailyMetric
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import java.time.ZoneId
++import kotlin.math.exp
++
++/**
++ * victor:training — the muscular load of analysed gym sessions, added to the DAY's Effort, the way WHOOP's
++ * Strength Trainer adds it to Day Strain. Upstream's Effort is heart-rate only (100 × ln(TRIMP+1) / ln(D)),
++ * which barely moves for heavy short sets: an hour of hard lifting read 18/100 for the day.
++ *
++ * The axis is logarithmic, so efforts are not added: each session's extra load is
++ * TRIMP(Claude's effort) − TRIMP(its heart-rate effort), the day's extras are summed, added to the day's
++ * own TRIMP and mapped back. A session without a heart-rate effort counts its whole effort as extra.
++ * Applied where the merged daily rows are read (one line in each of WhoopRepository's three merged
++ * readers), so the Today ring, its tiles, Trends and the coach all read the same number; nothing is
++ * written back, so a later analysis simply replaces it.
++ */
++object VictorDayEffort {
++
++    private val _boosts = MutableStateFlow<Map<String, Double>>(emptyMap())
++    /** Extra TRIMP per local day ("yyyy-MM-dd"). Kept current by [TrainingStore]. */
++    val boosts: StateFlow<Map<String, Double>> = _boosts.asStateFlow()
++
++    fun update(sessions: List<TrainingSession>, zone: ZoneId = ZoneId.systemDefault()) {
++        _boosts.value = extraTrimpByDay(sessions, zone)
++    }
++
++    /** Pure: the day's merged rows with the extra load added to their Effort. */
++    fun apply(days: List<DailyMetric>, boosts: Map<String, Double>): List<DailyMetric> {
++        if (boosts.isEmpty()) return days
++        return days.map { d ->
++            val extra = boosts[d.day]?.takeIf { it > 0 } ?: return@map d
++            d.copy(strain = withExtra(d.strain, extra))
++        }
++    }
++
++    /** Pure: an Effort with [extraTrimp] more load on the same 0-100 axis. */
++    fun withExtra(effort: Double?, extraTrimp: Double): Double {
++        val base = trimpOf(effort ?: 0.0)
++        return StrainScorer.trimpToStrain(base + extraTrimp.coerceAtLeast(0.0)).coerceIn(0.0, StrainScorer.maxStrain)
++    }
++
++    /** Pure: the inverse of [StrainScorer.trimpToStrain] on the default denominator. */
++    fun trimpOf(effort: Double): Double =
++        (exp(effort.coerceIn(0.0, StrainScorer.maxStrain) * StrainScorer.lnStrainDenominator / StrainScorer.maxStrain) - 1.0).coerceAtLeast(0.0)
++
++    /** Pure: per day, the load Claude's efforts add above what the heart rate already measured. */
++    fun extraTrimpByDay(sessions: List<TrainingSession>, zone: ZoneId): Map<String, Double> {
++        val out = HashMap<String, Double>()
++        for (s in sessions) {
++            if (s.isLive) continue
++            val a = s.analysis ?: continue
++            val effort = a.effort ?: continue
++            val extra = trimpOf(effort) - trimpOf(a.hrStrain ?: 0.0)
++            if (extra > 0) out.merge(s.day(zone), extra, Double::plus)
++        }
++        return out
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt b/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt
+new file mode 100644
+index 00000000..a45e98f7
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt
+@@ -0,0 +1,53 @@
++package com.noop.training
++
++import com.noop.analytics.StrainScorer
++import com.noop.data.DailyMetric
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertSame
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.time.ZoneId
++
++/** victor:training — a gym session's muscular load reaches the day's Effort, on its logarithmic axis. */
++class VictorDayEffortTest {
++
++    private val madrid = ZoneId.of("Europe/Madrid")
++    // 2026-10-19 09:00 in Madrid.
++    private val start = 1_792_393_200L
++
++    private fun session(effort: Double?, hrStrain: Double?, live: Boolean = false) = TrainingSession(
++        id = "s", mode = TrainingMode.LOGGED, startTs = start, endTs = if (live) null else start + 4500, sport = "Strength",
++        description = "", exercises = emptyList(),
++        analysis = TrainingAnalysis(430.0, null, null, 263.0, "", 1L, hrStrain = hrStrain, effort = effort),
++    )
++
++    @Test
++    fun theInverseRoundTripsTheEffortMap() {
++        for (e in listOf(0.0, 5.0, 18.0, 55.0, 90.0)) {
++            assertEquals(e, StrainScorer.trimpToStrain(VictorDayEffort.trimpOf(e)), 0.01)
++        }
++    }
++
++    @Test
++    fun aDayAt18WithAnHourOfHeavyLiftingLandsNearTheSessionsEffort() {
++        // The day's 18 already holds the session's heart-rate 15; Claude puts the session at 55.
++        val extra = VictorDayEffort.extraTrimpByDay(listOf(session(55.0, 15.0)), madrid)
++        assertEquals(setOf("2026-10-19"), extra.keys)
++        val day = VictorDayEffort.withExtra(18.0, extra.getValue("2026-10-19"))
++        assertTrue("day $day", day in 55.0..56.0)
++    }
++
++    @Test
++    fun onlyAnalysedFinishedSessionsWithAnEffortCountAndOtherDaysAreUntouched() {
++        assertEquals(emptyMap<String, Double>(), VictorDayEffort.extraTrimpByDay(listOf(session(null, 15.0)), madrid))
++        assertEquals(emptyMap<String, Double>(), VictorDayEffort.extraTrimpByDay(listOf(session(55.0, 15.0, live = true)), madrid))
++        // Cardio where Claude's effort is the heart-rate one: nothing to add.
++        assertEquals(emptyMap<String, Double>(), VictorDayEffort.extraTrimpByDay(listOf(session(40.0, 40.0)), madrid))
++
++        val days = listOf(DailyMetric("my-whoop", "2026-10-18", strain = 30.0), DailyMetric("my-whoop", "2026-10-19", strain = 18.0))
++        val out = VictorDayEffort.apply(days, VictorDayEffort.extraTrimpByDay(listOf(session(55.0, 15.0)), madrid))
++        assertEquals(30.0, out[0].strain!!, 0.0)
++        assertTrue(out[1].strain!! > 55.0)
++        assertSame(days, VictorDayEffort.apply(days, emptyMap()))
++    }
++}
+-- 
+2.54.0
+
