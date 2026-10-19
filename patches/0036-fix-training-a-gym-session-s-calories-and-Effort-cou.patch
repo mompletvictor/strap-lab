@@ -1,0 +1,504 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Mon, 19 Oct 2026 17:27:19 +0200
+Subject: [PATCH] fix(training): a gym session's calories and Effort count the
+ lifting, and catch up with the strap
+
+A 70-minute weights session read 263 kcal and Effort 18/100: both came from
+heart rate alone, which barely rises with heavy short sets, and when the
+workout was saved before the strap handed over its heart rate they were also
+scored on part of the window and never again (upstream only rescores a manual
+workout that has under 5 kcal or no Effort).
+
+- Claude's estimate now also gives the session's Effort on the app's 0-100
+  axis with the muscular load of the sets added to what the heart rate
+  measured (as WHOOP's Strength Trainer does), never below the heart-rate one.
+- The workout row takes the session's figures: calories = the larger of
+  Claude's and the heart-rate estimate, Effort = the larger of the two, heart
+  rate as freshly scored, so the list, the detail and the totals show them.
+  The day's balance keeps using the heart-rate figure the analysis saw, so
+  nothing is counted twice.
+- Sessions of the last three days are analysed again when their window holds
+  clearly more heart-rate samples than their analysis saw (a quarter more and
+  at least a minute), or when they were never analysed; checked when Today,
+  Food or a workout shows.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/main/java/com/noop/food/FoodScreen.kt |  5 +-
+ .../java/com/noop/food/TodayFoodSection.kt    |  5 +-
+ .../main/java/com/noop/training/TrainingAi.kt | 12 +++-
+ .../com/noop/training/TrainingAnalyzer.kt     | 61 ++++++++++++++++++-
+ .../com/noop/training/TrainingCoachContext.kt |  5 +-
+ .../noop/training/TrainingDetailSection.kt    | 25 +++++++-
+ .../java/com/noop/training/TrainingModels.kt  | 36 ++++++++++-
+ .../java/com/noop/training/TrainingStore.kt   |  6 ++
+ .../main/java/com/noop/weekly/WeeklyReview.kt | 12 +++-
+ .../res/values-es/strings_victor_training.xml |  1 +
+ .../res/values/strings_victor_training.xml    |  1 +
+ .../java/com/noop/training/TrainingTest.kt    | 41 +++++++++++--
+ 12 files changed, 188 insertions(+), 22 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+index 982d1c36..5d4c099e 100644
+--- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
++++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+@@ -105,7 +105,10 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+     val draft by food.draft.collectAsStateWithLifecycle()
+     val favorites by food.favorites.collectAsStateWithLifecycle()
+     val scores by FoodStore.scores.collectAsStateWithLifecycle()   // victor:scores
+-    LaunchedEffect(entries) { FoodScorer.scoreDue(ctx) }
++    LaunchedEffect(entries) {
++        FoodScorer.scoreDue(ctx)
++        com.noop.training.TrainingAnalyzer.refreshStale(ctx)
++    }
+     val notice by food.notice.collectAsStateWithLifecycle()
+     val locale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
+ 
+diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+index 82e8ef42..0f3cc5c9 100644
+--- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
++++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+@@ -30,7 +30,10 @@ internal fun TodayFoodSection(vm: AppViewModel, onOpenFood: () -> Unit) {
+         value = runCatching { FoodStore.load(ctx) }.getOrDefault(emptyList())
+     }
+     val hcVersion by VictorHcRefresh.version.collectAsStateWithLifecycle()   // victor:fresh
+-    LaunchedEffect(entries) { FoodScorer.scoreDue(ctx) }   // victor:scores
++    LaunchedEffect(entries) {
++        FoodScorer.scoreDue(ctx)   // victor:scores
++        com.noop.training.TrainingAnalyzer.refreshStale(ctx)   // victor:training — workouts scored on part of their heart rate
++    }
+     val training by com.noop.training.TrainingStore.sessions.collectAsStateWithLifecycle()   // victor:training
+     val energy by produceState<FoodEnergy?>(null, today, entries, hcVersion, training) {
+         value = withContext(Dispatchers.IO) { runCatching { FoodEnergy.load(ctx, vm.repo, vm.activeStrapId, today) }.getOrNull() }
+diff --git a/android/app/src/main/java/com/noop/training/TrainingAi.kt b/android/app/src/main/java/com/noop/training/TrainingAi.kt
+index 0499f5c4..6cf43772 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingAi.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingAi.kt
+@@ -317,6 +317,7 @@ object TrainingAi {
+         "notes" to type("string"),
+         "score" to type("integer"),
+         "score_note" to type("string"),
++        "effort" to type("number"),
+     )
+ 
+     /** Heart rate over the session's window from the strap, as the analysis hands it to Claude. */
+@@ -359,7 +360,13 @@ object TrainingAi {
+         append("actually done, nothing risky (hard work on muscles trained hard or sore in the last 48 h lowers it; so does a ")
+         append("session far too light or far too long for its purpose). 10 = excellent, 5 = fine but clearly improvable, ")
+         append("2 = counterproductive. score_note: ONE short sentence in Spanish (Spain), at most 15 words, the main reason ")
+-        append("or the one thing to change next time.\n\n")
++        append("or the one thing to change next time.\n")
++        append("And effort: the session's overall Effort on the app's 0-100 axis, the same axis as the strap's heart-rate ")
++        append("effort given below. Heart rate measures only the cardiovascular load; add the muscular load of the lifting (sets, ")
++        append("reps and loads relative to body weight, big compound and loaded body-weight movements counting most), the way ")
++        append("WHOOP's Strength Trainer adds muscular load to strain. For steady cardio it stays close to the heart-rate effort; ")
++        append("never below it. For reference on this axis: an easy hour is about 20-35, a hard gym session about 45-65, an ")
++        append("all-out race 80+.\n\n")
+         profileLine?.let { append(it).append('\n') }
+         bodyLine?.let { append(it).append('\n') }
+         restingHr?.let { append("Resting HR: $it bpm\n") }
+@@ -379,7 +386,7 @@ object TrainingAi {
+         if (hr != null) {
+             append("STRAP HEART RATE over the session: avg ${hr.avg} bpm, max ${hr.max} bpm, ${hr.samples} samples covering ~${hr.coveredMin} min")
+             hr.hrKcal?.let { append("; heart-rate (Keytel) estimate ${it.toInt()} kcal") }
+-            hr.strain?.let { append("; strain ${String.format(Locale.US, "%.1f", it)}") }
++            hr.strain?.let { append("; heart-rate effort ${String.format(Locale.US, "%.1f", it)} on the 0-100 axis") }
+             append('\n')
+         } else {
+             append("STRAP HEART RATE: none recorded for this window.\n")
+@@ -403,6 +410,7 @@ object TrainingAi {
+             atMs = nowMs,
+             score = if (o.has("score")) o.optDouble("score", Double.NaN).takeIf { it.isFinite() }?.let { kotlin.math.round(it).toInt().coerceIn(0, 10) } else null,
+             scoreNote = o.optString("score_note").trim().take(200),
++            effort = o.optDouble("effort", Double.NaN).takeIf { it.isFinite() && it > 0 }?.coerceAtMost(100.0),
+         )
+     }
+ 
+diff --git a/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
+index 6fc1539b..e1b5ccf3 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
+@@ -8,6 +8,7 @@ import com.noop.analytics.ManualWorkoutRescore
+ import com.noop.data.WorkoutRow
+ import com.noop.food.FoodError
+ import com.noop.ingest.ScaleImport
++import com.noop.ui.NoopPrefs
+ import com.noop.ui.ProfileStore
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
+@@ -20,6 +21,7 @@ import kotlinx.coroutines.launch
+ import java.time.Instant
+ import java.time.ZoneId
+ import java.time.format.DateTimeFormatter
++import java.util.concurrent.atomic.AtomicBoolean
+ 
+ /**
+  * victor:training — runs Claude's energy estimate for a finished session: reads the strap's heart rate for
+@@ -39,11 +41,45 @@ object TrainingAnalyzer {
+     /** The last failure per session id, until it is analysed again. */
+     val errors: StateFlow<Map<String, FoodError>> = _errors.asStateFlow()
+ 
++    private val _rowsChanged = MutableStateFlow(0)
++    /** Bumps each time a workout row was rewritten with a session's figures, so a screen can reload them. */
++    val rowsChanged: StateFlow<Int> = _rowsChanged.asStateFlow()
++
++    private val refreshing = AtomicBoolean(false)
++
+     fun launch(ctx: Context, sessionId: String) {
+         val app = ctx.applicationContext
+         scope.launch { analyze(app, sessionId) }
+     }
+ 
++    /**
++     * The strap banks its heart rate and hands it over at the next sync, so a workout saved before that is
++     * first scored on part of it. For the sessions of the last [RECHECK_DAYS] days: one never analysed (a
++     * failed try) or one whose window now holds clearly more samples than its analysis saw is analysed
++     * again. Cheap when nothing changed (a local count); called when Today, Food or a workout shows.
++     */
++    fun refreshStale(ctx: Context) {
++        val app = ctx.applicationContext
++        if (!refreshing.compareAndSet(false, true)) return
++        scope.launch {
++            try {
++                runCatching {
++                    val a = app as NoopApplication
++                    val strapId = a.sourceCoordinator.activeDeviceId.value ?: a.activeDeviceId
++                    val since = System.currentTimeMillis() / 1000 - RECHECK_DAYS * 86_400L
++                    for (s in TrainingStore.load(app).filter { !it.isLive && (it.endTs ?: 0) >= since }) {
++                        val end = s.endTs ?: continue
++                        val seen = s.analysis?.hrSamples
++                        val now = runCatching { a.repository.hrSamplesUnion(strapId, s.startTs, end, HR_LIMIT).size }.getOrDefault(0)
++                        if (TrainingEnergy.needsReanalysis(seen, now)) analyze(app, s.id)
++                    }
++                }
++            } finally {
++                refreshing.set(false)
++            }
++        }
++    }
++
+     suspend fun analyze(ctx: Context, sessionId: String) {
+         if (sessionId in _busy.value) return
+         _busy.update { it + sessionId }
+@@ -54,10 +90,12 @@ object TrainingAnalyzer {
+             val strapId = app.sourceCoordinator.activeDeviceId.value ?: app.activeDeviceId
+             val session = TrainingStore.load(ctx).firstOrNull { it.id == sessionId } ?: return
+             val end = session.endTs ?: return
+-            val samples = runCatching { repo.hrSamplesUnion(strapId, session.startTs, end) }.getOrDefault(emptyList())
++            val samples = runCatching { repo.hrSamplesUnion(strapId, session.startTs, end, HR_LIMIT) }.getOrDefault(emptyList())
+             val profile = ProfileStore.from(ctx)
+             val restingHr = runCatching { repo.daysMerged(strapId).lastOrNull { it.restingHr != null }?.restingHr }.getOrNull()
+-            val scored = ManualWorkoutRescore.scored(samples, profile.toUserProfile(), profile.hrMax.toDouble(), restingHr?.toDouble())
++            val scored = ManualWorkoutRescore.scored(
++                samples, profile.toUserProfile(), profile.hrMax.toDouble(), restingHr?.toDouble(), NoopPrefs.effortMethod(ctx),
++            )
+             val hr = scored?.let {
+                 TrainingAi.HrFacts(
+                     avg = it.avgHr,
+@@ -81,7 +119,22 @@ object TrainingAnalyzer {
+                 perExercise = TrainingHr.perExercise(session, samples),
+             )
+             when (val r = TrainingAi.estimate(ctx, prompt)) {
+-                is TrainingAiResult.Ok -> TrainingStore.edit(ctx, sessionId) { it.copy(analysis = r.value.copy(hrKcal = scored?.kcal)) }
++                is TrainingAiResult.Ok -> {
++                    val hrStrain = scored?.strain
++                    val analysis = r.value.copy(
++                        hrKcal = scored?.kcal,
++                        hrStrain = hrStrain,
++                        hrSamples = samples.size,
++                        effort = listOfNotNull(r.value.effort, hrStrain).maxOrNull(),
++                    )
++                    TrainingStore.edit(ctx, sessionId) { it.copy(analysis = analysis) }
++                    // The workout itself shows the session's figures (list, detail, totals), not only this log.
++                    runCatching {
++                        val row = repo.workoutsUnion(strapId, session.startTs - 1, end + 1).firstOrNull { session.pairs(it) }
++                        if (row != null) repo.upsertWorkouts(listOf(TrainingEnergy.applyToRow(row, analysis, scored?.avgHr, scored?.maxHr)))
++                    }
++                    _rowsChanged.update { it + 1 }
++                }
+                 is TrainingAiResult.Failed -> _errors.update { it + (sessionId to r.error) }
+             }
+         } catch (e: kotlinx.coroutines.CancellationException) {
+@@ -100,6 +153,8 @@ object TrainingAnalyzer {
+     }
+ 
+     private val HHMM = DateTimeFormatter.ofPattern("HH:mm")
++    private const val HR_LIMIT = 20_000
++    private const val RECHECK_DAYS = 3L
+ }
+ 
+ /**
+diff --git a/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt b/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
+index e0c11e21..ae7112b1 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
+@@ -51,11 +51,12 @@ internal object TrainingCoachContext {
+             val hr = listOfNotNull(
+                 row.avgHr?.let { "HR avg $it" },
+                 row.maxHr?.let { "max $it" },
+-                row.energyKcal?.let { "strap HR estimate ${it.roundToInt()} kcal" },
++                (s.analysis?.hrKcal ?: row.energyKcal.takeIf { s.analysis == null })?.let { "strap HR estimate ${it.roundToInt()} kcal" },
+             ).joinToString(", ")
+             val ai = s.analysis?.let { a ->
+-                val extra = TrainingEnergy.extraKcal(a.totalKcal, row.energyKcal ?: a.hrKcal, row.durationS ?: (row.endTs - row.startTs).toDouble(), null)
++                val extra = TrainingEnergy.extraKcal(a.totalKcal, a.hrKcal, row.durationS ?: (row.endTs - row.startTs).toDouble(), null)
+                 "Claude estimate ${a.totalKcal.roundToInt()} kcal" + (if (extra >= 1) " (adds ~${extra.roundToInt()} kcal to the day's burn)" else "") +
++                    (a.effort?.let { e -> "; effort with muscular load ${e.roundToInt()}/100" + a.hrStrain?.let { h -> " (heart rate alone ${h.roundToInt()})" }.orEmpty() }.orEmpty()) +
+                     (a.score?.let { s -> "; session score $s/10" + a.scoreNote.takeIf { it.isNotBlank() }?.let { " («$it»)" }.orEmpty() }.orEmpty())
+             }
+             "${start.toLocalDate()} ${start.format(HHMM)}-${end.format(HHMM)} ${row.sport} ($how): $exercises" +
+diff --git a/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt b/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
+index c4d7fb5b..b78a5aed 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
+@@ -37,6 +37,8 @@ import com.noop.ui.NoopType
+ import com.noop.ui.Overline
+ import com.noop.ui.Palette
+ import com.noop.ui.SettingsRowDivider
++import com.noop.ui.UnitFormatter
++import com.noop.ui.UnitPrefs
+ import com.noop.ui.uiString
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.withContext
+@@ -55,7 +57,13 @@ fun TrainingDetailSection(vm: AppViewModel, row: WorkoutRow) {
+     val sessions by TrainingStore.sessions.collectAsStateWithLifecycle()
+     val busy by TrainingAnalyzer.busy.collectAsStateWithLifecycle()
+     val errors by TrainingAnalyzer.errors.collectAsStateWithLifecycle()
+-    LaunchedEffect(Unit) { TrainingStore.load(ctx) }
++    LaunchedEffect(Unit) {
++        TrainingStore.load(ctx)
++        TrainingAnalyzer.refreshStale(ctx)
++    }
++    // The analysis rewrites the workout row (kcal, Effort): reload the list behind this sheet.
++    val rowsChanged by TrainingAnalyzer.rowsChanged.collectAsStateWithLifecycle()
++    LaunchedEffect(rowsChanged) { if (rowsChanged > 0) vm.loadWorkouts() }
+     val session = sessions.firstOrNull { !it.isLive && it.pairs(row) } ?: return
+     val perExercise by produceState(emptyMap<Int, TrainingHr.Stat>(), session) {
+         value = withContext(Dispatchers.IO) {
+@@ -91,7 +99,7 @@ fun TrainingDetailSection(vm: AppViewModel, row: WorkoutRow) {
+             a != null -> {
+                 val range = if (a.lowKcal != null && a.highKcal != null) " (${a.lowKcal.roundToInt()}–${a.highKcal.roundToInt()})" else ""
+                 Text(uiString(R.string.victor_training_ai_kcal, a.totalKcal.roundToInt(), range), style = NoopType.headline, color = Palette.textPrimary)
+-                val hr = row.energyKcal ?: a.hrKcal
++                val hr = a.hrKcal
+                 if (hr != null) {
+                     val extra = TrainingEnergy.extraKcal(a.totalKcal, hr, row.durationS ?: (row.endTs - row.startTs).toDouble(), null)
+                     Text(
+@@ -101,6 +109,19 @@ fun TrainingDetailSection(vm: AppViewModel, row: WorkoutRow) {
+                         color = Palette.textSecondary,
+                     )
+                 }
++                a.effort?.let { e ->
++                    val scale = UnitPrefs.effortScale(ctx)
++                    Text(
++                        uiString(
++                            R.string.victor_training_effort,
++                            UnitFormatter.effortDisplay(e, scale),
++                            UnitFormatter.effortScaleMax(scale),
++                            a.hrStrain?.let { UnitFormatter.effortDisplay(it, scale) } ?: "—",
++                        ),
++                        style = NoopType.subhead,
++                        color = Palette.textSecondary,
++                    )
++                }
+                 if (a.notes.isNotBlank()) Text(a.notes, style = NoopType.subhead, color = Palette.textSecondary)
+                 a.score?.let { s ->
+                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space8)) {
+diff --git a/android/app/src/main/java/com/noop/training/TrainingModels.kt b/android/app/src/main/java/com/noop/training/TrainingModels.kt
+index e78a233c..6293de35 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingModels.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingModels.kt
+@@ -76,6 +76,15 @@ data class TrainingAnalysis(
+     /** 0-10: how good and healthy the session was for this person on this day; null for older analyses. */
+     val score: Int? = null,
+     val scoreNote: String = "",
++    /** The strap's heart-rate Effort for the window (the app's 0-100 axis) when the analysis ran. */
++    val hrStrain: Double? = null,
++    /** Heart-rate samples in the window when the analysis ran: more arriving later means it is re-run. */
++    val hrSamples: Int = 0,
++    /**
++     * The session's Effort on the same 0-100 axis with the muscular load of the lifting added to what the
++     * heart rate measured (as WHOOP's Strength Trainer does); never below [hrStrain].
++     */
++    val effort: Double? = null,
+ )
+ 
+ data class TrainingSession(
+@@ -204,8 +213,8 @@ object TrainingEnergy {
+ 
+     /**
+      * Per local day: the extra of every analysed session whose workout still exists (a deleted workout
+-     * takes its session's energy with it). The row's current kcal wins over the one the analysis saw,
+-     * since a later strap sync can rescore the window.
++     * takes its session's energy with it). The heart-rate figure is the analysis's own: the row carries the
++     * best estimate ([applyToRow]), and the analysis is re-run when more of the strap's heart rate arrives.
+      */
+     fun extraByDay(
+         sessions: List<TrainingSession>,
+@@ -218,9 +227,30 @@ object TrainingEnergy {
+             val a = s.analysis ?: continue
+             val row = rows.firstOrNull { s.pairs(it) } ?: continue
+             val duration = row.durationS ?: (row.endTs - row.startTs).toDouble()
+-            val extra = extraKcal(a.totalKcal, row.energyKcal ?: a.hrKcal, duration, dailyBasalKcal)
++            val extra = extraKcal(a.totalKcal, a.hrKcal, duration, dailyBasalKcal)
+             if (extra > 0) out.merge(s.day(zone), extra, Double::plus)
+         }
+         return out
+     }
++
++    /**
++     * Whether an analysis that saw [seenSamples] heart-rate samples (null = never analysed) should run again
++     * now that the window holds [nowSamples]: never analysed, or a quarter more and at least a minute more.
++     */
++    fun needsReanalysis(seenSamples: Int?, nowSamples: Int): Boolean {
++        if (seenSamples == null) return true
++        return nowSamples >= seenSamples + maxOf(60, seenSamples / 4)
++    }
++
++    /**
++     * The workout row with the session's figures from its latest analysis, so the Workouts list, its detail
++     * and every total show them: energy = the larger of Claude's estimate and the heart-rate one, Effort = the
++     * larger of Claude's (with muscular load) and the heart-rate one, heart rate as freshly scored. A figure
++     * the analysis lacks keeps the row's.
++     */
++    fun applyToRow(row: WorkoutRow, a: TrainingAnalysis, avgHr: Int?, maxHr: Int?): WorkoutRow {
++        val kcal = listOfNotNull(a.totalKcal.takeIf { it > 0 }, a.hrKcal).maxOrNull() ?: row.energyKcal
++        val strain = listOfNotNull(a.effort, a.hrStrain).maxOrNull() ?: row.strain
++        return row.copy(energyKcal = kcal, strain = strain, avgHr = avgHr ?: row.avgHr, maxHr = maxHr ?: row.maxHr)
++    }
+ }
+diff --git a/android/app/src/main/java/com/noop/training/TrainingStore.kt b/android/app/src/main/java/com/noop/training/TrainingStore.kt
+index 2f3e4ede..634407c7 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingStore.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingStore.kt
+@@ -47,6 +47,9 @@ internal object TrainingStoreCodec {
+                             a.hrKcal?.let { put("hr_kcal", it) }
+                             a.score?.let { put("score", it) }
+                             if (a.scoreNote.isNotBlank()) put("score_note", a.scoreNote)
++                            a.hrStrain?.let { put("hr_strain", it) }
++                            if (a.hrSamples > 0) put("hr_samples", a.hrSamples)
++                            a.effort?.let { put("effort", it) }
+                         },
+                 )
+             }
+@@ -75,6 +78,9 @@ internal object TrainingStoreCodec {
+                     atMs = a.optLong("at", 0L),
+                     score = if (a.has("score")) a.optInt("score").coerceIn(0, 10) else null,
+                     scoreNote = a.optString("score_note"),
++                    hrStrain = optDouble(a, "hr_strain"),
++                    hrSamples = a.optInt("hr_samples", 0),
++                    effort = optDouble(a, "effort"),
+                 )
+             }
+             out += TrainingSession(
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
+index 6aa2934a..9e5f6235 100644
+--- a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
+@@ -124,9 +124,15 @@ object WeeklyReviews {
+             val at = Instant.ofEpochSecond(w.startTs).atZone(zone)
+             append("- ${at.toLocalDate()} ${at.format(HHMM)} ${w.sport}, ${((w.durationS ?: (w.endTs - w.startTs).toDouble()) / 60).roundToInt()} min")
+             w.avgHr?.let { append(", HR avg $it") }
+-            w.energyKcal?.let { append(", ${it.roundToInt()} kcal by HR") }
+-            w.strain?.let { append(", strain ${String.format(Locale.US, "%.1f", it)}") }
+-            sessions.firstOrNull { it.pairs(w) }?.let { s ->
++            val paired = sessions.firstOrNull { it.pairs(w) }
++            if (paired?.analysis == null) {
++                w.energyKcal?.let { append(", ${it.roundToInt()} kcal by HR") }
++                w.strain?.let { append(", effort ${String.format(Locale.US, "%.1f", it)}/100 by HR") }
++            } else {
++                paired.analysis.hrKcal?.let { append(", ${it.roundToInt()} kcal by HR") }
++                paired.analysis.effort?.let { append(", effort with muscular load ${it.roundToInt()}/100") }
++            }
++            paired?.let { s ->
+                 append("; exercises: ")
+                 append(s.exercises.joinToString("; ") { ex -> "${ex.name} ${TrainingFormat.summary(ex, s::performed, Locale.US).ifEmpty { "skipped" }}" })
+                 s.analysis?.let { a ->
+diff --git a/android/app/src/main/res/values-es/strings_victor_training.xml b/android/app/src/main/res/values-es/strings_victor_training.xml
+index ee9f8b22..15d2811c 100644
+--- a/android/app/src/main/res/values-es/strings_victor_training.xml
++++ b/android/app/src/main/res/values-es/strings_victor_training.xml
+@@ -66,4 +66,5 @@
+     <string name="victor_training_load_total">Total</string>
+     <string name="victor_training_load_per_hand">Por mancuerna</string>
+     <string name="victor_training_kg_each">kg c/u</string>
++    <string name="victor_training_effort">Esfuerzo con la carga muscular: %1$s/%2$s (solo por pulso %3$s)</string>
+ </resources>
+diff --git a/android/app/src/main/res/values/strings_victor_training.xml b/android/app/src/main/res/values/strings_victor_training.xml
+index 4f279a45..0b9d5b18 100644
+--- a/android/app/src/main/res/values/strings_victor_training.xml
++++ b/android/app/src/main/res/values/strings_victor_training.xml
+@@ -66,4 +66,5 @@
+     <string name="victor_training_load_total">Total</string>
+     <string name="victor_training_load_per_hand">Per dumbbell</string>
+     <string name="victor_training_kg_each">kg each</string>
++    <string name="victor_training_effort">Effort with the muscular load: %1$s/%2$s (heart rate alone %3$s)</string>
+ </resources>
+diff --git a/android/app/src/test/java/com/noop/training/TrainingTest.kt b/android/app/src/test/java/com/noop/training/TrainingTest.kt
+index 9dee5b0c..70a1873b 100644
+--- a/android/app/src/test/java/com/noop/training/TrainingTest.kt
++++ b/android/app/src/test/java/com/noop/training/TrainingTest.kt
+@@ -103,10 +103,10 @@ class TrainingTest {
+     }
+ 
+     @Test
+-    fun extraByDayNeedsTheWorkoutAndPrefersItsCurrentKcal() {
+-        assertEquals(mapOf("2026-10-19" to 160.0), TrainingEnergy.extraByDay(listOf(logged), listOf(row), 1800.0, madrid))
+-        // The analysis saw 210 kcal of heart rate, but the row has been rescored to 220 since.
+-        assertEquals(160.0, TrainingEnergy.extraByDay(listOf(logged), listOf(row), null, madrid).getValue("2026-10-19"), 1e-9)
++    fun extraByDayNeedsTheWorkoutAndUsesTheAnalysisHeartRateFigure() {
++        // 380 by Claude − 210 by heart rate (the analysis's own; the row now carries the best estimate).
++        assertEquals(mapOf("2026-10-19" to 170.0), TrainingEnergy.extraByDay(listOf(logged), listOf(row), 1800.0, madrid))
++        assertEquals(170.0, TrainingEnergy.extraByDay(listOf(logged), listOf(row.copy(energyKcal = 380.0)), null, madrid).getValue("2026-10-19"), 1e-9)
+         assertEquals(emptyMap<String, Double>(), TrainingEnergy.extraByDay(listOf(logged), emptyList(), 1800.0, madrid))
+         assertEquals(emptyMap<String, Double>(), TrainingEnergy.extraByDay(listOf(logged.copy(analysis = null)), listOf(row), 1800.0, madrid))
+     }
+@@ -231,7 +231,7 @@ class TrainingTest {
+         assertNotNull(line)
+         assertTrue(line!!.startsWith("TRAINING LOG last 14 days"))
+         assertTrue(line.contains("2026-10-19 17:00-18:00 Strength (logged afterwards): Pecho 5×5 · 20 kg (HR avg 121, max 150); Dominadas 5×5; Cinta 10 min + 1.5 km"))
+-        assertTrue(line.contains("HR avg 118, max 152, strap HR estimate 220 kcal | Claude estimate 380 kcal (adds ~160 kcal to the day's burn)"))
++        assertTrue(line.contains("HR avg 118, max 152, strap HR estimate 210 kcal | Claude estimate 380 kcal (adds ~170 kcal to the day's burn)"))
+         assertNull(TrainingCoachContext.line(listOf(logged), emptyList(), emptyMap(), madrid))
+     }
+ 
+@@ -284,4 +284,35 @@ class TrainingTest {
+         assertTrue(line.contains("session score 8/10 («Bien»)"))
+         assertTrue(TrainingAi.kcalPrompt(logged, "x", 60, null, null, null, null, emptyMap()).contains("score, an integer 0-10"))
+     }
++
++    @Test
++    fun theWorkoutRowShowsTheSessionsBestFiguresAndHeartRateArrivingLaterTriggersANewOne() {
++        val a = logged.analysis!!.copy(hrKcal = 263.0, hrStrain = 18.0, hrSamples = 1200, effort = 52.0)
++        val updated = TrainingEnergy.applyToRow(row.copy(energyKcal = 263.0, strain = 18.0), a, 121, 158)
++        assertEquals(380.0, updated.energyKcal!!, 0.0)
++        assertEquals(52.0, updated.strain!!, 0.0)
++        assertEquals(121, updated.avgHr)
++        // Steady cardio: heart rate above Claude stays; no effort from Claude keeps the heart-rate one.
++        val cardio = TrainingEnergy.applyToRow(row, a.copy(totalKcal = 300.0, hrKcal = 450.0, effort = null), null, null)
++        assertEquals(450.0, cardio.energyKcal!!, 0.0)
++        assertEquals(18.0, cardio.strain!!, 0.0)
++        assertEquals(118, cardio.avgHr)
++
++        assertTrue(TrainingEnergy.needsReanalysis(null, 0))
++        assertTrue(TrainingEnergy.needsReanalysis(0, 60))
++        assertFalse(TrainingEnergy.needsReanalysis(0, 59))
++        assertFalse(TrainingEnergy.needsReanalysis(1200, 1400))
++        assertTrue(TrainingEnergy.needsReanalysis(1200, 1500))
++
++        val parsed = TrainingAi.parseKcal(JSONObject("""{"total_kcal":430,"effort":55.5,"score":7}"""), 1L)!!
++        assertEquals(55.5, parsed.effort!!, 0.0)
++        assertNull(TrainingAi.parseKcal(JSONObject("""{"total_kcal":430,"effort":-3}"""), 1L)!!.effort)
++        val stored = logged.copy(analysis = a)
++        assertEquals(listOf(stored), TrainingStoreCodec.decode(TrainingStoreCodec.encode(listOf(stored))))
++        val prompt = TrainingAi.kcalPrompt(logged, "x", 70, null, null, null, TrainingAi.HrFacts(118, 152, 1200, 70, 263.0, 18.0), emptyMap())
++        assertTrue(prompt.contains("heart-rate effort 18.0 on the 0-100 axis"))
++        assertTrue(prompt.contains("Strength Trainer"))
++        val line = TrainingCoachContext.line(listOf(stored), listOf(row), emptyMap(), madrid)!!
++        assertTrue(line.contains("effort with muscular load 52/100 (heart rate alone 18)"))
++    }
+ }
+-- 
+2.54.0
+
