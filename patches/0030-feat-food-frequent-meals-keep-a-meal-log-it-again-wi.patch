@@ -1,0 +1,617 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Mon, 19 Oct 2026 14:23:27 +0200
+Subject: [PATCH] =?UTF-8?q?feat(food):=20frequent=20meals=20=E2=80=94=20ke?=
+ =?UTF-8?q?ep=20a=20meal,=20log=20it=20again=20with=20one=20tap?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A meal eaten every day (the same breakfast) no longer needs a photo: the
+review sheet offers to keep its foods as a frequent meal, and the Food tab
+shows those as chips. A tap logs the meal now on the clock's day and meal,
+editable or deletable like any other; a long press drops the chip. Stored
+in the food log JSON beside the meals (older logs read without it).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/main/java/com/noop/food/FoodDraft.kt  |   5 +-
+ .../src/main/java/com/noop/food/FoodModels.kt |  44 ++++++
+ .../src/main/java/com/noop/food/FoodScreen.kt |  63 +++++++++
+ .../src/main/java/com/noop/food/FoodSheet.kt  |  15 ++
+ .../src/main/java/com/noop/food/FoodStore.kt  | 129 ++++++++++++++----
+ .../main/java/com/noop/food/FoodViewModel.kt  |  21 +++
+ .../res/values-es/strings_victor_food.xml     |   7 +
+ .../main/res/values/strings_victor_food.xml   |   7 +
+ .../java/com/noop/food/FoodFavoriteTest.kt    |  72 ++++++++++
+ 9 files changed, 335 insertions(+), 28 deletions(-)
+ create mode 100644 android/app/src/test/java/com/noop/food/FoodFavoriteTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/food/FoodDraft.kt b/android/app/src/main/java/com/noop/food/FoodDraft.kt
+index 5a6351ae..5e4f7338 100644
+--- a/android/app/src/main/java/com/noop/food/FoodDraft.kt
++++ b/android/app/src/main/java/com/noop/food/FoodDraft.kt
+@@ -93,6 +93,8 @@ class FoodDraft(
+     val error: FoodError? = null,
+     val errorDetail: String? = null,
+     val saving: Boolean = false,
++    /** Also keep these foods as a frequent meal when saved. */
++    val asFavorite: Boolean = false,
+ ) {
+     fun copy(
+         timestamp: Long = this.timestamp,
+@@ -108,9 +110,10 @@ class FoodDraft(
+         error: FoodError? = this.error,
+         errorDetail: String? = this.errorDetail,
+         saving: Boolean = this.saving,
++        asFavorite: Boolean = this.asFavorite,
+     ) = FoodDraft(
+         entryId, timestamp, day, meal, note, items, photos, thumbPaths,
+-        confidence, aiNotes, stage, analyzed, error, errorDetail, saving,
++        confidence, aiNotes, stage, analyzed, error, errorDetail, saving, asFavorite,
+     )
+ 
+     val totals: FoodTotals get() = FoodTotals.ofItems(items.map { it.toItem() })
+diff --git a/android/app/src/main/java/com/noop/food/FoodModels.kt b/android/app/src/main/java/com/noop/food/FoodModels.kt
+index 8fcea86f..72645a8b 100644
+--- a/android/app/src/main/java/com/noop/food/FoodModels.kt
++++ b/android/app/src/main/java/com/noop/food/FoodModels.kt
+@@ -150,3 +150,47 @@ object FoodDays {
+ /** Finite, non-negative, one decimal. */
+ internal fun round1(v: Double): Double =
+     if (!v.isFinite() || v <= 0.0) 0.0 else (v * 10.0).roundToLong() / 10.0
++
++/**
++ * victor:food — a meal eaten again and again (the same breakfast every day): its foods with their
++ * macros, logged again with one tap instead of a photo. [lastUsed] orders the chips, most recent first.
++ */
++data class FoodFavorite(
++    val id: String,
++    val items: List<FoodItem>,
++    val createdAt: Long,
++    val lastUsed: Long = createdAt,
++) {
++    val totals: FoodTotals get() = FoodTotals.ofItems(items)
++
++    val label: String get() = items.joinToString(", ") { it.name.trim() }.trim().ifEmpty { "—" }
++
++    /** The same foods in the same amounts, in any order: saving it again would only add a twin chip. */
++    fun sameFoods(other: List<FoodItem>): Boolean = key(items) == key(other)
++
++    /** A new meal at [timestampMs]: these foods, on the day and meal the clock says (both editable later). */
++    fun toEntry(id: String, timestampMs: Long, zone: ZoneId = ZoneId.systemDefault()): FoodEntry {
++        val t = totals
++        return FoodEntry(
++            id = id,
++            timestamp = timestampMs,
++            day = FoodDays.dayOf(timestampMs, zone),
++            note = "",
++            items = items,
++            kcal = t.kcal,
++            proteinG = t.proteinG,
++            carbsG = t.carbsG,
++            fatG = t.fatG,
++            thumbnailPaths = emptyList(),
++            meal = MealType.forTimestamp(timestampMs, zone),
++        )
++    }
++
++    companion object {
++        /** Enough for every routine meal; the oldest-used drop off beyond it. */
++        const val MAX = 24
++
++        private fun key(items: List<FoodItem>): List<String> =
++            items.map { "${it.name.trim().lowercase()}|${round1(it.kcal)}" }.sorted()
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+index 1ad43f65..9c8a7e3d 100644
+--- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
++++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+@@ -10,10 +10,14 @@ import androidx.activity.result.PickVisualMediaRequest
+ import androidx.activity.result.contract.ActivityResultContracts
+ import androidx.compose.foundation.Image
+ import androidx.compose.foundation.background
++import androidx.compose.foundation.ExperimentalFoundationApi
+ import androidx.compose.foundation.clickable
++import androidx.compose.foundation.combinedClickable
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.ExperimentalLayoutApi
++import androidx.compose.foundation.layout.FlowRow
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.fillMaxWidth
+@@ -97,6 +101,7 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+     val food: FoodViewModel = viewModel()
+     val entries by food.entries.collectAsStateWithLifecycle()
+     val draft by food.draft.collectAsStateWithLifecycle()
++    val favorites by food.favorites.collectAsStateWithLifecycle()
+     val notice by food.notice.collectAsStateWithLifecycle()
+     val locale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
+ 
+@@ -156,6 +161,7 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+     fun startGallery() = pickPhotos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+ 
+     var confirmDelete by remember { mutableStateOf<FoodEntry?>(null) }
++    var confirmUnfavorite by remember { mutableStateOf<FoodFavorite?>(null) }
+     // 0 = today (log a meal), 1 = history (charts, real burn, previous days).
+     var tab by rememberSaveable { mutableStateOf(0) }
+     val kcalTarget = VictorGoalsStore.load(ctx).dailyKcalTarget
+@@ -188,6 +194,9 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+                     ) { startGallery() }
+                 }
+             }
++            if (favorites.isNotEmpty()) {
++                item { FavoritesCard(favorites, onLog = food::logFavorite, onRemove = { confirmUnfavorite = it }) }
++            }
+             item {
+                 NoopCard {
+                     Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
+@@ -226,6 +235,28 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+ 
+     draft?.let { FoodSheet(it, food, onOpenCoach, onAddCamera = ::startCamera, onAddGallery = ::startGallery) }
+ 
++    confirmUnfavorite?.let { fav ->
++        AlertDialog(
++            onDismissRequest = { confirmUnfavorite = null },
++            containerColor = Palette.surfaceOverlay,
++            title = { Text(uiString(R.string.victor_food_fav_remove_title), style = NoopType.title2, color = Palette.textPrimary) },
++            text = { Text(fav.label, style = NoopType.subhead, color = Palette.textSecondary) },
++            confirmButton = {
++                TextButton(onClick = {
++                    food.removeFavorite(fav)
++                    confirmUnfavorite = null
++                }) {
++                    Text(uiString(R.string.victor_food_fav_remove), style = NoopType.body, color = Palette.statusCritical)
++                }
++            },
++            dismissButton = {
++                TextButton(onClick = { confirmUnfavorite = null }) {
++                    Text(uiString(R.string.victor_food_cancel), style = NoopType.body, color = Palette.textSecondary)
++                }
++            },
++        )
++    }
++
+     confirmDelete?.let { entry ->
+         AlertDialog(
+             onDismissRequest = { confirmDelete = null },
+@@ -249,6 +280,38 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+     }
+ }
+ 
++/** The frequent meals: a tap logs one now, a long press offers to drop it. */
++@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
++@Composable
++private fun FavoritesCard(favorites: List<FoodFavorite>, onLog: (FoodFavorite) -> Unit, onRemove: (FoodFavorite) -> Unit) {
++    NoopCard {
++        Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
++            Overline(uiString(R.string.victor_food_fav_title))
++            FlowRow(
++                horizontalArrangement = Arrangement.spacedBy(Metrics.space8),
++                verticalArrangement = Arrangement.spacedBy(Metrics.space8),
++            ) {
++                favorites.forEach { fav ->
++                    Column(
++                        modifier = Modifier
++                            .clip(RoundedCornerShape(Metrics.cornerSm))
++                            .background(Palette.surfaceInset)
++                            .combinedClickable(onClick = { onLog(fav) }, onLongClick = { onRemove(fav) })
++                            .padding(horizontal = Metrics.space12, vertical = Metrics.space8),
++                    ) {
++                        Text(fav.label, style = NoopType.subhead, color = Palette.textPrimary, maxLines = 2, overflow = TextOverflow.Ellipsis)
++                        Text(
++                            "${whole(fav.totals.kcal)} ${uiString(R.string.victor_food_kcal)}",
++                            style = NoopType.caption,
++                            color = Palette.textSecondary,
++                        )
++                    }
++                }
++            }
++        }
++    }
++}
++
+ @Composable
+ private fun DayCard(
+     vm: AppViewModel,
+diff --git a/android/app/src/main/java/com/noop/food/FoodSheet.kt b/android/app/src/main/java/com/noop/food/FoodSheet.kt
+index ecdd3ab2..8abd2fbb 100644
+--- a/android/app/src/main/java/com/noop/food/FoodSheet.kt
++++ b/android/app/src/main/java/com/noop/food/FoodSheet.kt
+@@ -51,6 +51,7 @@ import androidx.compose.ui.platform.LocalConfiguration
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.text.input.KeyboardType
+ import androidx.compose.ui.unit.dp
++import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import com.noop.R
+ import com.noop.ui.Metrics
+ import com.noop.ui.NoopButton
+@@ -244,6 +245,7 @@ private fun ReviewContent(draft: FoodDraft, previews: List<ImageBitmap?>, food:
+         }
+     }
+ 
++    FavoriteToggle(draft, food)
+     WhenPicker(draft, food)
+     NoteField(draft.note, food::setNote)
+     NoopButton(
+@@ -271,6 +273,19 @@ private fun ReviewContent(draft: FoodDraft, previews: List<ImageBitmap?>, food:
+     }
+ }
+ 
++/** "Guardar en frecuentes" for foods that are not one yet; a quiet mark when they already are. */
++@Composable
++private fun FavoriteToggle(draft: FoodDraft, food: FoodViewModel) {
++    val favorites by food.favorites.collectAsStateWithLifecycle()
++    val items = draft.items.filter { it.isMeaningful }.map { it.toItem() }
++    if (items.isEmpty()) return
++    if (favorites.any { it.sameFoods(items) }) {
++        Text(uiString(R.string.victor_food_fav_already), style = NoopType.caption, color = Palette.textSecondary)
++    } else {
++        FoodChip(uiString(R.string.victor_food_fav_keep), selected = draft.asFavorite) { food.setAsFavorite(!draft.asFavorite) }
++    }
++}
++
+ @Composable
+ private fun ItemEditor(item: FoodItemDraft, onChange: (FoodItemDraft) -> Unit, onRemove: () -> Unit) {
+     NoopCard(padding = Metrics.space12) {
+diff --git a/android/app/src/main/java/com/noop/food/FoodStore.kt b/android/app/src/main/java/com/noop/food/FoodStore.kt
+index 95f2a583..b4588ffe 100644
+--- a/android/app/src/main/java/com/noop/food/FoodStore.kt
++++ b/android/app/src/main/java/com/noop/food/FoodStore.kt
+@@ -18,6 +18,8 @@ internal data class FoodState(
+     val entries: List<FoodEntry> = emptyList(),
+     /** Per day, the totals the photo log last wrote into the nutrition lane (see FoodNutritionSync). */
+     val synced: Map<String, FoodTotals> = emptyMap(),
++    /** Meals logged again with one tap, most recently used first. */
++    val favorites: List<FoodFavorite> = emptyList(),
+ )
+ 
+ /**
+@@ -31,19 +33,7 @@ internal object FoodStoreCodec {
+     fun encode(state: FoodState): String {
+         val entries = JSONArray()
+         for (e in state.entries) {
+-            val items = JSONArray()
+-            for (i in e.items) {
+-                items.put(
+-                    JSONObject()
+-                        .put("name", i.name)
+-                        .put("portion", i.portion)
+-                        .put("kcal", i.kcal)
+-                        .put("protein_g", i.proteinG)
+-                        .put("carbs_g", i.carbsG)
+-                        .put("fat_g", i.fatG)
+-                        .apply { if (i.eaten != 1.0) put("eaten", i.eaten) },
+-                )
+-            }
++            val items = itemsJson(e.items)
+             val o = JSONObject()
+                 .put("id", e.id)
+                 .put("ts", e.timestamp)
+@@ -62,10 +52,21 @@ internal object FoodStoreCodec {
+         }
+         val synced = JSONObject()
+         for ((day, t) in state.synced.toSortedMap()) synced.put(day, totalsJson(t))
++        val favorites = JSONArray()
++        for (f in state.favorites) {
++            favorites.put(
++                JSONObject()
++                    .put("id", f.id)
++                    .put("created", f.createdAt)
++                    .put("last_used", f.lastUsed)
++                    .put("items", itemsJson(f.items)),
++            )
++        }
+         return JSONObject()
+             .put("version", VERSION)
+             .put("entries", entries)
+             .put("synced", synced)
++            .put("favorites", favorites)
+             .toString()
+     }
+ 
+@@ -78,19 +79,7 @@ internal object FoodStoreCodec {
+             val o = arr.optJSONObject(n) ?: continue
+             val id = o.optString("id").takeIf { it.isNotBlank() } ?: continue
+             val ts = o.optLong("ts", 0L)
+-            val itemsArr = o.optJSONArray("items") ?: JSONArray()
+-            val items = (0 until itemsArr.length()).mapNotNull { i ->
+-                val io = itemsArr.optJSONObject(i) ?: return@mapNotNull null
+-                FoodItem(
+-                    name = io.optString("name"),
+-                    portion = io.optString("portion"),
+-                    kcal = round1(io.optDouble("kcal", 0.0)),
+-                    proteinG = round1(io.optDouble("protein_g", 0.0)),
+-                    carbsG = round1(io.optDouble("carbs_g", 0.0)),
+-                    fatG = round1(io.optDouble("fat_g", 0.0)),
+-                    eaten = FoodItemDraft.sanitizeEaten(io.optDouble("eaten", 1.0)),
+-                )
+-            }
++            val items = itemsOf(o.optJSONArray("items"))
+             // Before several photos a meal had one "thumb"; before meal types the clock decides.
+             val thumbs = o.optJSONArray("thumbs")?.let { a ->
+                 (0 until a.length()).mapNotNull { a.optString(it).takeIf { p -> p.isNotBlank() } }
+@@ -123,7 +112,50 @@ internal object FoodStoreCodec {
+                 )
+             }
+         }
+-        return FoodState(entries.sortedBy { it.timestamp }, synced)
++        val favorites = ArrayList<FoodFavorite>()
++        root.optJSONArray("favorites")?.let { a ->
++            for (n in 0 until a.length()) {
++                val o = a.optJSONObject(n) ?: continue
++                val id = o.optString("id").takeIf { it.isNotBlank() } ?: continue
++                val items = itemsOf(o.optJSONArray("items")).takeIf { it.isNotEmpty() } ?: continue
++                val created = o.optLong("created", 0L)
++                favorites += FoodFavorite(id, items, created, o.optLong("last_used", created))
++            }
++        }
++        return FoodState(entries.sortedBy { it.timestamp }, synced, favorites.sortedByDescending { it.lastUsed })
++    }
++
++    private fun itemsJson(items: List<FoodItem>): JSONArray {
++        val arr = JSONArray()
++        for (i in items) {
++            arr.put(
++                JSONObject()
++                    .put("name", i.name)
++                    .put("portion", i.portion)
++                    .put("kcal", i.kcal)
++                    .put("protein_g", i.proteinG)
++                    .put("carbs_g", i.carbsG)
++                    .put("fat_g", i.fatG)
++                    .apply { if (i.eaten != 1.0) put("eaten", i.eaten) },
++            )
++        }
++        return arr
++    }
++
++    private fun itemsOf(arr: JSONArray?): List<FoodItem> {
++        if (arr == null) return emptyList()
++        return (0 until arr.length()).mapNotNull { i ->
++            val io = arr.optJSONObject(i) ?: return@mapNotNull null
++            FoodItem(
++                name = io.optString("name"),
++                portion = io.optString("portion"),
++                kcal = round1(io.optDouble("kcal", 0.0)),
++                proteinG = round1(io.optDouble("protein_g", 0.0)),
++                carbsG = round1(io.optDouble("carbs_g", 0.0)),
++                fatG = round1(io.optDouble("fat_g", 0.0)),
++                eaten = FoodItemDraft.sanitizeEaten(io.optDouble("eaten", 1.0)),
++            )
++        }
+     }
+ 
+     private fun totalsJson(t: FoodTotals) = JSONObject()
+@@ -152,6 +184,10 @@ object FoodStore {
+     /** The log, oldest first. Empty until the first [load]. */
+     val entries: StateFlow<List<FoodEntry>> = _entries.asStateFlow()
+ 
++    private val _favorites = MutableStateFlow<List<FoodFavorite>>(emptyList())
++    /** The frequent meals, most recently used first. Empty until the first [load]. */
++    val favorites: StateFlow<List<FoodFavorite>> = _favorites.asStateFlow()
++
+     fun foodDir(ctx: Context): File = File(ctx.applicationContext.filesDir, DIR)
+ 
+     /** Resolve one of an entry's relative [FoodEntry.thumbnailPaths]. */
+@@ -203,6 +239,43 @@ object FoodStore {
+         }
+     }
+ 
++    /** Keep [items] as a frequent meal; a no-op when the same foods already are one. */
++    suspend fun addFavorite(ctx: Context, id: String, items: List<FoodItem>, nowMs: Long) = withContext(Dispatchers.IO) {
++        mutex.withLock {
++            val current = state(ctx)
++            if (items.isEmpty() || current.favorites.any { it.sameFoods(items) }) return@withLock
++            val next = listOf(FoodFavorite(id, items, nowMs)) + current.favorites
++            persist(ctx, current.copy(favorites = next.take(FoodFavorite.MAX)))
++        }
++    }
++
++    suspend fun removeFavorite(ctx: Context, id: String) = withContext(Dispatchers.IO) {
++        mutex.withLock {
++            val current = state(ctx)
++            if (current.favorites.none { it.id == id }) return@withLock
++            persist(ctx, current.copy(favorites = current.favorites.filterNot { it.id == id }))
++        }
++    }
++
++    /**
++     * Log the frequent meal [favoriteId] at [nowMs] as a new meal (then re-sync its day into the lane) and
++     * move its chip to the front. Returns the new entry, or null when that frequent meal is gone.
++     */
++    suspend fun logFavorite(ctx: Context, repo: WhoopRepository, favoriteId: String, entryId: String, nowMs: Long): FoodEntry? =
++        withContext(Dispatchers.IO) {
++            mutex.withLock {
++                val current = state(ctx)
++                val fav = current.favorites.firstOrNull { it.id == favoriteId } ?: return@withLock null
++                val entry = fav.toEntry(entryId, nowMs)
++                val favorites = listOf(fav.copy(lastUsed = nowMs)) + current.favorites.filterNot { it.id == favoriteId }
++                var next = current.copy(entries = (current.entries + entry).sortedBy { it.timestamp }, favorites = favorites)
++                persist(ctx, next)
++                next = syncDays(repo, next, setOf(entry.day))
++                persist(ctx, next)
++                entry
++            }
++        }
++
+     /**
+      * Repair pass: re-sync every day whose ledger disagrees with its entries (a write that failed
+      * half-way, e.g. the app was killed between the file and the DB). It compares the ledger with
+@@ -247,6 +320,7 @@ object FoodStore {
+         }
+         cache = loaded
+         _entries.value = loaded.entries
++        _favorites.value = loaded.favorites
+         return loaded
+     }
+ 
+@@ -261,5 +335,6 @@ object FoodStore {
+         }
+         cache = state
+         _entries.value = state.entries
++        _favorites.value = state.favorites
+     }
+ }
+diff --git a/android/app/src/main/java/com/noop/food/FoodViewModel.kt b/android/app/src/main/java/com/noop/food/FoodViewModel.kt
+index db05fd92..3fb221b5 100644
+--- a/android/app/src/main/java/com/noop/food/FoodViewModel.kt
++++ b/android/app/src/main/java/com/noop/food/FoodViewModel.kt
+@@ -26,6 +26,8 @@ class FoodViewModel(app: Application) : AndroidViewModel(app) {
+ 
+     val entries: StateFlow<List<FoodEntry>> = FoodStore.entries
+ 
++    val favorites: StateFlow<List<FoodFavorite>> = FoodStore.favorites
++
+     private val _draft = MutableStateFlow<FoodDraft?>(null)
+     val draft: StateFlow<FoodDraft?> = _draft.asStateFlow()
+ 
+@@ -104,6 +106,22 @@ class FoodViewModel(app: Application) : AndroidViewModel(app) {
+ 
+     fun setNote(note: String) = _draft.update { it?.copy(note = note.take(MAX_NOTE)) }
+ 
++    fun setAsFavorite(on: Boolean) = _draft.update { it?.copy(asFavorite = on) }
++
++    /** One tap on a frequent meal: logged now, editable or deletable like any other meal. */
++    fun logFavorite(fav: FoodFavorite) {
++        viewModelScope.launch {
++            val ok = runCatching {
++                FoodStore.logFavorite(getApplication(), repo, fav.id, UUID.randomUUID().toString(), System.currentTimeMillis())
++            }.getOrNull() != null
++            _notice.value = if (ok) R.string.victor_food_fav_logged else R.string.victor_food_save_failed
++        }
++    }
++
++    fun removeFavorite(fav: FoodFavorite) {
++        viewModelScope.launch { runCatching { FoodStore.removeFavorite(getApplication(), fav.id) } }
++    }
++
+     fun analyze() {
+         val d = _draft.value ?: return
+         if (d.photos.isEmpty()) return
+@@ -201,6 +219,9 @@ class FoodViewModel(app: Application) : AndroidViewModel(app) {
+         _draft.value = d.copy(saving = true)
+         viewModelScope.launch {
+             val ok = runCatching { FoodStore.save(getApplication(), repo, entry, d.photos.map { it.thumb }.ifEmpty { null }) }.isSuccess
++            if (ok && d.asFavorite) {
++                runCatching { FoodStore.addFavorite(getApplication(), UUID.randomUUID().toString(), items, System.currentTimeMillis()) }
++            }
+             if (ok) {
+                 _draft.value = null
+             } else {
+diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
+index 4a7cef24..a51346df 100644
+--- a/android/app/src/main/res/values-es/strings_victor_food.xml
++++ b/android/app/src/main/res/values-es/strings_victor_food.xml
+@@ -123,4 +123,11 @@
+     <string name="victor_food_history_half">6 meses</string>
+     <string name="victor_food_history_year">1 año</string>
+     <string name="victor_food_history_per_week">media por semana</string>
++
++    <string name="victor_food_fav_title">Frecuentes</string>
++    <string name="victor_food_fav_keep">☆ Guardar en frecuentes</string>
++    <string name="victor_food_fav_already">★ En frecuentes</string>
++    <string name="victor_food_fav_logged">Apuntada. Tócala para cambiar la cantidad.</string>
++    <string name="victor_food_fav_remove_title">¿Quitar de frecuentes?</string>
++    <string name="victor_food_fav_remove">Quitar</string>
+ </resources>
+diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
+index fc039a2f..3d7823d5 100644
+--- a/android/app/src/main/res/values/strings_victor_food.xml
++++ b/android/app/src/main/res/values/strings_victor_food.xml
+@@ -123,4 +123,11 @@
+     <string name="victor_food_history_half">6 months</string>
+     <string name="victor_food_history_year">1 year</string>
+     <string name="victor_food_history_per_week">weekly average</string>
++
++    <string name="victor_food_fav_title">Frequent</string>
++    <string name="victor_food_fav_keep">☆ Keep as frequent</string>
++    <string name="victor_food_fav_already">★ In frequent</string>
++    <string name="victor_food_fav_logged">Logged. Tap it to change the amount.</string>
++    <string name="victor_food_fav_remove_title">Remove from frequent?</string>
++    <string name="victor_food_fav_remove">Remove</string>
+ </resources>
+diff --git a/android/app/src/test/java/com/noop/food/FoodFavoriteTest.kt b/android/app/src/test/java/com/noop/food/FoodFavoriteTest.kt
+new file mode 100644
+index 00000000..268f3e40
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/food/FoodFavoriteTest.kt
+@@ -0,0 +1,72 @@
++package com.noop.food
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.time.ZoneId
++
++/** victor:food — frequent meals: what counts as the same meal, what one tap logs, and the JSON round trip. */
++class FoodFavoriteTest {
++
++    private val madrid = ZoneId.of("Europe/Madrid")
++
++    private val breakfast = FoodFavorite(
++        id = "f1",
++        items = listOf(
++            FoodItem("Plátano", "1 mediano", 105.0, 1.3, 27.0, 0.4),
++            FoodItem("Café con leche", "1 taza", 60.0, 3.0, 5.0, 3.0),
++            FoodItem("Huevos a la plancha", "2 huevos", 180.0, 12.6, 1.0, 13.0, eaten = 1.0),
++        ),
++        createdAt = 1_792_000_000_000L,
++        lastUsed = 1_792_100_000_000L,
++    )
++
++    @Test
++    fun sameFoodsIgnoresOrderCaseAndSpacesButNotAmounts() {
++        val reordered = listOf(
++            FoodItem(" huevos a la plancha", "", 180.0, 0.0, 0.0, 0.0),
++            FoodItem("PLÁTANO", "", 105.0, 0.0, 0.0, 0.0),
++            FoodItem("café con leche ", "", 60.0, 0.0, 0.0, 0.0),
++        )
++        assertTrue(breakfast.sameFoods(reordered))
++        assertFalse(breakfast.sameFoods(reordered.dropLast(1)))
++        assertFalse(breakfast.sameFoods(reordered.map { if (it.name.contains("PLÁTANO")) it.copy(kcal = 210.0) else it }))
++    }
++
++    @Test
++    fun oneTapLogsTheSameFoodsOnTheClocksDayAndMeal() {
++        // 2026-10-19 08:30 in Madrid (UTC+2).
++        val ts = 1_792_391_400_000L
++        val e = breakfast.toEntry("e9", ts, madrid)
++        assertEquals("e9", e.id)
++        assertEquals("2026-10-19", e.day)
++        assertEquals(MealType.BREAKFAST, e.meal)
++        assertEquals(breakfast.items, e.items)
++        assertEquals(345.0, e.kcal, 0.0)
++        assertEquals(16.9, e.proteinG, 0.0)
++        assertEquals(emptyList<String>(), e.thumbnailPaths)
++    }
++
++    @Test
++    fun labelJoinsTheFoods() {
++        assertEquals("Plátano, Café con leche, Huevos a la plancha", breakfast.label)
++    }
++
++    @Test
++    fun favoritesRoundTripNewestFirstAndOldLogsReadWithout() {
++        val older = FoodFavorite("f0", listOf(FoodItem("Yogur", "1", 90.0, 4.0, 12.0, 3.0)), 1L, 2L)
++        val state = FoodState(favorites = listOf(older, breakfast))
++        val decoded = FoodStoreCodec.decode(FoodStoreCodec.encode(state))
++        assertEquals(listOf(breakfast, older), decoded.favorites)
++
++        val before = """{"version":1,"entries":[]}"""
++        assertEquals(emptyList<FoodFavorite>(), FoodStoreCodec.decode(before).favorites)
++    }
++
++    @Test
++    fun aFavoriteWithoutFoodsIsDropped() {
++        val json = """{"version":1,"entries":[],"favorites":[{"id":"x","created":1,"items":[]}]}"""
++        assertEquals(emptyList<FoodFavorite>(), FoodStoreCodec.decode(json).favorites)
++    }
++}
+-- 
+2.54.0
+

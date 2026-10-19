@@ -15,7 +15,10 @@ con extras propios y firma propia estable:
 - **Báscula** (p. ej. Hume vía Samsung Health → Health Connect): peso, grasa, masa magra, ósea, agua y
   metabolismo basal en una tarjeta de Health.
 - **Comida por foto**: pestaña Comida; Claude estima calorías y macros (varias fotos, tipo de comida,
-  día y porción comida), editables antes de guardar.
+  día y porción comida), editables antes de guardar. Comidas **frecuentes** que se apuntan de un toque.
+- **Entrenos con tus palabras**: dictas o escribes el entreno («3×5 de press banca con 20 kilos…»),
+  Claude lo pasa a ejercicios y series; en directo marcas cada serie, o lo registras después con su hora.
+  Claude estima las calorías con los pesos, tu cuerpo y el pulso, y lo que el pulso no ve se suma al día.
 - **Mi día** en Hoy: peso de la báscula, agenda del calendario del móvil y Google Tasks de hoy.
 - **Toda la app en español**, con el español de upstream repasado.
 - **Auto-actualización**: cada versión nueva del proyecto original se reconstruye y firma aquí
@@ -64,8 +67,10 @@ servidor, cuenta ni telemetría de este proyecto. Solo sale algo del móvil cuan
   El acceso se retira desde la app o en myaccount.google.com → Seguridad.
 - **Calendario**: se lee del propio móvil; solo sale de él si el usuario activa «Agenda y tareas» en el
   coach (títulos y horas de hoy y mañana).
-- **Coach IA y comida por foto** (opcional): el resumen o la foto van a Anthropic con la clave del
-  propio usuario, solo al pulsar el botón correspondiente. Anthropic no entrena con los datos de su API.
+- **Coach IA, comida por foto y entrenos** (opcional): el resumen, la foto o la descripción del entreno
+  van a Anthropic con la clave del propio usuario: al pulsar el botón correspondiente y, en un entreno con
+  ejercicios, al terminarlo (un resumen de series, perfil, báscula y pulso para estimar sus calorías).
+  Anthropic no entrena con los datos de su API.
 
 El uso de la información recibida de las APIs de Google cumple la
 [Política de Datos del Usuario de los Servicios de las APIs de Google](https://developers.google.com/terms/api-services-user-data-policy),
