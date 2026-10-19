@@ -1,0 +1,296 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Mon, 19 Oct 2026 15:39:07 +0200
+Subject: [PATCH] feat(training): dumbbell weight per hand or in total
+
+'Mancuernas de 20' is 20 kg in each hand, twice '20 kilos entre las dos'.
+Each strength exercise now records whether its kg is per dumbbell (one in
+each hand) or the whole load: Claude reads it from the words (per hand when
+dumbbells are said and nothing tells otherwise, with a note) and proposes
+per-dumbbell loads in suggestions; the editor has a Total / Per dumbbell
+switch, sets read '20 kg c/u', and the energy estimate and the coach are told
+the load moved is twice the number.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../main/java/com/noop/training/TrainingAi.kt | 12 ++++++++-
+ .../java/com/noop/training/TrainingEditor.kt  | 11 ++++++--
+ .../com/noop/training/TrainingLivePanel.kt    |  4 +--
+ .../java/com/noop/training/TrainingModels.kt  | 24 +++++++++++++-----
+ .../java/com/noop/training/TrainingStore.kt   |  2 ++
+ .../res/values-es/strings_victor_training.xml |  4 +++
+ .../res/values/strings_victor_training.xml    |  4 +++
+ .../java/com/noop/training/TrainingTest.kt    | 25 ++++++++++++++++++-
+ 8 files changed, 74 insertions(+), 12 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/training/TrainingAi.kt b/android/app/src/main/java/com/noop/training/TrainingAi.kt
+index fb950157..f79d134c 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingAi.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingAi.kt
+@@ -166,6 +166,7 @@ object TrainingAi {
+             "minutes" to type("number"),
+             "km" to type("number"),
+             "note" to type("string"),
++            "load" to JSONObject().put("type", "string").put("enum", JSONArray(listOf("total", "per_hand"))),
+         )
+         return obj(
+             "sport" to type("string"),
+@@ -191,6 +192,10 @@ object TrainingAi {
+         append("are three sets of 5 reps at 20 kg. kg is the load as said (for dumbbells, what the user says); 0 for body weight ")
+         append("or when no load is said. Timed holds (plank): seconds per set and reps 0. When the number of sets is not said, one set. ")
+         append("minutes and km: 0.\n")
++        append("- load: per_hand when kg is the weight of EACH dumbbell or kettlebell with one in each hand (in Spain «mancuernas ")
++        append("de 20», «20 kilos cada mancuerna», «20 por mano», «dos de 20» all mean 20 kg each); total when kg is the whole load ")
++        append("(barbell, machine, cable, a single dumbbell, or the user says the total, «20 kilos entre las dos», «20 en total»). ")
++        append("With dumbbells and no way to tell, use per_hand and say so in notes. Non-strength exercises: total.\n")
+         append("- kind cardio (running, bike, rowing, treadmill, elliptical, rope…): sets empty; minutes and km when said, else 0.\n")
+         append("- kind other: anything else (stretching, mobility…), with minutes when said.\n")
+         append("- Unused numbers are 0. note: a short Spanish note only when the user adds a detail worth keeping (grip, tempo), else \"\".\n")
+@@ -234,6 +239,8 @@ object TrainingAi {
+         append("- kind strength: one entry in sets PER SET with reps and kg. Base kg on the TRAINING LOG loads for the same or a ")
+         append("similar exercise (a small progression when recovery allows); with no history, a conservative load for the ")
+         append("person's profile and body. kg 0 for body weight. Timed holds: seconds per set and reps 0. minutes and km: 0.\n")
++        append("- load: per_hand for exercises with a dumbbell or kettlebell in each hand, giving kg PER dumbbell; total otherwise ")
++        append("(barbell, machine, cable, a single dumbbell). Read TRAINING LOG loads marked «each» the same way.\n")
+         append("- kind cardio: sets empty, minutes (and km when it makes sense).\n")
+         append("- name: in Spanish (Spain), short and capitalised, as a gym-goer writes it. note: rest between sets and one cue, ")
+         append("in Spanish, at most 8 words («Descanso 90 s · codos pegados»).\n")
+@@ -278,6 +285,7 @@ object TrainingAi {
+                 minutes = e.optDouble("minutes", 0.0).takeIf { it.isFinite() && it > 0 && it < 1440 },
+                 km = e.optDouble("km", 0.0).takeIf { it.isFinite() && it > 0 && it < 1000 },
+                 note = e.optString("note").trim().take(120),
++                perHand = kind == ExerciseKind.STRENGTH && e.optString("load") == "per_hand",
+             )
+         }
+         if (exercises.isEmpty()) return null
+@@ -335,7 +343,8 @@ object TrainingAi {
+         append("the body data and the strap's heart rate. Ground it in standard references: the Compendium of Physical ")
+         append("Activities METs and measured energy costs of resistance training. Heart-rate models (the strap's figure below) ")
+         append("UNDER-estimate resistance training, where efforts are short and partly anaerobic and EPOC follows; for steady ")
+-        append("cardio the heart-rate figure is usually the best one. Account for body weight in body-weight exercises.\n")
++        append("cardio the heart-rate figure is usually the best one. Account for body weight in body-weight exercises, and for ")
++        append("both dumbbells where the load is given per dumbbell.\n")
+         append("Return total_kcal (gross: the whole session including the resting metabolism during it), low_kcal and ")
+         append("high_kcal (a plausible range), and notes: ONE short sentence in Spanish (Spain), at most 20 words, saying what ")
+         append("drove the figure, without repeating the numbers back. It is read on a phone: no caveats, no methodology.\n\n")
+@@ -349,6 +358,7 @@ object TrainingAi {
+             val skipped = if (session.mode == TrainingMode.PLANNED) ex.sets.count { !it.done } else 0
+             append("- ${ex.name} [${ex.kind.id}]: ${done.ifEmpty { "nothing performed" }}")
+             if (ex.sets.any { session.performed(it) && it.kg == null && it.seconds == null } && ex.kind == ExerciseKind.STRENGTH) append(" (body weight or no load said)")
++            if (ex.perHand && ex.sets.any { session.performed(it) && it.kg != null }) append(" (kg is per dumbbell, one in each hand: the load moved is twice that)")
+             if (skipped > 0) append("; $skipped planned set(s) skipped")
+             if (ex.note.isNotBlank()) append("; note: ${ex.note}")
+             perExercise[i]?.let { append("; HR during it avg ${it.avg}, max ${it.max}") }
+diff --git a/android/app/src/main/java/com/noop/training/TrainingEditor.kt b/android/app/src/main/java/com/noop/training/TrainingEditor.kt
+index f3ca5c4f..7bf7189b 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingEditor.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingEditor.kt
+@@ -84,10 +84,17 @@ private fun ExerciseEditor(ex: TrainingExercise, onChange: (TrainingExercise) ->
+                 }
+             }
+             if (ex.kind == ExerciseKind.STRENGTH) {
++                // Per dumbbell or the whole load: 20 kg in each hand is twice 20 kg between both.
++                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space6)) {
++                    Text(uiString(R.string.victor_training_load), style = NoopType.caption, color = Palette.textSecondary)
++                    FoodChip(uiString(R.string.victor_training_load_total), selected = !ex.perHand, small = true) { onChange(ex.copy(perHand = false)) }
++                    FoodChip(uiString(R.string.victor_training_load_per_hand), selected = ex.perHand, small = true) { onChange(ex.copy(perHand = true)) }
++                }
+                 ex.sets.forEachIndexed { j, s ->
+                     SetEditorRow(
+                         index = j + 1,
+                         set = s,
++                        perHand = ex.perHand,
+                         onChange = { new -> onChange(ex.copy(sets = ex.sets.mapIndexed { k, old -> if (k == j) new else old })) },
+                         onRemove = { onChange(ex.copy(sets = ex.sets.filterIndexed { k, _ -> k != j })) },
+                     )
+@@ -110,7 +117,7 @@ private fun ExerciseEditor(ex: TrainingExercise, onChange: (TrainingExercise) ->
+ }
+ 
+ @Composable
+-private fun SetEditorRow(index: Int, set: TrainingSet, onChange: (TrainingSet) -> Unit, onRemove: () -> Unit) {
++private fun SetEditorRow(index: Int, set: TrainingSet, perHand: Boolean, onChange: (TrainingSet) -> Unit, onRemove: () -> Unit) {
+     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space8)) {
+         Text("$index", style = NoopType.bodyNumber, color = Palette.textSecondary, modifier = Modifier.width(20.dp))
+         if (set.seconds != null) {
+@@ -118,7 +125,7 @@ private fun SetEditorRow(index: Int, set: TrainingSet, onChange: (TrainingSet) -
+         } else {
+             IntField(set.reps, R.string.victor_training_reps, Modifier.weight(1f)) { onChange(set.copy(reps = it)) }
+         }
+-        NumberField(set.kg, R.string.victor_training_kg, Modifier.weight(1f)) { onChange(set.copy(kg = it)) }
++        NumberField(set.kg, if (perHand) R.string.victor_training_kg_each else R.string.victor_training_kg, Modifier.weight(1f)) { onChange(set.copy(kg = it)) }
+         IconButton(onClick = onRemove) {
+             Icon(Icons.Filled.Close, contentDescription = uiString(R.string.victor_training_remove), tint = Palette.textTertiary)
+         }
+diff --git a/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt b/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt
+index dad26405..7e7c360e 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt
+@@ -111,7 +111,7 @@ fun TrainingLivePanel(workoutStartMs: Long) {
+                             color = if (s.done) Palette.textSecondary else Palette.textPrimary,
+                             modifier = Modifier.weight(1f),
+                         )
+-                        Text(TrainingFormat.oneSet(s), style = NoopType.bodyNumber, color = if (s.done) Palette.textSecondary else Palette.textPrimary)
++                        Text(TrainingFormat.oneSet(s, perHand = ex.perHand), style = NoopType.bodyNumber, color = if (s.done) Palette.textSecondary else Palette.textPrimary)
+                     }
+                 }
+                 if (ex.kind == ExerciseKind.STRENGTH) {
+@@ -152,7 +152,7 @@ fun TrainingLivePanel(workoutStartMs: Long) {
+                     OutlinedTextField(
+                         value = kg,
+                         onValueChange = { t -> kg = t.filter { it.isDigit() || it == ',' || it == '.' }.take(6) },
+-                        label = { Text(uiString(R.string.victor_training_kg)) },
++                        label = { Text(uiString(if (session.exercises[i].perHand) R.string.victor_training_kg_each else R.string.victor_training_kg)) },
+                         singleLine = true,
+                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                         modifier = Modifier.weight(1f),
+diff --git a/android/app/src/main/java/com/noop/training/TrainingModels.kt b/android/app/src/main/java/com/noop/training/TrainingModels.kt
+index f44d0f5c..5147074a 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingModels.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingModels.kt
+@@ -56,6 +56,11 @@ data class TrainingExercise(
+     val minutes: Double? = null,
+     val km: Double? = null,
+     val note: String = "",
++    /**
++     * The sets' kg is per dumbbell (or kettlebell), one in each hand: the load moved is twice the number.
++     * False is the whole load (barbell, machine, one dumbbell, or a total the wearer gave).
++     */
++    val perHand: Boolean = false,
+ )
+ 
+ /** Claude's estimate of the session's energy, beside the strap's heart-rate figure it was given. */
+@@ -109,7 +114,7 @@ object TrainingFormat {
+             val s = sets[i]
+             var n = 1
+             while (i + n < sets.size && same(sets[i + n], s)) n++
+-            parts += setText(n, s, locale)
++            parts += setText(n, s, locale, ex.perHand)
+             i += n
+         }
+         val cardio = listOfNotNull(
+@@ -119,23 +124,30 @@ object TrainingFormat {
+         return (parts + cardio).joinToString(" + ")
+     }
+ 
+-    fun setText(count: Int, s: TrainingSet, locale: Locale = Locale.getDefault()): String {
++    fun setText(count: Int, s: TrainingSet, locale: Locale = Locale.getDefault(), perHand: Boolean = false): String {
+         val core = when {
+             s.seconds != null && s.seconds > 0 -> "${count}×${s.seconds} s"
+             s.reps != null -> "${count}×${s.reps}"
+             else -> "$count×"
+         }
+-        return if (s.kg != null && s.kg > 0) "$core · ${num(s.kg, locale)} kg" else core
++        return if (s.kg != null && s.kg > 0) "$core · ${num(s.kg, locale)} kg${eachSuffix(perHand, locale)}" else core
+     }
+ 
+-    /** One set alone: "5 × 20 kg", "8", "45 s". */
+-    fun oneSet(s: TrainingSet, locale: Locale = Locale.getDefault()): String {
++    /** One set alone: "5 × 20 kg", "5 × 20 kg c/u" (per dumbbell), "8", "45 s". */
++    fun oneSet(s: TrainingSet, locale: Locale = Locale.getDefault(), perHand: Boolean = false): String {
+         val core = when {
+             s.seconds != null && s.seconds > 0 -> "${s.seconds} s"
+             s.reps != null -> "${s.reps}"
+             else -> "—"
+         }
+-        return if (s.kg != null && s.kg > 0) "$core × ${num(s.kg, locale)} kg" else core
++        return if (s.kg != null && s.kg > 0) "$core × ${num(s.kg, locale)} kg${eachSuffix(perHand, locale)}" else core
++    }
++
++    /** Per dumbbell: " c/u" in Spanish ("cada una"), " each" otherwise (the coach and Claude read English). */
++    private fun eachSuffix(perHand: Boolean, locale: Locale): String = when {
++        !perHand -> ""
++        locale.language == "es" -> " c/u"
++        else -> " each"
+     }
+ 
+     /** 20 → "20", 12.5 → "12,5" in Spanish. */
+diff --git a/android/app/src/main/java/com/noop/training/TrainingStore.kt b/android/app/src/main/java/com/noop/training/TrainingStore.kt
+index e805c42e..1cc4b136 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingStore.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingStore.kt
+@@ -108,6 +108,7 @@ internal object TrainingStoreCodec {
+                 e.minutes?.let { put("minutes", it) }
+                 e.km?.let { put("km", it) }
+                 if (e.note.isNotBlank()) put("note", e.note)
++                if (e.perHand) put("per_hand", true)
+             }
+     }
+ 
+@@ -130,6 +131,7 @@ internal object TrainingStoreCodec {
+             minutes = optDouble(o, "minutes"),
+             km = optDouble(o, "km"),
+             note = o.optString("note"),
++            perHand = o.optBoolean("per_hand", false),
+         )
+     }
+ 
+diff --git a/android/app/src/main/res/values-es/strings_victor_training.xml b/android/app/src/main/res/values-es/strings_victor_training.xml
+index 2ea32bd6..ee9f8b22 100644
+--- a/android/app/src/main/res/values-es/strings_victor_training.xml
++++ b/android/app/src/main/res/values-es/strings_victor_training.xml
+@@ -62,4 +62,8 @@
+     <string name="victor_training_light">Suave</string>
+     <string name="victor_training_moderate">Media</string>
+     <string name="victor_training_hard">Fuerte</string>
++    <string name="victor_training_load">Peso</string>
++    <string name="victor_training_load_total">Total</string>
++    <string name="victor_training_load_per_hand">Por mancuerna</string>
++    <string name="victor_training_kg_each">kg c/u</string>
+ </resources>
+diff --git a/android/app/src/main/res/values/strings_victor_training.xml b/android/app/src/main/res/values/strings_victor_training.xml
+index c1c7ac36..4f279a45 100644
+--- a/android/app/src/main/res/values/strings_victor_training.xml
++++ b/android/app/src/main/res/values/strings_victor_training.xml
+@@ -62,4 +62,8 @@
+     <string name="victor_training_light">Easy</string>
+     <string name="victor_training_moderate">Medium</string>
+     <string name="victor_training_hard">Hard</string>
++    <string name="victor_training_load">Weight</string>
++    <string name="victor_training_load_total">Total</string>
++    <string name="victor_training_load_per_hand">Per dumbbell</string>
++    <string name="victor_training_kg_each">kg each</string>
+ </resources>
+diff --git a/android/app/src/test/java/com/noop/training/TrainingTest.kt b/android/app/src/test/java/com/noop/training/TrainingTest.kt
+index 382d82e4..03cbaa98 100644
+--- a/android/app/src/test/java/com/noop/training/TrainingTest.kt
++++ b/android/app/src/test/java/com/noop/training/TrainingTest.kt
+@@ -49,7 +49,7 @@ class TrainingTest {
+     fun codecRoundTripsEverythingIncludingALiveSession() {
+         val live = TrainingSession(
+             "s2", TrainingMode.PLANNED, start + 86_400, null, "Strength", "",
+-            listOf(TrainingExercise("Curl de bíceps", ExerciseKind.STRENGTH, listOf(TrainingSet(8, 12.5, done = true, doneAt = start + 86_500), TrainingSet(8, 12.5)), note = "agarre martillo")),
++            listOf(TrainingExercise("Curl de bíceps", ExerciseKind.STRENGTH, listOf(TrainingSet(8, 12.5, done = true, doneAt = start + 86_500), TrainingSet(8, 12.5)), note = "agarre martillo", perHand = true)),
+         )
+         val decoded = TrainingStoreCodec.decode(TrainingStoreCodec.encode(listOf(live, logged)))
+         assertEquals(listOf(logged, live), decoded)
+@@ -247,4 +247,27 @@ class TrainingTest {
+         assertTrue(bare.contains("(nothing said; decide from the data)"))
+         assertTrue(bare.endsWith("rely on their words only."))
+     }
++
++    @Test
++    fun aPerDumbbellLoadIsReadSavedAndSpelledOut() {
++        val curl = TrainingExercise("Curl", ExerciseKind.STRENGTH, List(3) { TrainingSet(10, 12.0, done = true) }, perHand = true)
++        assertEquals("3×10 · 12 kg c/u", TrainingFormat.summary(curl, locale = Locale.forLanguageTag("es-ES")))
++        assertEquals("3×10 · 12 kg each", TrainingFormat.summary(curl, locale = Locale.US))
++        assertEquals("10 × 12 kg c/u", TrainingFormat.oneSet(curl.sets[0], Locale.forLanguageTag("es-ES"), perHand = true))
++
++        val reply = JSONObject(
++            """{"sport":"Strength","exercises":[
++              {"name":"Press con mancuernas","kind":"strength","sets":[{"reps":10,"kg":20,"seconds":0}],"minutes":0,"km":0,"note":"","load":"per_hand"},
++              {"name":"Sentadilla","kind":"strength","sets":[{"reps":5,"kg":60,"seconds":0}],"minutes":0,"km":0,"note":"","load":"total"},
++              {"name":"Cinta","kind":"cardio","sets":[],"minutes":10,"km":0,"note":"","load":"per_hand"}
++            ]}""",
++        )
++        val p = TrainingAi.parsePlan(reply, TrainingAi.sportNames())!!
++        assertEquals(listOf(true, false, false), p.exercises.map { it.perHand })
++
++        val session = logged.copy(exercises = listOf(curl))
++        val prompt = TrainingAi.kcalPrompt(session, "x", 60, null, null, null, null, emptyMap())
++        assertTrue(prompt.contains("- Curl [strength]: 3×10 · 12 kg each (kg is per dumbbell, one in each hand: the load moved is twice that)"))
++        assertTrue(TrainingAi.planPrompt("mancuernas de 20", TrainingMode.LOGGED, LocalDateTime.of(2026, 10, 19, 18, 0), emptyList()).contains("«mancuernas de 20»"))
++    }
+ }
+-- 
+2.54.0
+
