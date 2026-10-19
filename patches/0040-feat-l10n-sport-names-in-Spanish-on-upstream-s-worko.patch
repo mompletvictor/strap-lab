@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Mon, 19 Oct 2026 19:34:48 +0200
+Subject: [PATCH] feat(l10n): sport names in Spanish on upstream's workout
+ screens
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Build-time rules (Tools/victor_l10n/sports.json) route the remaining raw sport names — the start picker,
+the live workout title, "Most active", the relabel menu and the Today workout card — through
+WorkoutEditing.displaySport, which shows the Spanish name on a Spanish phone. Stored names stay English.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Tools/victor_l10n/sports.json | 47 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 47 insertions(+)
+ create mode 100644 Tools/victor_l10n/sports.json
+
+diff --git a/Tools/victor_l10n/sports.json b/Tools/victor_l10n/sports.json
+new file mode 100644
+index 00000000..f9c9d804
+--- /dev/null
++++ b/Tools/victor_l10n/sports.json
+@@ -0,0 +1,47 @@
++[
++ {
++  "file": "ui/WorkoutStart.kt",
++  "find": "            sp.name, style = NoopType.body,",
++  "replace": "            WorkoutEditing.displaySport(sp.name), style = NoopType.body,"
++ },
++ {
++  "file": "ui/WorkoutStart.kt",
++  "find": "start_selected_name_10603889, selected.name)",
++  "replace": "start_selected_name_10603889, WorkoutEditing.displaySport(selected.name))"
++ },
++ {
++  "file": "ui/WorkoutStart.kt",
++  "find": "w.sport.name.uppercase()",
++  "replace": "WorkoutEditing.displaySport(w.sport.name).uppercase()"
++ },
++ {
++  "file": "ui/LiveScreen.kt",
++  "find": "w.sport.name.uppercase()",
++  "replace": "WorkoutEditing.displaySport(w.sport.name).uppercase()"
++ },
++ {
++  "file": "ui/LiveWorkoutScreen.kt",
++  "find": "                    w.sport.name, style = NoopType.title1,",
++  "replace": "                    WorkoutEditing.displaySport(w.sport.name), style = NoopType.title1,"
++ },
++ {
++  "file": "ui/WorkoutsScreen.kt",
++  "find": "value = modal?.sport ?: \"–\",",
++  "replace": "value = modal?.sport?.let(WorkoutEditing::displaySport) ?: \"–\","
++ },
++ {
++  "file": "ui/WorkoutsScreen.kt",
++  "find": "text = { Text(sport, style = NoopType.body, color = Palette.textPrimary) },",
++  "replace": "text = { Text(WorkoutEditing.displaySport(sport), style = NoopType.body, color = Palette.textPrimary) },"
++ },
++ {
++  "file": "ui/WorkoutsScreen.kt",
++  "find": "        Text(name, style = NoopType.body, color = Palette.textPrimary)",
++  "replace": "        Text(WorkoutEditing.displaySport(name), style = NoopType.body, color = Palette.textPrimary)"
++ },
++ {
++  "file": "ui/TodayScreen.kt",
++  "find": "    val sportLabel = workout.sport.name",
++  "replace": "    val sportLabel = WorkoutEditing.displaySport(workout.sport.name)"
++ }
++]
+-- 
+2.54.0
+

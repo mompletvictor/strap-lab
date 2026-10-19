@@ -1,0 +1,252 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Mon, 19 Oct 2026 19:28:12 +0200
+Subject: [PATCH] chore: quieter Food and Health screens
+
+No subtitle or privacy footnote on Food, "Tu gasto real" only once it has a figure, and no Scale card
+until there is a reading. The explanations live in LEEME.md; the wearer asked for clean screens.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/main/java/com/noop/food/FoodScreen.kt | 56 +++++++------------
+ .../src/main/java/com/noop/ui/ScaleCard.kt    | 26 ++++-----
+ .../res/values-es/strings_victor_food.xml     |  3 -
+ .../res/values-es/strings_victor_scale.xml    |  1 -
+ .../main/res/values/strings_victor_food.xml   |  3 -
+ .../main/res/values/strings_victor_scale.xml  |  1 -
+ 6 files changed, 30 insertions(+), 60 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+index 5d4c099e..a103047a 100644
+--- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
++++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.FlowRow
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.lazy.items
+@@ -174,10 +175,8 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+     var tab by rememberSaveable { mutableStateOf(0) }
+     val kcalTarget = VictorGoalsStore.load(ctx).dailyKcalTarget
+ 
+-    LazyScreenScaffold(
+-        title = uiString(R.string.victor_food_title),
+-        subtitle = uiString(R.string.victor_food_subtitle),
+-    ) {
++    // No subtitle or privacy footnote: the wearer wants clean screens (both live in LEEME.md).
++    LazyScreenScaffold(title = uiString(R.string.victor_food_title)) {
+         item {
+             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                 FoodChip(uiString(R.string.victor_food_today), selected = tab == 0) { tab = 0 }
+@@ -223,7 +222,8 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+             }
+         } else {
+             item { FoodHistorySection(vm, entries, kcalTarget) }
+-            adaptive?.let { item { AdaptiveCard(it) } }
++            // "Tu gasto real" shows once it has a figure; how it is worked out is in LEEME.md.
++            (adaptive as? AdaptiveState.Ready)?.let { item { AdaptiveCard(it) } }
+             if (previous.isNotEmpty()) {
+                 item { Overline(uiString(R.string.victor_food_previous)) }
+                 items(previous, key = { it.first }) { (day, list) ->
+@@ -231,14 +231,7 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+                 }
+             }
+         }
+-        item {
+-            Text(
+-                uiString(R.string.victor_food_privacy),
+-                style = NoopType.footnote,
+-                color = Palette.textTertiary,
+-                modifier = Modifier.padding(bottom = Metrics.space24),
+-            )
+-        }
++        item { Spacer(Modifier.height(Metrics.space24)) }
+     }
+ 
+     draft?.let { FoodSheet(it, food, onOpenCoach, onAddCamera = ::startCamera, onAddGallery = ::startGallery) }
+@@ -455,34 +448,25 @@ private fun EntryRow(entry: FoodEntry, onEdit: () -> Unit, onDelete: () -> Unit)
+     }
+ }
+ 
+-/** The real burn from intake + weight trend, beside the app's own estimate; or how far it is from ready. */
++/** The real burn from intake + weight trend, beside the app's own estimate. */
+ @Composable
+-private fun AdaptiveCard(state: AdaptiveState) {
++private fun AdaptiveCard(state: AdaptiveState.Ready) {
+     NoopCard {
+         Column(verticalArrangement = Arrangement.spacedBy(Metrics.space6)) {
+             Overline(uiString(R.string.victor_food_adaptive_title))
+-            when (state) {
+-                is AdaptiveState.Ready -> {
+-                    val e = state.estimate
+-                    Text(uiString(R.string.victor_food_adaptive_value, whole(e.estimatedDailyKcal)), style = NoopType.title2, color = Palette.textPrimary)
+-                    Text(
+-                        uiString(R.string.victor_food_adaptive_detail, whole(e.lowerKcal), whole(e.upperKcal), e.windowDays),
+-                        style = NoopType.subhead,
+-                        color = Palette.textSecondary,
+-                    )
+-                    state.appAverageKcal?.let { app ->
+-                        val off = abs(app - e.estimatedDailyKcal) > 0.10 * e.estimatedDailyKcal
+-                        Text(
+-                            uiString(R.string.victor_food_adaptive_app, whole(app)),
+-                            style = NoopType.subhead,
+-                            color = if (off) Palette.metricAmber else Palette.textSecondary,
+-                        )
+-                    }
+-                }
+-                is AdaptiveState.Building -> Text(
+-                    uiString(R.string.victor_food_adaptive_building, state.intakeDays, state.weightDays),
++            val e = state.estimate
++            Text(uiString(R.string.victor_food_adaptive_value, whole(e.estimatedDailyKcal)), style = NoopType.title2, color = Palette.textPrimary)
++            Text(
++                uiString(R.string.victor_food_adaptive_detail, whole(e.lowerKcal), whole(e.upperKcal), e.windowDays),
++                style = NoopType.subhead,
++                color = Palette.textSecondary,
++            )
++            state.appAverageKcal?.let { app ->
++                val off = abs(app - e.estimatedDailyKcal) > 0.10 * e.estimatedDailyKcal
++                Text(
++                    uiString(R.string.victor_food_adaptive_app, whole(app)),
+                     style = NoopType.subhead,
+-                    color = Palette.textSecondary,
++                    color = if (off) Palette.metricAmber else Palette.textSecondary,
+                 )
+             }
+         }
+diff --git a/android/app/src/main/java/com/noop/ui/ScaleCard.kt b/android/app/src/main/java/com/noop/ui/ScaleCard.kt
+index 6b78698a..ccd78253 100644
+--- a/android/app/src/main/java/com/noop/ui/ScaleCard.kt
++++ b/android/app/src/main/java/com/noop/ui/ScaleCard.kt
+@@ -32,8 +32,8 @@ import kotlin.math.roundToInt
+ /**
+  * victor:scale — fork-added Health card for a smart scale (a Hume Body Pod via Samsung Health → Health
+  * Connect): the newest reading's date/time, weight with its change over ~7 and ~30 days and a 30-day
+- * line, then whichever of body fat / lean mass / bone mass / body water / BMR the scale wrote. With no
+- * scale data it explains how to let the readings in. Reads the Health Connect series only.
++ * line, then whichever of body fat / lean mass / bone mass / body water / BMR the scale wrote. Hidden with no
++ * scale data. Reads the Health Connect series only.
+  */
+ @Composable
+ internal fun ScaleCard(vm: AppViewModel) {
+@@ -44,9 +44,9 @@ internal fun ScaleCard(vm: AppViewModel) {
+         snapshot = runCatching { ScaleImport.snapshot(vm.repo, ScaleImport.newestReading(ctx)) }.getOrNull()
+         loaded = true
+     }
+-    // Nothing until the read lands, so the "no data" hint never flashes over real readings.
++    // Nothing until the read lands, and nothing without a reading: how to connect a scale is in LEEME.md.
+     if (!loaded) return
+-    val s = snapshot
++    val s = snapshot ?: return
+     val system = UnitPrefs.system(ctx)
+ 
+     NoopCard(padding = 20.dp, tint = Palette.accent) {
+@@ -54,21 +54,15 @@ internal fun ScaleCard(vm: AppViewModel) {
+             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                 Overline(uiString(R.string.victor_scale_overline))
+                 Row(verticalAlignment = Alignment.CenterVertically) {
+-                    Icon(Icons.Filled.MonitorWeight, contentDescription = null, tint = if (s != null) Palette.accent else Palette.textSecondary)
++                    Icon(Icons.Filled.MonitorWeight, contentDescription = null, tint = Palette.accent)
+                     Spacer(Modifier.width(10.dp))
+                     Text(uiString(R.string.victor_scale_title), style = NoopType.title2, color = Palette.textPrimary)
+                 }
+-                if (s != null) {
+-                    Text(
+-                        uiString(R.string.victor_scale_latest, readingStamp(s, ClockPrefs.uses24Hour(ctx))),
+-                        style = NoopType.footnote,
+-                        color = Palette.textTertiary,
+-                    )
+-                }
+-            }
+-            if (s == null) {
+-                Text(uiString(R.string.victor_scale_empty), style = NoopType.subhead, color = Palette.textSecondary)
+-                return@Column
++                Text(
++                    uiString(R.string.victor_scale_latest, readingStamp(s, ClockPrefs.uses24Hour(ctx))),
++                    style = NoopType.footnote,
++                    color = Palette.textSecondary,
++                )
+             }
+ 
+             s.weight?.let { w ->
+diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
+index 9f932be8..7d9fbfb3 100644
+--- a/android/app/src/main/res/values-es/strings_victor_food.xml
++++ b/android/app/src/main/res/values-es/strings_victor_food.xml
+@@ -3,7 +3,6 @@
+ <resources>
+     <string name="victor_food_nav">Comida</string>
+     <string name="victor_food_title">Comida</string>
+-    <string name="victor_food_subtitle">Haz una foto del plato y Claude estima sus calorías y macros.</string>
+ 
+     <string name="victor_food_today">Hoy</string>
+     <string name="victor_food_yesterday">Ayer</string>
+@@ -24,7 +23,6 @@
+     <string name="victor_food_photo">Foto</string>
+     <string name="victor_food_gallery">Galería</string>
+     <string name="victor_food_today_empty">Hoy no hay nada apuntado. Haz una foto de tu próxima comida.</string>
+-    <string name="victor_food_privacy">Las fotos solo se envían a Anthropic, con tu clave, cuando pulsas Analizar. En el móvil solo quedan miniaturas. Todas las cifras son estimaciones.</string>
+ 
+     <string name="victor_food_delete">Eliminar</string>
+     <string name="victor_food_delete_title">¿Eliminar esta comida?</string>
+@@ -106,7 +104,6 @@
+     <string name="victor_food_adaptive_value">~%1$s kcal/día</string>
+     <string name="victor_food_adaptive_detail">%1$s–%2$s kcal, según lo que comes y cómo cambia tu peso (%3$d días)</string>
+     <string name="victor_food_adaptive_app">La app estimaba %1$s kcal/día esos días</string>
+-    <string name="victor_food_adaptive_building">Se calcula con 3 semanas que tengan 14 días de comidas y 6 pesajes. Llevas %1$d/14 días de comidas y %2$d/6 pesajes.</string>
+ 
+     <string name="victor_food_history">Historial</string>
+     <string name="victor_food_history_week">Semana</string>
+diff --git a/android/app/src/main/res/values-es/strings_victor_scale.xml b/android/app/src/main/res/values-es/strings_victor_scale.xml
+index 07f9fe03..b6e1c66f 100644
+--- a/android/app/src/main/res/values-es/strings_victor_scale.xml
++++ b/android/app/src/main/res/values-es/strings_victor_scale.xml
+@@ -15,5 +15,4 @@
+     <string name="victor_scale_in_30d">%1$s en 30 días</string>
+     <string name="victor_scale_as_of">del %1$s</string>
+     <string name="victor_scale_trend">Peso, últimos 30 días</string>
+-    <string name="victor_scale_empty">Aún no hay mediciones de la báscula. En Samsung Health → Health Connect, deja que Samsung Health comparta el peso y la composición corporal, y permite que NOOP los lea. Después, en NOOP: Fuentes de datos → Health Connect → Composición corporal.</string>
+ </resources>
+diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
+index 4e8e1664..eea4ea70 100644
+--- a/android/app/src/main/res/values/strings_victor_food.xml
++++ b/android/app/src/main/res/values/strings_victor_food.xml
+@@ -3,7 +3,6 @@
+ <resources>
+     <string name="victor_food_nav">Food</string>
+     <string name="victor_food_title">Food</string>
+-    <string name="victor_food_subtitle">Snap a meal and Claude estimates its calories and macros.</string>
+ 
+     <string name="victor_food_today">Today</string>
+     <string name="victor_food_yesterday">Yesterday</string>
+@@ -24,7 +23,6 @@
+     <string name="victor_food_photo">Photo</string>
+     <string name="victor_food_gallery">Gallery</string>
+     <string name="victor_food_today_empty">Nothing logged today. Take a photo of your next meal.</string>
+-    <string name="victor_food_privacy">Photos are sent to Anthropic, with your key, only when you tap Analyse. Only small thumbnails stay on the phone. Every number is an estimate.</string>
+ 
+     <string name="victor_food_delete">Delete</string>
+     <string name="victor_food_delete_title">Delete this meal?</string>
+@@ -106,7 +104,6 @@
+     <string name="victor_food_adaptive_value">~%1$s kcal/day</string>
+     <string name="victor_food_adaptive_detail">%1$s–%2$s kcal, from what you eat and how your weight moves (%3$d days)</string>
+     <string name="victor_food_adaptive_app">The app estimated %1$s kcal/day those days</string>
+-    <string name="victor_food_adaptive_building">Needs 3 weeks with 14 days of meals and 6 weigh-ins. So far: %1$d/14 days of meals, %2$d/6 weigh-ins.</string>
+ 
+     <string name="victor_food_history">History</string>
+     <string name="victor_food_history_week">Week</string>
+diff --git a/android/app/src/main/res/values/strings_victor_scale.xml b/android/app/src/main/res/values/strings_victor_scale.xml
+index 7b9ef683..29d9e112 100644
+--- a/android/app/src/main/res/values/strings_victor_scale.xml
++++ b/android/app/src/main/res/values/strings_victor_scale.xml
+@@ -15,5 +15,4 @@
+     <string name="victor_scale_in_30d">%1$s in 30 days</string>
+     <string name="victor_scale_as_of">as of %1$s</string>
+     <string name="victor_scale_trend">Weight, last 30 days</string>
+-    <string name="victor_scale_empty">No scale readings yet. In Samsung Health → Health Connect, let Samsung Health share weight and body composition, and allow NOOP to read them. Then in NOOP: Data Sources → Health Connect → Body composition.</string>
+ </resources>
+-- 
+2.54.0
+

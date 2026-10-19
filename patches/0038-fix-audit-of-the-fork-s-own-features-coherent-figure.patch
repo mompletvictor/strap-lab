@@ -1,0 +1,1743 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Mon, 19 Oct 2026 19:25:08 +0200
+Subject: [PATCH] =?UTF-8?q?fix:=20audit=20of=20the=20fork's=20own=20featur?=
+ =?UTF-8?q?es=20=E2=80=94=20coherent=20figures,=20consent,=20cost=20and=20?=
+ =?UTF-8?q?Spanish?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Findings of a full audit (code review + the wearer's phone), fixed together:
+
+- Training: deleting, bulk-deleting or re-timing a workout takes its exercise log with it (hooks in
+  AppViewModel); a session whose workout is gone stops adding to the day's Effort; a workout logged twice
+  counts once; a plan added to a running workout joins its plan instead of replacing it; upstream's silent
+  discards drop the live plan too; the row is put back to the session's figures if a rescore reverts it;
+  a session analysed with no heart rate is looked at again after 20 samples; a failed analysis is retried
+  after an hour, not on every look; a second analysis asked while one runs is run after it.
+- Effort: Claude's reference points now sit on the app's own logarithmic 0-100 axis.
+- Consent: the workout analysis sends body, resting HR and heart rate, and the weekly review runs at all,
+  only with the coach's data consent.
+- Cost: weekly review and meal scores back off after a failure; "-1, too little to judge" is kept as an
+  answer; a meal logged after its slot waits 20 min for its last photo; cancelling a photo or workout
+  analysis now cancels the HTTP call (enqueue + invokeOnCancellation); a double tap on a frequent meal
+  logs it once.
+- Dates: calendar events stay on their clock hours on the 23/25-hour days (25-10-2026); a meal before
+  04:00 belongs to the night before; "My day" follows the date after the night.
+- Spanish: the coach replies in the phone's language and calls the scores Carga/Esfuerzo/Descanso, its
+  suggestion chips and refusal read in Spanish; sport names on screen in Spanish; no raw English API text
+  under errors; an empty Anthropic account is named; decimals with the phone's mark on the Scale card.
+- AMOLED: text-field borders and chart grid lines drawn strong enough to see; training mode chips no
+  longer break "Sugiéreme" on a 384 dp screen.
+- Robustness: a non-JSON Google Tasks reply, a failed write, a partial Health Connect page or a cancelled
+  refresh no longer crash, write partial sums or block the next read.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/main/java/com/noop/NoopApplication.kt |  1 +
+ .../app/src/main/java/com/noop/ai/AiCoach.kt  |  6 +-
+ .../main/java/com/noop/ai/VictorCoachLang.kt  | 54 ++++++++++
+ .../src/main/java/com/noop/day/DayAgenda.kt   | 20 +++-
+ .../java/com/noop/day/TodayMyDaySection.kt    | 11 +++
+ .../src/main/java/com/noop/food/FoodEnergy.kt | 17 +++-
+ .../main/java/com/noop/food/FoodHistory.kt    |  6 +-
+ .../src/main/java/com/noop/food/FoodModels.kt | 11 ++-
+ .../src/main/java/com/noop/food/FoodScorer.kt | 11 ++-
+ .../src/main/java/com/noop/food/FoodSheet.kt  |  6 +-
+ .../main/java/com/noop/food/FoodViewModel.kt  | 11 ++-
+ .../src/main/java/com/noop/food/FoodVision.kt | 57 +++++++----
+ .../main/java/com/noop/food/MealScoring.kt    | 20 +++-
+ .../java/com/noop/ingest/VictorHcRefresh.kt   | 17 +++-
+ .../main/java/com/noop/training/TrainingAi.kt | 17 ++--
+ .../com/noop/training/TrainingAnalyzer.kt     | 92 ++++++++++++++---
+ .../com/noop/training/TrainingCoachContext.kt |  5 +-
+ .../noop/training/TrainingDetailSection.kt    |  4 +-
+ .../java/com/noop/training/TrainingEditor.kt  |  3 +
+ .../com/noop/training/TrainingLivePanel.kt    |  2 +
+ .../java/com/noop/training/TrainingModels.kt  | 13 ++-
+ .../java/com/noop/training/TrainingSheet.kt   | 17 ++--
+ .../java/com/noop/training/TrainingStore.kt   | 44 ++++++++-
+ .../java/com/noop/training/VictorDayEffort.kt | 18 +++-
+ .../com/noop/training/VictorSportNames.kt     | 99 +++++++++++++++++++
+ .../src/main/java/com/noop/ui/AppViewModel.kt |  5 +
+ .../src/main/java/com/noop/ui/CoachScreen.kt  |  3 +-
+ .../src/main/java/com/noop/ui/ScaleCard.kt    |  7 +-
+ .../main/java/com/noop/ui/WorkoutEditing.kt   |  1 +
+ .../main/java/com/noop/weekly/WeeklyCard.kt   |  2 +-
+ .../main/java/com/noop/weekly/WeeklyReview.kt | 14 ++-
+ .../java/com/noop/weekly/WeeklyReviewer.kt    | 13 ++-
+ .../res/values-es/strings_victor_food.xml     |  1 +
+ .../main/res/values/strings_victor_food.xml   |  1 +
+ .../java/com/noop/ai/VictorCoachLangTest.kt   | 30 ++++++
+ .../test/java/com/noop/day/DayCalendarTest.kt | 20 ++++
+ .../java/com/noop/food/FoodVisionReplyTest.kt |  8 ++
+ .../java/com/noop/food/MealScoringTest.kt     | 16 +++
+ .../java/com/noop/training/TrainingTest.kt    | 28 +++++-
+ .../com/noop/training/VictorDayEffortTest.kt  |  7 ++
+ .../java/com/noop/weekly/WeeklyReviewTest.kt  |  4 +
+ 41 files changed, 620 insertions(+), 102 deletions(-)
+ create mode 100644 android/app/src/main/java/com/noop/ai/VictorCoachLang.kt
+ create mode 100644 android/app/src/main/java/com/noop/training/VictorSportNames.kt
+ create mode 100644 android/app/src/test/java/com/noop/ai/VictorCoachLangTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/NoopApplication.kt b/android/app/src/main/java/com/noop/NoopApplication.kt
+index 9643ab03..0ca9158e 100644
+--- a/android/app/src/main/java/com/noop/NoopApplication.kt
++++ b/android/app/src/main/java/com/noop/NoopApplication.kt
+@@ -45,6 +45,7 @@ class NoopApplication : Application() {
+     override fun onCreate() {
+         super.onCreate()
+         com.noop.day.VictorTodayQuiet.applyOnce(this)   // victor:day
++        com.noop.training.TrainingStore.preload(this)   // victor:training — the day's Effort right from the start
+         // Install before any app-owned startup work so even an early failure is preserved for the
+         // recovery screen on the next launch.
+         CrashCapture.install(this)
+diff --git a/android/app/src/main/java/com/noop/ai/AiCoach.kt b/android/app/src/main/java/com/noop/ai/AiCoach.kt
+index e6ebb79f..1b31f8f7 100644
+--- a/android/app/src/main/java/com/noop/ai/AiCoach.kt
++++ b/android/app/src/main/java/com/noop/ai/AiCoach.kt
+@@ -144,7 +144,7 @@ class AiCoach(
+ 
+         // Resolve the system prompt fresh (user override or the built-in default) so an edit in the
+         // Coach settings takes effect on this very send.
+-        val systemPrompt = resolveSystemPrompt(ctx)
++        val systemPrompt = resolveSystemPrompt(ctx) + VictorCoachLang.systemNote()   // victor:coach-lang
+ 
+         // Slide a window over a long conversation so the history can't crowd out the reply on a
+         // small local context window (e.g. Ollama's 2048-token default). The first user turn carries
+@@ -227,7 +227,7 @@ class AiCoach(
+             injectContext(history, NO_CONSENT_NOTE)
+         }
+ 
+-        val systemPrompt = resolveSystemPrompt(ctx)
++        val systemPrompt = resolveSystemPrompt(ctx) + VictorCoachLang.systemNote()   // victor:coach-lang
+         val grounded = trimmedHistory(groundedFull, MAX_HISTORY_TURNS)
+         val groundedWithSummary = injectDroppedSummary(grounded, groundedFull)
+ 
+@@ -1249,7 +1249,7 @@ class AiCoach(
+         /** victor:claude-models — name a safety refusal instead of reporting an "empty reply". */
+         internal fun anthropicEmptyReplyMessage(json: JSONObject, body: String): String =
+             if (json.optString("stop_reason") == "refusal") {
+-                "Claude declined to answer this request (safety filter). Rephrase it or pick another model."
++                VictorCoachLang.refusal()
+             } else {
+                 emptyReplyMessage(body)
+             }
+diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachLang.kt b/android/app/src/main/java/com/noop/ai/VictorCoachLang.kt
+new file mode 100644
+index 00000000..ffd8c832
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/ai/VictorCoachLang.kt
+@@ -0,0 +1,54 @@
++package com.noop.ai
++
++import java.util.Locale
++
++/**
++ * victor:coach-lang — the coach speaks the phone's language. Upstream's persona, the morning-brief
++ * instruction and the data block are English (prompts, not labels), so a brief generated with no user
++ * text came back in English on a Spanish phone. [systemNote] is appended to the system prompt at send
++ * time (the editable prompt in the Coach settings stays untouched), and [chip] shows upstream's English
++ * suggestion chips in Spanish; a chip upstream adds later simply stays in English.
++ */
++internal object VictorCoachLang {
++
++    fun systemNote(locale: Locale = Locale.getDefault()): String {
++        if (locale.language.isBlank() || locale.language == "en") return ""
++        val names = if (locale.language == "es") {
++            " In the app the three daily scores are called Carga (charge), Esfuerzo (effort) and Descanso (rest); use those names."
++        } else {
++            ""
++        }
++        return "\n\nAlways reply in ${locale.getDisplayLanguage(Locale.ENGLISH)}, the user's language, even though these " +
++            "instructions, the data and any earlier replies are in English.$names"
++    }
++
++    fun refusal(locale: Locale = Locale.getDefault()): String =
++        if (locale.language == "es") "Claude no ha querido responder a esto (filtro de seguridad). Reformúlalo o elige otro modelo."
++        else "Claude declined to answer this request (safety filter). Rephrase it or pick another model."
++
++    fun chip(text: String, locale: Locale = Locale.getDefault()): String =
++        if (locale.language == "es") ES[text] ?: text else text
++
++    private val ES = mapOf(
++        // CoachPrompts.SUGGESTIONS and CoachSuggestions.fallback
++        "How's my recovery trending this week?" to "¿Cómo va mi recuperación esta semana?",
++        "Should I train hard or take it easy today?" to "¿Entreno fuerte o suave hoy?",
++        "Why might my HRV be low lately?" to "¿Por qué tengo la VFC baja estos días?",
++        "How can I improve my sleep?" to "¿Cómo mejoro mi sueño?",
++        "What should today's training look like?" to "¿Qué entreno me toca hoy?",
++        "Analyse my sleep" to "Analiza mi sueño",
++        "Why am I run down?" to "¿Por qué estoy tan cansado?",
++        // CoachSuggestions, from today's bands
++        "Active recovery only today — what should I do?" to "Hoy solo recuperación activa: ¿qué hago?",
++        "Quality over volume today — plan my session" to "Hoy calidad antes que volumen: planifica mi sesión",
++        "Green light — how hard can I push today?" to "Luz verde: ¿cuánto puedo apretar hoy?",
++        "Why is my HRV trending down?" to "¿Por qué está bajando mi VFC?",
++        "I slept poorly — how do I recover today?" to "He dormido mal: ¿cómo me recupero hoy?",
++        "Have I done enough today, or push more?" to "¿He hecho suficiente hoy o aprieto más?",
++        // AiCoach.followUpSuggestions
++        "Tell me more about that" to "Cuéntame más",
++        "What should I do next?" to "¿Qué hago ahora?",
++        "How does today compare to this week?" to "¿Cómo va hoy frente al resto de la semana?",
++        "Give me a specific action plan" to "Dame un plan concreto",
++    )
++}
+diff --git a/android/app/src/main/java/com/noop/day/DayAgenda.kt b/android/app/src/main/java/com/noop/day/DayAgenda.kt
+index 6d824e61..493c8cf3 100644
+--- a/android/app/src/main/java/com/noop/day/DayAgenda.kt
++++ b/android/app/src/main/java/com/noop/day/DayAgenda.kt
+@@ -107,11 +107,10 @@ object DayAgendaSource {
+      * overlaps shares its width equally).
+      */
+     internal fun layoutDay(events: List<AgendaEvent>, day: LocalDate, zone: ZoneId, minMinutes: Int = 20): List<Placed> {
+-        val dayStart = day.atStartOfDay(zone).toInstant().toEpochMilli()
+         val spans = events.filter { !it.allDay && isOnDay(it, day, zone) }
+             .map { e ->
+-                val s = ((maxOf(e.begin, dayStart) - dayStart) / 60_000L).toInt().coerceIn(0, 24 * 60)
+-                val end = ((minOf(e.end, dayStart + 86_400_000L) - dayStart) / 60_000L).toInt().coerceIn(0, 24 * 60)
++                val s = clockMinute(e.begin, day, zone)
++                val end = clockMinute(e.end, day, zone)
+                 Triple(e, s, maxOf(end, minOf(s + minMinutes, 24 * 60)))
+             }
+             .sortedWith(compareBy<Triple<AgendaEvent, Int, Int>> { it.second }.thenByDescending { it.third })
+@@ -138,6 +137,21 @@ object DayAgendaSource {
+         return out
+     }
+ 
++    /**
++     * The clock time of [ms] on [day] in minutes (0 before the day, 1440 after it). Clock time, not time
++     * elapsed since midnight: on the 23- and 25-hour days of a clock change the grid's hour labels are
++     * clock hours, and elapsed minutes put every event after the change an hour off.
++     */
++    private fun clockMinute(ms: Long, day: LocalDate, zone: ZoneId): Int {
++        val t = Instant.ofEpochMilli(ms).atZone(zone)
++        val d = t.toLocalDate()
++        return when {
++            d.isBefore(day) -> 0
++            d.isAfter(day) -> 24 * 60
++            else -> t.hour * 60 + t.minute
++        }
++    }
++
+     /** Pure. All-day entries first, then by start time; untitled ones keep their place. */
+     internal fun inDayOrder(events: List<AgendaEvent>): List<AgendaEvent> =
+         events.sortedWith(compareBy<AgendaEvent> { !it.allDay }.thenBy { it.begin }.thenBy { it.title })
+diff --git a/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
+index 74673fba..3b2a31e3 100644
+--- a/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
++++ b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
+@@ -61,6 +61,7 @@ import com.noop.ui.NoopType
+ import com.noop.ui.Overline
+ import com.noop.ui.Palette
+ import com.noop.ui.uiString
++import kotlinx.coroutines.CancellationException
+ import kotlinx.coroutines.launch
+ import java.io.IOException
+ import java.time.LocalDate
+@@ -104,6 +105,12 @@ internal fun TodayMyDaySection() {
+     val locale = Locale.getDefault()
+     var view by remember { mutableStateOf(DayCalendar.loadView(ctx)) }
+     var anchor by remember { mutableStateOf(today) }
++    // The process can outlive the night: on the first look of a new day, a view left on today follows it.
++    var anchorToday by remember { mutableStateOf(today) }
++    LaunchedEffect(today) {
++        if (anchor == anchorToday) anchor = today
++        anchorToday = today
++    }
+     val (from, until) = DayCalendar.range(view, anchor, locale)
+     val agenda by produceState(emptyMap<LocalDate, List<AgendaEvent>>(), calendarAllowed, resumes, from, until) {
+         value = if (calendarAllowed) DayAgendaSource.range(ctx, from, until) else emptyMap()
+@@ -122,6 +129,10 @@ internal fun TodayMyDaySection() {
+             if (e.code == 401 || e.code == 403) TasksState.NeedsConsent else TasksState.Failed(TasksError.SERVER)
+         } catch (e: IOException) {
+             TasksState.Failed(TasksError.OFFLINE)
++        } catch (e: CancellationException) {
++            throw e
++        } catch (e: Exception) {
++            TasksState.Failed(TasksError.SERVER)   // an odd reply (not JSON) must not take the app down
+         }
+     }
+     val consent = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { res ->
+diff --git a/android/app/src/main/java/com/noop/food/FoodEnergy.kt b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
+index b8ce1a34..ddb2af22 100644
+--- a/android/app/src/main/java/com/noop/food/FoodEnergy.kt
++++ b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
+@@ -104,6 +104,17 @@ internal data class FoodEnergy(
+                 .takeIf { it > 0 }
+         }
+ 
++        /**
++         * A whole day's resting energy: the smart scale's BMR, else the profile's. The one figure the balance,
++         * the workout detail and the coach use for a session's resting share.
++         */
++        suspend fun dailyBasal(ctx: Context, repo: WhoopRepository): Double? =
++            runCatching { ScaleImport.snapshot(repo)?.bmr?.value }.getOrNull()?.takeIf { it > 0 }
++                ?: runCatching {
++                    val p = ProfileStore.from(ctx)
++                    profileBasalKcal(p.sex, p.weightKg, p.heightCm, p.age)
++                }.getOrNull()
++
+         /** Read the day's energy. Best-effort: a failed read just leaves its candidate out. */
+         suspend fun load(ctx: Context, repo: WhoopRepository, strapId: String, day: String): FoodEnergy? =
+             loadRange(ctx, repo, strapId, day, day)[day]
+@@ -126,11 +137,7 @@ internal data class FoodEnergy(
+                 repo.resolvedSeries("active_kcal", "my-whoop", from, to, strapDeviceId = strapId)
+                     .points.filter { it.value > 0 }.associate { it.day to it.value }
+             }.getOrDefault(emptyMap())
+-            val basal = runCatching { ScaleImport.snapshot(repo)?.bmr?.value }.getOrNull()?.takeIf { it > 0 }
+-                ?: runCatching {
+-                    val p = ProfileStore.from(ctx)
+-                    profileBasalKcal(p.sex, p.weightKg, p.heightCm, p.age)
+-                }.getOrNull()
++            val basal = dailyBasal(ctx, repo)
+             val training = runCatching { trainingExtra(ctx, repo, strapId, from, to, basal) }.getOrDefault(emptyMap())
+             val today = LocalDate.now(ZoneId.systemDefault())
+             val out = LinkedHashMap<String, FoodEnergy>()
+diff --git a/android/app/src/main/java/com/noop/food/FoodHistory.kt b/android/app/src/main/java/com/noop/food/FoodHistory.kt
+index 4579f5ce..27ff165a 100644
+--- a/android/app/src/main/java/com/noop/food/FoodHistory.kt
++++ b/android/app/src/main/java/com/noop/food/FoodHistory.kt
+@@ -243,7 +243,7 @@ private fun KcalChart(days: List<HistoryDay>, target: Int?, showBurned: Boolean)
+     val eatenColor = Palette.accent
+     val burnColor = Palette.textSecondary
+     val goalColor = Palette.chargeColor
+-    val grid = Palette.hairline
++    val grid = Palette.textSecondary.copy(alpha = 0.35f)   // hairline vanishes on an AMOLED screen
+     val top = max(
+         1.0,
+         listOfNotNull(days.mapNotNull { it.eaten?.kcal }.maxOrNull(), days.mapNotNull { it.burnedKcal }.maxOrNull(), target?.toDouble()).maxOrNull() ?: 1.0,
+@@ -276,7 +276,7 @@ private fun KcalChart(days: List<HistoryDay>, target: Int?, showBurned: Boolean)
+ @Composable
+ private fun MacroChart(days: List<HistoryDay>) {
+     val colors = listOf(Palette.metricCyan, Palette.metricAmber, Palette.metricRose)
+-    val grid = Palette.hairline
++    val grid = Palette.textSecondary.copy(alpha = 0.35f)   // hairline vanishes on an AMOLED screen
+     val top = max(1.0, days.mapNotNull { d -> d.eaten?.let { it.proteinG + it.carbsG + it.fatG } }.maxOrNull() ?: 1.0) * 1.1
+     Canvas(Modifier.fillMaxWidth().height(ChartHeight)) {
+         drawGrid(grid)
+@@ -297,7 +297,7 @@ private fun MacroChart(days: List<HistoryDay>) {
+ private fun DrawScope.drawGrid(color: Color) {
+     for (k in 1..3) {
+         val y = size.height * k / 4f
+-        drawLine(color, Offset(0f, y), Offset(size.width, y), strokeWidth = 1f)
++        drawLine(color, Offset(0f, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())   // 1 px is invisible at 600 dpi
+     }
+     drawLine(color, Offset(0f, size.height), Offset(size.width, size.height), strokeWidth = 1.dp.toPx())
+ }
+diff --git a/android/app/src/main/java/com/noop/food/FoodModels.kt b/android/app/src/main/java/com/noop/food/FoodModels.kt
+index 72645a8b..1c3fed14 100644
+--- a/android/app/src/main/java/com/noop/food/FoodModels.kt
++++ b/android/app/src/main/java/com/noop/food/FoodModels.kt
+@@ -122,6 +122,15 @@ object FoodDays {
+ 
+     fun today(zone: ZoneId = ZoneId.systemDefault()): String = LocalDate.now(zone).toString()
+ 
++    /**
++     * The day a meal eaten at [timestampMs] belongs to: before 04:00 it is still the night before, the
++     * late dinner [MealType.forTime] already calls dinner, not a first meal of the new day.
++     */
++    fun mealDayOf(timestampMs: Long, zone: ZoneId = ZoneId.systemDefault()): String {
++        val t = Instant.ofEpochMilli(timestampMs).atZone(zone)
++        return (if (t.toLocalTime() < LocalTime.of(4, 0)) t.toLocalDate().minusDays(1) else t.toLocalDate()).toString()
++    }
++
+     /** [timestampMs] moved to the local [day], same wall-clock time: what "this was yesterday's dinner" means. */
+     fun moveToDay(timestampMs: Long, day: String, zone: ZoneId = ZoneId.systemDefault()): Long {
+         val time = Instant.ofEpochMilli(timestampMs).atZone(zone).toLocalTime()
+@@ -174,7 +183,7 @@ data class FoodFavorite(
+         return FoodEntry(
+             id = id,
+             timestamp = timestampMs,
+-            day = FoodDays.dayOf(timestampMs, zone),
++            day = FoodDays.mealDayOf(timestampMs, zone),
+             note = "",
+             items = items,
+             kcal = t.kcal,
+diff --git a/android/app/src/main/java/com/noop/food/FoodScorer.kt b/android/app/src/main/java/com/noop/food/FoodScorer.kt
+index 6f54c6bb..80fda57f 100644
+--- a/android/app/src/main/java/com/noop/food/FoodScorer.kt
++++ b/android/app/src/main/java/com/noop/food/FoodScorer.kt
+@@ -22,12 +22,15 @@ import java.util.concurrent.atomic.AtomicBoolean
+  * victor:scores — asks Claude for the mark of every meal of today and yesterday that is over and not scored
+  * as it is now ([MealScoring.due]). Called when the Food tab or the Today food card shows, so a meal gets its
+  * mark the next time the wearer looks after it is finished; one pass at a time, process-scoped. A failure
+- * (offline, no key) stops the pass and the next look tries again.
++ * (offline, no key) stops the pass, and passes wait an hour before trying again.
+  */
+ object FoodScorer {
+ 
+     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+     private val running = AtomicBoolean(false)
++    /** After a failed request (offline, no credit, a refusal) the next pass waits [RETRY_MS], not the next look. */
++    @Volatile private var pausedUntil = 0L
++    private const val RETRY_MS = 3_600_000L
+ 
+     fun scoreDue(ctx: Context) {
+         val app = ctx.applicationContext
+@@ -43,6 +46,7 @@ object FoodScorer {
+ 
+     private suspend fun pass(ctx: Context) {
+         if (AiKeyStore.read(ctx, AiProvider.ANTHROPIC) == null) return
++        if (System.currentTimeMillis() < pausedUntil) return
+         val entries = FoodStore.load(ctx)
+         val now = LocalDateTime.now()
+         val today = now.toLocalDate()
+@@ -55,7 +59,10 @@ object FoodScorer {
+             val prompt = MealScoring.prompt(meal, day, group, entries.filter { it.day == day }, person)
+             when (val r = TrainingAi.ask(ctx, prompt, MealScoring.schema()) { MealScoring.parse(it, signature, System.currentTimeMillis()) }) {
+                 is TrainingAiResult.Ok -> FoodStore.saveScore(ctx, MealScoring.key(day, meal), r.value)
+-                is TrainingAiResult.Failed -> return
++                is TrainingAiResult.Failed -> {
++                    pausedUntil = System.currentTimeMillis() + RETRY_MS
++                    return
++                }
+             }
+         }
+     }
+diff --git a/android/app/src/main/java/com/noop/food/FoodSheet.kt b/android/app/src/main/java/com/noop/food/FoodSheet.kt
+index 8abd2fbb..68ec0a96 100644
+--- a/android/app/src/main/java/com/noop/food/FoodSheet.kt
++++ b/android/app/src/main/java/com/noop/food/FoodSheet.kt
+@@ -492,7 +492,8 @@ private fun ErrorCard(error: FoodError, detail: String?, onOpenCoach: () -> Unit
+     NoopCard(tint = Palette.statusWarning) {
+         Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
+             Text(uiString(errorMessage(error)), style = NoopType.subhead, color = Palette.textPrimary)
+-            if (detail != null) Text(detail, style = NoopType.footnote, color = Palette.textTertiary)
++            // Anthropic's own words are English: shown only when they are the one clue (an odd request).
++            if (detail != null && error == FoodError.BAD_REQUEST) Text(detail, style = NoopType.footnote, color = Palette.textSecondary)
+             if (error == FoodError.NO_KEY || error == FoodError.KEY_REJECTED || error == FoodError.BAD_REQUEST) {
+                 NoopButton(text = uiString(R.string.victor_food_open_coach), kind = NoopButtonKind.Tertiary) { onOpenCoach() }
+             }
+@@ -512,6 +513,7 @@ internal fun errorMessage(error: FoodError): Int = when (error) {
+     FoodError.REFUSAL -> R.string.victor_food_err_refusal
+     FoodError.UNREADABLE -> R.string.victor_food_err_unreadable
+     FoodError.IMAGE -> R.string.victor_food_err_image
++    FoodError.NO_CREDIT -> R.string.victor_food_err_no_credit
+ }
+ 
+ @Composable
+@@ -529,7 +531,7 @@ internal fun foodFieldColors() = OutlinedTextFieldDefaults.colors(
+     disabledTextColor = Palette.textTertiary,
+     cursorColor = Palette.accent,
+     focusedBorderColor = Palette.accent,
+-    unfocusedBorderColor = Palette.hairline,
++    unfocusedBorderColor = Palette.textSecondary.copy(alpha = 0.5f),   // hairline vanishes on an AMOLED screen
+     disabledBorderColor = Palette.hairline,
+     focusedLabelColor = Palette.accent,
+     unfocusedLabelColor = Palette.textSecondary,
+diff --git a/android/app/src/main/java/com/noop/food/FoodViewModel.kt b/android/app/src/main/java/com/noop/food/FoodViewModel.kt
+index 3fb221b5..0ea40458 100644
+--- a/android/app/src/main/java/com/noop/food/FoodViewModel.kt
++++ b/android/app/src/main/java/com/noop/food/FoodViewModel.kt
+@@ -80,7 +80,7 @@ class FoodViewModel(app: Application) : AndroidViewModel(app) {
+             _draft.value = FoodDraft(
+                 entryId = null,
+                 timestamp = now,
+-                day = FoodDays.dayOf(now),
++                day = FoodDays.mealDayOf(now),
+                 meal = MealType.forTimestamp(now),
+                 note = "",
+                 items = emptyList(),
+@@ -101,15 +101,22 @@ class FoodViewModel(app: Application) : AndroidViewModel(app) {
+ 
+     /** Move the meal to another local [day] (never the future), keeping its time of day. */
+     fun setDay(day: String) = _draft.update { d ->
+-        if (d == null || day > FoodDays.today()) d else d.copy(day = day, timestamp = FoodDays.moveToDay(d.timestamp, day))
++        if (d == null || day > FoodDays.today()) d
++        else d.copy(day = day, timestamp = if (FoodDays.mealDayOf(d.timestamp) == day) d.timestamp else FoodDays.moveToDay(d.timestamp, day))
+     }
+ 
+     fun setNote(note: String) = _draft.update { it?.copy(note = note.take(MAX_NOTE)) }
+ 
+     fun setAsFavorite(on: Boolean) = _draft.update { it?.copy(asFavorite = on) }
+ 
++    /** The last one-tap log (favourite id, time): a double tap logs the meal once, not twice. */
++    private var lastFavoriteTap: Pair<String, Long>? = null
++
+     /** One tap on a frequent meal: logged now, editable or deletable like any other meal. */
+     fun logFavorite(fav: FoodFavorite) {
++        val now = System.currentTimeMillis()
++        lastFavoriteTap?.let { (id, at) -> if (id == fav.id && now - at < 3_000L) return }
++        lastFavoriteTap = fav.id to now
+         viewModelScope.launch {
+             val ok = runCatching {
+                 FoodStore.logFavorite(getApplication(), repo, fav.id, UUID.randomUUID().toString(), System.currentTimeMillis())
+diff --git a/android/app/src/main/java/com/noop/food/FoodVision.kt b/android/app/src/main/java/com/noop/food/FoodVision.kt
+index dc8cd14c..7e297c38 100644
+--- a/android/app/src/main/java/com/noop/food/FoodVision.kt
++++ b/android/app/src/main/java/com/noop/food/FoodVision.kt
+@@ -6,11 +6,14 @@ import com.noop.ai.AiKeyStore
+ import com.noop.ai.AiProvider
+ import kotlinx.coroutines.CancellationException
+ import kotlinx.coroutines.Dispatchers
+-import kotlinx.coroutines.Job
++import kotlinx.coroutines.suspendCancellableCoroutine
+ import kotlinx.coroutines.withContext
++import okhttp3.Call
++import okhttp3.Callback
+ import okhttp3.MediaType.Companion.toMediaType
+ import okhttp3.OkHttpClient
+ import okhttp3.Request
++import okhttp3.Response
+ import okhttp3.RequestBody.Companion.toRequestBody
+ import org.json.JSONArray
+ import org.json.JSONObject
+@@ -21,6 +24,7 @@ import java.net.SocketTimeoutException
+ import java.net.UnknownHostException
+ import java.util.Base64
+ import java.util.concurrent.TimeUnit
++import kotlin.coroutines.resumeWithException
+ 
+ /** victor:food — why an analysis did not produce an estimate. The UI maps each to a string. */
+ enum class FoodError {
+@@ -35,6 +39,8 @@ enum class FoodError {
+     REFUSAL,
+     UNREADABLE,
+     IMAGE,
++    /** victor:food — the Anthropic account has no credit left (a 400 that says so). */
++    NO_CREDIT,
+ }
+ 
+ sealed interface FoodResult {
+@@ -111,7 +117,7 @@ object FoodVision {
+                 structured = false
+                 continue
+             }
+-            return FoodResult.Failed(errorForStatus(code), apiErrorMessage(body))
++            return FoodResult.Failed(errorFor(code, body), apiErrorMessage(body))
+         }
+     }
+ 
+@@ -236,6 +242,10 @@ object FoodVision {
+         return "format" in msg && "image" !in msg
+     }
+ 
++    /** [errorForStatus], with an empty account told apart from a bad request (both are 400s). */
++    internal fun errorFor(code: Int, body: String): FoodError =
++        if (code == 400 && body.contains("credit balance", ignoreCase = true)) FoodError.NO_CREDIT else errorForStatus(code)
++
+     internal fun errorForStatus(code: Int): FoodError = when (code) {
+         401, 403 -> FoodError.KEY_REJECTED
+         413 -> FoodError.IMAGE
+@@ -324,24 +334,29 @@ object FoodVision {
+ 
+     // MARK: - Transport
+ 
+-    internal suspend fun post(url: String, key: String, body: String): Pair<Int, String> =
+-        withContext(Dispatchers.IO) {
+-            val request = Request.Builder()
+-                .url(url)
+-                .addHeader("x-api-key", key)
+-                .addHeader("anthropic-version", API_VERSION)
+-                .addHeader("content-type", "application/json")
+-                .post(body.toRequestBody(JSON))
+-                .build()
+-            val call = http.newCall(request)
+-            // Leaving the sheet cancels the coroutine; cancel the socket too instead of waiting it out.
+-            val handle = coroutineContext[Job]?.invokeOnCompletion { cause ->
+-                if (cause is CancellationException) call.cancel()
+-            }
+-            try {
+-                call.execute().use { resp -> resp.code to resp.body?.string().orEmpty() }
+-            } finally {
+-                handle?.dispose()
+-            }
++    internal suspend fun post(url: String, key: String, body: String): Pair<Int, String> {
++        val request = Request.Builder()
++            .url(url)
++            .addHeader("x-api-key", key)
++            .addHeader("anthropic-version", API_VERSION)
++            .addHeader("content-type", "application/json")
++            .post(body.toRequestBody(JSON))
++            .build()
++        val call = http.newCall(request)
++        // Leaving the sheet (Cancel, Discard) cancels the coroutine, and with it the request itself: a blocking
++        // execute() would run to the end, and be paid for, before the cancellation was even seen.
++        return suspendCancellableCoroutine { cont ->
++            cont.invokeOnCancellation { call.cancel() }
++            call.enqueue(object : Callback {
++                override fun onFailure(call: Call, e: IOException) {
++                    if (cont.isActive) cont.resumeWithException(e)
++                }
++
++                override fun onResponse(call: Call, response: Response) {
++                    val result = runCatching { response.use { it.code to it.body?.string().orEmpty() } }
++                    if (cont.isActive) cont.resumeWith(result)
++                }
++            })
+         }
++    }
+ }
+diff --git a/android/app/src/main/java/com/noop/food/MealScoring.kt b/android/app/src/main/java/com/noop/food/MealScoring.kt
+index 974eae84..a08d6b42 100644
+--- a/android/app/src/main/java/com/noop/food/MealScoring.kt
++++ b/android/app/src/main/java/com/noop/food/MealScoring.kt
+@@ -4,6 +4,7 @@ import org.json.JSONArray
+ import org.json.JSONObject
+ import java.time.LocalDate
+ import java.time.LocalDateTime
++import java.time.ZoneId
+ import java.time.format.DateTimeFormatter
+ import java.util.Locale
+ import kotlin.math.roundToInt
+@@ -40,8 +41,19 @@ object MealScoring {
+         MealType.NIBBLE -> day.plusDays(1).atStartOfDay()
+     }
+ 
+-    /** The meals of [days] that are over and not scored as they are now, in the order they were eaten. */
+-    fun due(entries: List<FoodEntry>, scores: Map<String, MealScore>, now: LocalDateTime, days: Set<String>): List<Pair<String, MealType>> {
++    /**
++     * The meals of [days] that are over and not scored as they are now, in the order they were eaten. A meal
++     * whose last photo is under [SETTLE_MIN] minutes old waits: a dish logged after its slot is often
++     * followed by the rest of it, and each change is a new request.
++     */
++    fun due(
++        entries: List<FoodEntry>,
++        scores: Map<String, MealScore>,
++        now: LocalDateTime,
++        days: Set<String>,
++        zone: ZoneId = ZoneId.systemDefault(),
++    ): List<Pair<String, MealType>> {
++        val settledBy = now.minusMinutes(SETTLE_MIN).atZone(zone).toInstant().toEpochMilli()
+         val out = ArrayList<Pair<String, MealType>>()
+         for ((day, ofDay) in entries.filter { it.day in days }.groupBy { it.day }.toSortedMap()) {
+             val date = runCatching { LocalDate.parse(day) }.getOrNull() ?: continue
+@@ -49,7 +61,8 @@ object MealScoring {
+                 val laterLogged = meal != MealType.NIBBLE &&
+                     ofDay.any { it.meal != MealType.NIBBLE && it.meal.ordinal > meal.ordinal }
+                 val over = laterLogged || !now.isBefore(windowEnd(meal, date))
+-                if (over && scores[key(day, meal)]?.signature != signature(list)) out += day to meal
++                val settled = list.maxOf { it.timestamp } <= settledBy
++                if (over && settled && scores[key(day, meal)]?.signature != signature(list)) out += day to meal
+             }
+         }
+         return out
+@@ -110,4 +123,5 @@ object MealScoring {
+     }
+ 
+     private val HHMM = DateTimeFormatter.ofPattern("HH:mm", Locale.ROOT)
++    private const val SETTLE_MIN = 20L
+ }
+diff --git a/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt b/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt
+index d67f03bd..fb606868 100644
+--- a/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt
++++ b/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt
+@@ -60,7 +60,14 @@ object VictorHcRefresh {
+     suspend fun refresh(ctx: Context, repo: WhoopRepository): Boolean = withContext(Dispatchers.IO) {
+         lock.withLock {
+             if (System.currentTimeMillis() - lastRunMs < MIN_INTERVAL_MS) return@withLock false
+-            val wrote = runCatching { run(ctx.applicationContext, repo) }.getOrDefault(false)
++            // A cancelled read (the coach's 8 s cap) is not a read: it must not hold the next one for 2 minutes.
++            val wrote = try {
++                run(ctx.applicationContext, repo)
++            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
++                throw e
++            } catch (e: Exception) {
++                false
++            }
+             lastRunMs = System.currentTimeMillis()
+             if (wrote) _version.value++
+             wrote
+@@ -198,19 +205,23 @@ object VictorHcRefresh {
+         onRecord: (T) -> Unit,
+     ) {
+         var pageToken: String? = null
++        val read = ArrayList<T>()
+         try {
+             do {
+                 val response = client.readRecords(ReadRecordsRequest(type, filter, pageSize = PAGE_SIZE, pageToken = pageToken))
+                 for (record in response.records) {
+                     if (HealthConnectImporter.isSelfWritten(record.metadata.dataOrigin.packageName, selfPackage)) continue
+-                    onRecord(record)
++                    read += record
+                 }
+                 pageToken = response.pageToken
+             } while (pageToken != null)
+         } catch (e: Exception) {
+-            // A type that fails is simply left as stored, like the full import's per-type catch (#34).
++            // A type that fails is simply left as stored, like the full import's per-type catch (#34): a page
++            // that fails half-way must not write a partial sum over a whole one.
+             if (e is kotlin.coroutines.cancellation.CancellationException) throw e
++            return
+         }
++        read.forEach(onRecord)
+     }
+ 
+     private fun round1(x: Double) = round(x * 10.0) / 10.0
+diff --git a/android/app/src/main/java/com/noop/training/TrainingAi.kt b/android/app/src/main/java/com/noop/training/TrainingAi.kt
+index 6cf43772..5f7a4054 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingAi.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingAi.kt
+@@ -133,7 +133,7 @@ object TrainingAi {
+                 structured = false
+                 continue
+             }
+-            return TrainingAiResult.Failed(FoodVision.errorForStatus(code), FoodVision.apiErrorMessage(body))
++            return TrainingAiResult.Failed(FoodVision.errorFor(code, body), FoodVision.apiErrorMessage(body))
+         }
+     }
+ 
+@@ -208,8 +208,9 @@ object TrainingAi {
+         append(". A gym strength session is \"Strength\" (or \"Weightlifting\", \"Powerlifting\", \"Calisthenics\", \"CrossFit\" when clearly that).\n")
+         if (mode == TrainingMode.LOGGED) {
+             append("- start_time and end_time: 24-hour HH:mm when the user says when it was (\"de 5 a 6\" in the afternoon is 17:00 to 18:00; ")
+-            append("a finished workout cannot end after the current time below); \"\" when not said. When only a duration is said, ")
+-            append("end_time \"\" and start_time \"\". day_offset: 0 today, -1 yesterday, -2 the day before; 0 when not said.\n")
++            append("a finished workout cannot end after the current time below); \"\" when not said. When only a duration is said ")
++            append("(\"1 h 10\"), end_time is the current time below and start_time that duration earlier. day_offset: 0 today, -1 ")
++            append("yesterday, -2 the day before; 0 when not said.\n")
+         } else {
+             append("- start_time and end_time: \"\"; day_offset: 0.\n")
+         }
+@@ -306,7 +307,9 @@ object TrainingAi {
+         )
+     }
+ 
+-    private fun clock(s: String): LocalTime? = runCatching { LocalTime.parse(s.trim()) }.getOrNull()
++    private val CLOCK = DateTimeFormatter.ofPattern("H:mm")
++
++    private fun clock(s: String): LocalTime? = runCatching { LocalTime.parse(s.trim(), CLOCK) }.getOrNull()   // "7:30" too
+ 
+     // MARK: - Session → energy (pure)
+ 
+@@ -365,8 +368,10 @@ object TrainingAi {
+         append("effort given below. Heart rate measures only the cardiovascular load; add the muscular load of the lifting (sets, ")
+         append("reps and loads relative to body weight, big compound and loaded body-weight movements counting most), the way ")
+         append("WHOOP's Strength Trainer adds muscular load to strain. For steady cardio it stays close to the heart-rate effort; ")
+-        append("never below it. For reference on this axis: an easy hour is about 20-35, a hard gym session about 45-65, an ")
+-        append("all-out race 80+.\n\n")
++        append("never below it. The axis is logarithmic (100 x ln(TRIMP+1) / ln 7201, Edwards zones by heart-rate reserve); on ")
++        append("it an hour in zone 1 is about 46, an hour in zone 3 about 58, an all-out hour in zone 5 about 64, and 75+ takes ")
++        append("several hours of hard work. Light activity below zone 1 stays under about 25. A demanding hour of heavy lifting ")
++        append("usually lands about 40-55.\n\n")
+         profileLine?.let { append(it).append('\n') }
+         bodyLine?.let { append(it).append('\n') }
+         restingHr?.let { append("Resting HR: $it bpm\n") }
+diff --git a/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
+index e1b5ccf3..6dffa852 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
+@@ -2,6 +2,7 @@ package com.noop.training
+ 
+ import android.content.Context
+ import com.noop.NoopApplication
++import com.noop.ai.AiKeyStore
+ import com.noop.ai.ScaleCoachContext
+ import com.noop.ai.VictorCoachVitals
+ import com.noop.analytics.ManualWorkoutRescore
+@@ -21,6 +22,7 @@ import kotlinx.coroutines.launch
+ import java.time.Instant
+ import java.time.ZoneId
+ import java.time.format.DateTimeFormatter
++import java.util.concurrent.ConcurrentHashMap
+ import java.util.concurrent.atomic.AtomicBoolean
+ 
+ /**
+@@ -46,6 +48,10 @@ object TrainingAnalyzer {
+     val rowsChanged: StateFlow<Int> = _rowsChanged.asStateFlow()
+ 
+     private val refreshing = AtomicBoolean(false)
++    /** Asked to analyse again while running (an edit, a last tick): runs once more when the current one ends. */
++    private val rerun = ConcurrentHashMap.newKeySet<String>()
++    /** When each session's last attempt failed: the automatic re-check waits [RETRY_MS] before paying again. */
++    private val failedAt = ConcurrentHashMap<String, Long>()
+ 
+     fun launch(ctx: Context, sessionId: String) {
+         val app = ctx.applicationContext
+@@ -66,12 +72,20 @@ object TrainingAnalyzer {
+                 runCatching {
+                     val a = app as NoopApplication
+                     val strapId = a.sourceCoordinator.activeDeviceId.value ?: a.activeDeviceId
+-                    val since = System.currentTimeMillis() / 1000 - RECHECK_DAYS * 86_400L
+-                    for (s in TrainingStore.load(app).filter { !it.isLive && (it.endTs ?: 0) >= since }) {
++                    val nowMs = System.currentTimeMillis()
++                    val all = TrainingStore.load(app).filter { !it.isLive }
++                    // Sessions whose workout row is gone stop counting toward the day's Effort.
++                    if (all.isNotEmpty()) {
++                        val rows = a.repository.workoutsUnion(strapId, all.minOf { it.startTs } - 1, all.maxOf { it.endTs ?: it.startTs } + 1)
++                        VictorDayEffort.setUnpaired(all.filter { s -> s.analysis != null && rows.none { s.pairs(it) } }.map { it.id }.toSet())
++                    }
++                    val since = nowMs / 1000 - RECHECK_DAYS * 86_400L
++                    for (s in all.filter { (it.endTs ?: 0) >= since }) {
+                         val end = s.endTs ?: continue
++                        if (failedAt[s.id]?.let { nowMs - it < RETRY_MS } == true) continue
+                         val seen = s.analysis?.hrSamples
+                         val now = runCatching { a.repository.hrSamplesUnion(strapId, s.startTs, end, HR_LIMIT).size }.getOrDefault(0)
+-                        if (TrainingEnergy.needsReanalysis(seen, now)) analyze(app, s.id)
++                        if (TrainingEnergy.needsReanalysis(seen, now)) analyze(app, s.id) else reapply(a, strapId, s)
+                     }
+                 }
+             } finally {
+@@ -80,9 +94,30 @@ object TrainingAnalyzer {
+         }
+     }
+ 
++    /**
++     * A later rewrite of the workout row (upstream's rescore of a fresh manual workout, a sync) can put back the
++     * heart-rate-only figures; the session's analysis is applied again, locally, without asking Claude.
++     */
++    private suspend fun reapply(app: NoopApplication, strapId: String, s: TrainingSession) {
++        val analysis = s.analysis ?: return
++        val end = s.endTs ?: return
++        val row = runCatching { app.repository.workoutsUnion(strapId, s.startTs - 1, end + 1).firstOrNull { s.pairs(it) } }.getOrNull() ?: return
++        val fixed = TrainingEnergy.applyToRow(row, analysis, row.avgHr, row.maxHr)
++        // Only ever raised back: a row already at (or above) the session's figures is left alone.
++        val behind = (row.energyKcal ?: 0.0) < (fixed.energyKcal ?: 0.0) - 0.5 || (row.strain ?: 0.0) < (fixed.strain ?: 0.0) - 0.05
++        if (behind) {
++            runCatching { app.repository.upsertWorkouts(listOf(fixed)) }
++            _rowsChanged.update { it + 1 }
++        }
++    }
++
+     suspend fun analyze(ctx: Context, sessionId: String) {
+-        if (sessionId in _busy.value) return
+-        _busy.update { it + sessionId }
++        var claimed = false
++        _busy.update { cur -> claimed = sessionId !in cur; if (claimed) cur + sessionId else cur }
++        if (!claimed) {
++            rerun += sessionId
++            return
++        }
+         _errors.update { it - sessionId }
+         try {
+             val app = ctx.applicationContext as NoopApplication
+@@ -108,15 +143,18 @@ object TrainingAnalyzer {
+             }
+             val scale = runCatching { ScaleImport.snapshot(repo, ScaleImport.newestReading(ctx)) }.getOrNull()
+             val zone = ZoneId.systemDefault()
++            // Body, resting HR and the strap's heart rate leave the phone only with the coach's data consent;
++            // without it Claude estimates from the exercises alone (the local heart-rate figures still count).
++            val consent = AiKeyStore.readConsent(ctx)
+             val prompt = TrainingAi.kcalPrompt(
+                 session = session,
+                 whenLine = whenLine(session.startTs, end, zone),
+                 durationMin = ((end - session.startTs) / 60).toInt(),
+-                profileLine = VictorCoachVitals.profileLine(ctx, scaleHasWeight = scale?.weight != null),
+-                bodyLine = ScaleCoachContext.line(scale),
+-                restingHr = restingHr,
+-                hr = hr,
+-                perExercise = TrainingHr.perExercise(session, samples),
++                profileLine = if (consent) VictorCoachVitals.profileLine(ctx, scaleHasWeight = scale?.weight != null) else null,
++                bodyLine = if (consent) ScaleCoachContext.line(scale) else null,
++                restingHr = if (consent) restingHr else null,
++                hr = if (consent) hr else null,
++                perExercise = if (consent) TrainingHr.perExercise(session, samples) else emptyMap(),
+             )
+             when (val r = TrainingAi.estimate(ctx, prompt)) {
+                 is TrainingAiResult.Ok -> {
+@@ -128,6 +166,7 @@ object TrainingAnalyzer {
+                         effort = listOfNotNull(r.value.effort, hrStrain).maxOrNull(),
+                     )
+                     TrainingStore.edit(ctx, sessionId) { it.copy(analysis = analysis) }
++                    failedAt.remove(sessionId)
+                     // The workout itself shows the session's figures (list, detail, totals), not only this log.
+                     runCatching {
+                         val row = repo.workoutsUnion(strapId, session.startTs - 1, end + 1).firstOrNull { session.pairs(it) }
+@@ -135,15 +174,20 @@ object TrainingAnalyzer {
+                     }
+                     _rowsChanged.update { it + 1 }
+                 }
+-                is TrainingAiResult.Failed -> _errors.update { it + (sessionId to r.error) }
++                is TrainingAiResult.Failed -> {
++                    _errors.update { it + (sessionId to r.error) }
++                    failedAt[sessionId] = System.currentTimeMillis()
++                }
+             }
+         } catch (e: kotlinx.coroutines.CancellationException) {
+             throw e
+         } catch (e: Exception) {
+             _errors.update { it + (sessionId to FoodError.NETWORK) }
++            failedAt[sessionId] = System.currentTimeMillis()
+         } finally {
+             _busy.update { it - sessionId }
+         }
++        if (rerun.remove(sessionId)) analyze(ctx, sessionId)
+     }
+ 
+     private fun whenLine(start: Long, end: Long, zone: ZoneId): String {
+@@ -155,6 +199,7 @@ object TrainingAnalyzer {
+     private val HHMM = DateTimeFormatter.ofPattern("HH:mm")
+     private const val HR_LIMIT = 20_000
+     private const val RECHECK_DAYS = 3L
++    private const val RETRY_MS = 3_600_000L
+ }
+ 
+ /**
+@@ -170,17 +215,32 @@ object TrainingHooks {
+     fun onWorkoutSaved(ctx: Context, row: WorkoutRow) {
+         val app = ctx.applicationContext
+         scope.launch {
+-            val live = TrainingStore.load(app).firstOrNull { it.isLive && it.startTs == row.startTs } ?: return@launch
+-            TrainingStore.edit(app, live.id) { it.copy(endTs = row.endTs, sport = row.sport) }
+-            TrainingAnalyzer.analyze(app, live.id)
++            runCatching {
++                val live = TrainingStore.load(app).firstOrNull { it.isLive && it.startTs == row.startTs } ?: return@launch
++                TrainingStore.edit(app, live.id) { it.copy(endTs = row.endTs, sport = row.sport) }
++                TrainingAnalyzer.analyze(app, live.id)
++            }
+         }
+     }
+ 
+-    /** `discardWorkout`: the plan of the workout that started at [startMs] goes too. */
++    /** `discardWorkout` (or upstream dropping a session with no heart rate): the plan of the workout that started at [startMs] goes too. */
+     fun onWorkoutDiscarded(ctx: Context, startMs: Long) {
+         val app = ctx.applicationContext
+         scope.launch {
+-            TrainingStore.load(app).filter { it.isLive && it.startTs == startMs / 1000 }.forEach { TrainingStore.delete(app, it.id) }
++            runCatching { TrainingStore.load(app).filter { it.isLive && it.startTs == startMs / 1000 }.forEach { TrainingStore.delete(app, it.id) } }
+         }
+     }
++
++    /** `deleteWorkout`: the deleted workout's exercises, energy and load go with it. */
++    fun onWorkoutDeleted(ctx: Context, row: WorkoutRow) {
++        val app = ctx.applicationContext
++        scope.launch { runCatching { TrainingStore.deleteFor(app, row.startTs, row.sport) } }
++    }
++
++    /** `saveManualWorkout` editing [old]: a new start or sport keeps its exercises paired. */
++    fun onWorkoutEdited(ctx: Context, old: WorkoutRow?, new: WorkoutRow) {
++        if (old == null || (old.startTs == new.startTs && old.sport == new.sport)) return
++        val app = ctx.applicationContext
++        scope.launch { runCatching { TrainingStore.repair(app, old, new) } }
++    }
+ }
+diff --git a/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt b/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
+index ae7112b1..4db03e53 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
+@@ -28,7 +28,7 @@ internal object TrainingCoachContext {
+         val perExercise = sessions.associate { s ->
+             s.id to runCatching { TrainingHr.perExercise(s, repo.hrSamplesUnion(strapId, s.startTs, s.endTs ?: s.startTs)) }.getOrDefault(emptyMap())
+         }
+-        return line(sessions, rows, perExercise, zone)
++        return line(TrainingEnergy.onePerWorkout(sessions), rows, perExercise, zone, com.noop.food.FoodEnergy.dailyBasal(ctx, repo))
+     }
+ 
+     /** Pure: newest first; null when no session pairs with a stored workout. */
+@@ -37,6 +37,7 @@ internal object TrainingCoachContext {
+         rows: List<WorkoutRow>,
+         perExercise: Map<String, Map<Int, TrainingHr.Stat>>,
+         zone: ZoneId,
++        dailyBasalKcal: Double? = null,
+     ): String? {
+         val parts = sessions.sortedByDescending { it.startTs }.mapNotNull { s ->
+             val row = rows.firstOrNull { s.pairs(it) } ?: return@mapNotNull null
+@@ -54,7 +55,7 @@ internal object TrainingCoachContext {
+                 (s.analysis?.hrKcal ?: row.energyKcal.takeIf { s.analysis == null })?.let { "strap HR estimate ${it.roundToInt()} kcal" },
+             ).joinToString(", ")
+             val ai = s.analysis?.let { a ->
+-                val extra = TrainingEnergy.extraKcal(a.totalKcal, a.hrKcal, row.durationS ?: (row.endTs - row.startTs).toDouble(), null)
++                val extra = TrainingEnergy.extraKcal(a.totalKcal, a.hrKcal, row.durationS ?: (row.endTs - row.startTs).toDouble(), dailyBasalKcal)
+                 "Claude estimate ${a.totalKcal.roundToInt()} kcal" + (if (extra >= 1) " (adds ~${extra.roundToInt()} kcal to the day's burn)" else "") +
+                     (a.effort?.let { e -> "; effort with muscular load ${e.roundToInt()}/100" + a.hrStrain?.let { h -> " (heart rate alone ${h.roundToInt()})" }.orEmpty() }.orEmpty()) +
+                     (a.score?.let { s -> "; session score $s/10" + a.scoreNote.takeIf { it.isNotBlank() }?.let { " («$it»)" }.orEmpty() }.orEmpty())
+diff --git a/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt b/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
+index b78a5aed..958e997e 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
+@@ -73,6 +73,8 @@ fun TrainingDetailSection(vm: AppViewModel, row: WorkoutRow) {
+         }
+     }
+     var editing by remember { mutableStateOf(false) }
++    // The same resting share the energy balance takes off, so "adds X to the day" matches Food.
++    val basal by produceState<Double?>(null) { value = withContext(Dispatchers.IO) { com.noop.food.FoodEnergy.dailyBasal(ctx, vm.repo) } }
+ 
+     SettingsRowDivider()
+     Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
+@@ -101,7 +103,7 @@ fun TrainingDetailSection(vm: AppViewModel, row: WorkoutRow) {
+                 Text(uiString(R.string.victor_training_ai_kcal, a.totalKcal.roundToInt(), range), style = NoopType.headline, color = Palette.textPrimary)
+                 val hr = a.hrKcal
+                 if (hr != null) {
+-                    val extra = TrainingEnergy.extraKcal(a.totalKcal, hr, row.durationS ?: (row.endTs - row.startTs).toDouble(), null)
++                    val extra = TrainingEnergy.extraKcal(a.totalKcal, hr, row.durationS ?: (row.endTs - row.startTs).toDouble(), basal)
+                     Text(
+                         if (extra > 0) uiString(R.string.victor_training_hr_kcal_extra, hr.roundToInt(), extra.roundToInt())
+                         else uiString(R.string.victor_training_hr_kcal, hr.roundToInt()),
+diff --git a/android/app/src/main/java/com/noop/training/TrainingEditor.kt b/android/app/src/main/java/com/noop/training/TrainingEditor.kt
+index 7bf7189b..84beb47b 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingEditor.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingEditor.kt
+@@ -65,6 +65,7 @@ private fun ExerciseEditor(ex: TrainingExercise, onChange: (TrainingExercise) ->
+                     label = { Text(uiString(R.string.victor_training_exercise)) },
+                     singleLine = true,
+                     textStyle = NoopType.body,
++                    colors = com.noop.food.foodFieldColors(),
+                     modifier = Modifier.weight(1f),
+                 )
+                 IconButton(onClick = onRemove) {
+@@ -141,6 +142,7 @@ private fun IntField(value: Int?, label: Int, modifier: Modifier, onChange: (Int
+         singleLine = true,
+         textStyle = NoopType.bodyNumber,
+         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
++        colors = com.noop.food.foodFieldColors(),
+         modifier = modifier,
+     )
+ }
+@@ -164,6 +166,7 @@ private fun NumberField(value: Double?, label: Int, modifier: Modifier, onChange
+         singleLine = true,
+         textStyle = NoopType.bodyNumber,
+         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
++        colors = com.noop.food.foodFieldColors(),
+         modifier = modifier,
+     )
+ }
+diff --git a/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt b/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt
+index 7e7c360e..56944389 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt
+@@ -147,6 +147,7 @@ fun TrainingLivePanel(workoutStartMs: Long) {
+                         label = { Text(uiString(R.string.victor_training_reps)) },
+                         singleLine = true,
+                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
++                        colors = com.noop.food.foodFieldColors(),
+                         modifier = Modifier.weight(1f),
+                     )
+                     OutlinedTextField(
+@@ -155,6 +156,7 @@ fun TrainingLivePanel(workoutStartMs: Long) {
+                         label = { Text(uiString(if (session.exercises[i].perHand) R.string.victor_training_kg_each else R.string.victor_training_kg)) },
+                         singleLine = true,
+                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
++                        colors = com.noop.food.foodFieldColors(),
+                         modifier = Modifier.weight(1f),
+                     )
+                 }
+diff --git a/android/app/src/main/java/com/noop/training/TrainingModels.kt b/android/app/src/main/java/com/noop/training/TrainingModels.kt
+index 6293de35..11481021 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingModels.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingModels.kt
+@@ -223,7 +223,7 @@ object TrainingEnergy {
+         zone: ZoneId = ZoneId.systemDefault(),
+     ): Map<String, Double> {
+         val out = HashMap<String, Double>()
+-        for (s in sessions) {
++        for (s in onePerWorkout(sessions)) {
+             val a = s.analysis ?: continue
+             val row = rows.firstOrNull { s.pairs(it) } ?: continue
+             val duration = row.durationS ?: (row.endTs - row.startTs).toDouble()
+@@ -239,9 +239,20 @@ object TrainingEnergy {
+      */
+     fun needsReanalysis(seenSamples: Int?, nowSamples: Int): Boolean {
+         if (seenSamples == null) return true
++        // Analysed before the strap handed over any of it: a short session must not wait for 60 samples.
++        if (seenSamples == 0) return nowSamples >= 20
+         return nowSamples >= seenSamples + maxOf(60, seenSamples / 4)
+     }
+ 
++    /**
++     * Finished sessions, one per workout (start + sport): a workout logged twice before the store deduplicated
++     * keeps only its newest analysis, so nothing counts twice.
++     */
++    fun onePerWorkout(sessions: List<TrainingSession>): List<TrainingSession> =
++        sessions.filter { !it.isLive }
++            .groupBy { it.startTs to it.sport }
++            .map { (_, same) -> same.maxBy { it.analysis?.atMs ?: 0L } } + sessions.filter { it.isLive }
++
+     /**
+      * The workout row with the session's figures from its latest analysis, so the Workouts list, its detail
+      * and every total show them: energy = the larger of Claude's estimate and the heart-rate one, Effort = the
+diff --git a/android/app/src/main/java/com/noop/training/TrainingSheet.kt b/android/app/src/main/java/com/noop/training/TrainingSheet.kt
+index ec18b72e..72b7a327 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingSheet.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingSheet.kt
+@@ -2,6 +2,7 @@ package com.noop.training
+ 
+ import android.app.TimePickerDialog
+ import android.text.format.DateFormat
++import androidx.compose.foundation.horizontalScroll
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+@@ -135,7 +136,7 @@ fun TrainingSheet(
+                     stage = Stage.REVIEW
+                 }
+                 is TrainingAiResult.Failed -> {
+-                    error = ctx.getString(trainingError(r.error)) + (r.detail?.let { "\n$it" } ?: "")
++                    error = ctx.getString(trainingError(r.error)) + (r.detail?.takeIf { r.error == com.noop.food.FoodError.BAD_REQUEST }?.let { "\n$it" } ?: "")
+                     stage = Stage.WRITE
+                 }
+             }
+@@ -212,14 +213,15 @@ fun TrainingSheet(
+             verticalArrangement = Arrangement.spacedBy(Metrics.space16),
+         ) {
+             Text(uiString(R.string.victor_training_title), style = NoopType.title2, color = Palette.textPrimary)
+-            Row(horizontalArrangement = Arrangement.spacedBy(Metrics.space6)) {
+-                FoodChip(uiString(R.string.victor_training_mode_planned), selected = !suggest && mode == TrainingMode.PLANNED) {
++            // Compact chips, and a row that scrolls rather than breaking a word on a narrow phone (S25 Ultra: 384 dp).
++            Row(horizontalArrangement = Arrangement.spacedBy(Metrics.space6), modifier = Modifier.horizontalScroll(rememberScrollState())) {
++                FoodChip(uiString(R.string.victor_training_mode_planned), selected = !suggest && mode == TrainingMode.PLANNED, small = true) {
+                     if (stage != Stage.READING) { mode = TrainingMode.PLANNED; suggest = false }
+                 }
+-                FoodChip(uiString(R.string.victor_training_mode_logged), selected = !suggest && mode == TrainingMode.LOGGED) {
++                FoodChip(uiString(R.string.victor_training_mode_logged), selected = !suggest && mode == TrainingMode.LOGGED, small = true) {
+                     if (stage != Stage.READING) { mode = TrainingMode.LOGGED; suggest = false }
+                 }
+-                FoodChip(uiString(R.string.victor_training_mode_suggest), selected = suggest) {
++                FoodChip(uiString(R.string.victor_training_mode_suggest), selected = suggest, small = true) {
+                     if (stage != Stage.READING) { mode = TrainingMode.PLANNED; suggest = true }
+                 }
+             }
+@@ -243,6 +245,7 @@ fun TrainingSheet(
+                         },
+                         textStyle = NoopType.body,
+                         minLines = 4,
++                        colors = com.noop.food.foodFieldColors(),
+                         modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp),
+                     )
+                     DictateButton(text) { text = it }
+@@ -411,10 +414,10 @@ private fun SuggestOptions(
+ private fun SportPicker(sport: String, onPick: (String) -> Unit) {
+     var open by remember { mutableStateOf(false) }
+     Box {
+-        FoodChip(sport, selected = true) { open = true }
++        FoodChip(VictorSportNames.display(sport), selected = true) { open = true }
+         DropdownMenu(expanded = open, onDismissRequest = { open = false }, modifier = Modifier.heightIn(max = 360.dp)) {
+             TrainingAi.sportNames().forEach { name ->
+-                DropdownMenuItem(text = { Text(name, style = NoopType.body) }, onClick = { onPick(name); open = false })
++                DropdownMenuItem(text = { Text(VictorSportNames.display(name), style = NoopType.body) }, onClick = { onPick(name); open = false })
+             }
+         }
+     }
+diff --git a/android/app/src/main/java/com/noop/training/TrainingStore.kt b/android/app/src/main/java/com/noop/training/TrainingStore.kt
+index 145b71cb..8d10086b 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingStore.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingStore.kt
+@@ -1,6 +1,7 @@
+ package com.noop.training
+ 
+ import android.content.Context
++import com.noop.data.WorkoutRow
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.SupervisorJob
+@@ -168,7 +169,13 @@ object TrainingStore {
+     private val writes = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+ 
+     fun launch(block: suspend () -> Unit) {
+-        writes.launch { block() }
++        writes.launch { runCatching { block() } }   // a failed write (disk full) must not take the app down
++    }
++
++    /** Loads the log at app start, so the day's Effort ([VictorDayEffort]) is right before any screen asks. */
++    fun preload(ctx: Context) {
++        val app = ctx.applicationContext
++        launch { load(app) }
+     }
+ 
+     private val _sessions = MutableStateFlow<List<TrainingSession>>(emptyList())
+@@ -179,9 +186,22 @@ object TrainingStore {
+         mutex.withLock { state(ctx) }
+     }
+ 
+-    /** Add or replace (by id). */
++    /**
++     * Add or replace (by id). A finished session also replaces any other finished one of the same workout
++     * (same start and sport): logging the same workout twice must not count its energy and load twice.
++     */
+     suspend fun save(ctx: Context, session: TrainingSession) = update(ctx) { list ->
+-        list.filterNot { it.id == session.id } + session
++        list.filterNot { it.id == session.id || (!session.isLive && !it.isLive && it.startTs == session.startTs && it.sport == session.sport) } + session
++    }
++
++    /** victor:training — the workout was deleted: its exercise log goes with it. */
++    suspend fun deleteFor(ctx: Context, startTs: Long, sport: String) = update(ctx) { list ->
++        list.filterNot { !it.isLive && it.startTs == startTs && it.sport == sport }
++    }
++
++    /** victor:training — the workout's time or sport was edited: its exercise log follows it. */
++    suspend fun repair(ctx: Context, old: WorkoutRow, new: WorkoutRow) = update(ctx) { list ->
++        list.map { if (!it.isLive && it.pairs(old)) it.copy(startTs = new.startTs, endTs = new.endTs, sport = new.sport) else it }
+     }
+ 
+     suspend fun delete(ctx: Context, id: String) = update(ctx) { list -> list.filterNot { it.id == id } }
+@@ -191,9 +211,23 @@ object TrainingStore {
+         list.map { if (it.id == id) change(it) else it }
+     }
+ 
+-    /** Begin a planned session for the workout that started at [startTs]; any stale live one is dropped. */
++    /**
++     * Begin a planned session for the workout that started at [TrainingSession.startTs]; any stale live one is
++     * dropped. A plan added to a workout already running joins its plan, keeping the sets already ticked.
++     */
+     suspend fun startLive(ctx: Context, session: TrainingSession) = update(ctx) { list ->
+-        list.filterNot { it.isLive || it.id == session.id } + session
++        val running = list.firstOrNull { it.isLive && it.startTs == session.startTs }
++        if (running != null) {
++            list.map {
++                if (it.id != running.id) it
++                else it.copy(
++                    exercises = it.exercises + session.exercises,
++                    description = listOf(it.description, session.description).filter { d -> d.isNotBlank() }.joinToString("\n"),
++                )
++            }
++        } else {
++            list.filterNot { it.isLive || it.id == session.id } + session
++        }
+     }
+ 
+     private suspend fun update(ctx: Context, change: (List<TrainingSession>) -> List<TrainingSession>) =
+diff --git a/android/app/src/main/java/com/noop/training/VictorDayEffort.kt b/android/app/src/main/java/com/noop/training/VictorDayEffort.kt
+index 1d62d7dd..7484132b 100644
+--- a/android/app/src/main/java/com/noop/training/VictorDayEffort.kt
++++ b/android/app/src/main/java/com/noop/training/VictorDayEffort.kt
+@@ -26,8 +26,22 @@ object VictorDayEffort {
+     /** Extra TRIMP per local day ("yyyy-MM-dd"). Kept current by [TrainingStore]. */
+     val boosts: StateFlow<Map<String, Double>> = _boosts.asStateFlow()
+ 
++    @Volatile private var sessions: List<TrainingSession> = emptyList()
++    @Volatile private var unpaired: Set<String> = emptySet()
++
+     fun update(sessions: List<TrainingSession>, zone: ZoneId = ZoneId.systemDefault()) {
+-        _boosts.value = extraTrimpByDay(sessions, zone)
++        this.sessions = sessions
++        _boosts.value = extraTrimpByDay(sessions.filter { it.id !in unpaired }, zone)
++    }
++
++    /**
++     * The analysed sessions whose workout row is gone (deleted, merged, re-timed outside the app's hooks):
++     * they stop counting, as they already do in the energy balance. Set by [TrainingAnalyzer.refreshStale].
++     */
++    fun setUnpaired(ids: Set<String>, zone: ZoneId = ZoneId.systemDefault()) {
++        if (ids == unpaired) return
++        unpaired = ids
++        update(sessions, zone)
+     }
+ 
+     /** Pure: the day's merged rows with the extra load added to their Effort. */
+@@ -52,7 +66,7 @@ object VictorDayEffort {
+     /** Pure: per day, the load Claude's efforts add above what the heart rate already measured. */
+     fun extraTrimpByDay(sessions: List<TrainingSession>, zone: ZoneId): Map<String, Double> {
+         val out = HashMap<String, Double>()
+-        for (s in sessions) {
++        for (s in TrainingEnergy.onePerWorkout(sessions)) {
+             if (s.isLive) continue
+             val a = s.analysis ?: continue
+             val effort = a.effort ?: continue
+diff --git a/android/app/src/main/java/com/noop/training/VictorSportNames.kt b/android/app/src/main/java/com/noop/training/VictorSportNames.kt
+new file mode 100644
+index 00000000..79082bf1
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/training/VictorSportNames.kt
+@@ -0,0 +1,99 @@
++package com.noop.training
++
++import java.util.Locale
++
++/**
++ * victor:sports — the sport names in Spanish on screen. Upstream stores the English catalogue name on every
++ * workout row (it is data: Health Connect mapping, pairing, imports) and shows it as is, so the Workouts
++ * list read "STRENGTH" and "BOXING" on a Spanish phone. Only the display changes, through
++ * `WorkoutEditing.displaySport` and the training sheet's picker; a name not listed here shows unchanged.
++ */
++object VictorSportNames {
++
++    /** The Spanish name of [sport] on a Spanish phone, else null (the caller shows its own). */
++    fun spanish(sport: String, locale: Locale = Locale.getDefault()): String? =
++        if (locale.language == "es") ES[sport.trim()] else null
++
++    fun display(sport: String, locale: Locale = Locale.getDefault()): String = spanish(sport, locale) ?: sport
++
++    private val ES = mapOf(
++        "detected" to "Actividad",
++        "Running" to "Carrera",
++        "Walking" to "Caminar",
++        "Hiking" to "Senderismo",
++        "Cycling" to "Ciclismo",
++        "Open-water swim" to "Natación en aguas abiertas",
++        "Rowing" to "Remo",
++        "Treadmill run" to "Cinta (correr)",
++        "Indoor cycle" to "Bici estática",
++        "Pool swim" to "Natación en piscina",
++        "Row machine" to "Remo ergómetro",
++        "Elliptical" to "Elíptica",
++        "Strength" to "Fuerza",
++        "Weightlifting" to "Pesas",
++        "HIIT" to "HIIT",
++        "Yoga" to "Yoga",
++        "Pilates" to "Pilates",
++        "Boxing" to "Boxeo",
++        "Basketball" to "Baloncesto",
++        "Soccer" to "Fútbol",
++        "Baseball" to "Béisbol",
++        "Ice Hockey" to "Hockey sobre hielo",
++        "Badminton" to "Bádminton",
++        "Tennis" to "Tenis",
++        "Squash" to "Squash",
++        "Racquetball" to "Ráquetbol",
++        "Table tennis" to "Tenis de mesa",
++        "Volleyball" to "Voleibol",
++        "Martial arts" to "Artes marciales",
++        "Dancing" to "Baile",
++        "Golf" to "Golf",
++        "Climbing" to "Escalada",
++        "Stretching" to "Estiramientos",
++        "Skiing" to "Esquí",
++        "Snowboarding" to "Snowboard",
++        "American football" to "Fútbol americano",
++        "Australian football" to "Fútbol australiano",
++        "Rugby" to "Rugby",
++        "Cricket" to "Críquet",
++        "Softball" to "Sóftbol",
++        "Handball" to "Balonmano",
++        "Water polo" to "Waterpolo",
++        "Frisbee" to "Frisbee",
++        "Surfing" to "Surf",
++        "Kayaking" to "Kayak",
++        "Sailing" to "Vela",
++        "Scuba diving" to "Buceo",
++        "Ice skating" to "Patinaje sobre hielo",
++        "Inline skating" to "Patinaje en línea",
++        "Snowshoeing" to "Raquetas de nieve",
++        "Gymnastics" to "Gimnasia",
++        "Fencing" to "Esgrima",
++        "Calisthenics" to "Calistenia",
++        "Stair climber" to "Escaladora",
++        "Boot camp" to "Boot camp",
++        "Other" to "Otro",
++        "Padel" to "Pádel",
++        "Pickleball" to "Pickleball",
++        "Bowling" to "Bolos",
++        "Treadmill walk" to "Cinta (caminar)",
++        "Bodybuilding" to "Culturismo",
++        "Lacrosse" to "Lacrosse",
++        "Field hockey" to "Hockey hierba",
++        "CrossFit" to "CrossFit",
++        "Kickboxing" to "Kickboxing",
++        "Mountain biking" to "Bici de montaña",
++        "Skateboarding" to "Skate",
++        "Stand-up paddleboard" to "Paddle surf",
++        "Spinning" to "Spinning",
++        "Jump rope" to "Comba",
++        "Powerlifting" to "Powerlifting",
++        "Rucking" to "Marcha con mochila",
++        "Sand volleyball" to "Vóley playa",
++        "Archery" to "Tiro con arco",
++        "Fishing" to "Pesca",
++        "Hunting" to "Caza",
++        "Curling" to "Curling",
++        "Netball" to "Netball",
++    )
++}
+diff --git a/android/app/src/main/java/com/noop/ui/AppViewModel.kt b/android/app/src/main/java/com/noop/ui/AppViewModel.kt
+index e395f350..71982464 100644
+--- a/android/app/src/main/java/com/noop/ui/AppViewModel.kt
++++ b/android/app/src/main/java/com/noop/ui/AppViewModel.kt
+@@ -1764,6 +1764,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
+                 )
+             }
+             _lastWorkout.value = null
++            com.noop.training.TrainingHooks.onWorkoutDiscarded(appContext, w.startMs) // victor:training
+             return
+         }
+         val endMs = System.currentTimeMillis()
+@@ -1781,6 +1782,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
+                 )
+             }
+             _lastWorkout.value = null
++            com.noop.training.TrainingHooks.onWorkoutDiscarded(appContext, w.startMs) // victor:training
+             return
+         }
+         val pausedMs = w.pausedDurationMs + (w.pausedAtMs?.let { endMs - it } ?: 0L)
+@@ -2255,6 +2257,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
+     fun saveManualWorkout(row: WorkoutRow, replacing: WorkoutRow? = null) {
+         viewModelScope.launch {
+             runCatching { repository.saveManualWorkout(row, replacing) }
++            com.noop.training.TrainingHooks.onWorkoutEdited(appContext, replacing, row) // victor:training
+             // #598: rescore the just-added workout from the strap's HR for its window NOW, so its average /
+             // peak HR, strain and calories appear immediately instead of waiting for the next analyze tick.
+             // No-ops when there's no strap HR for the window; never overrides a value the user typed.
+@@ -2297,6 +2300,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
+     fun deleteWorkout(row: WorkoutRow) {
+         viewModelScope.launch {
+             runCatching { repository.deleteWorkout(row) }
++            com.noop.training.TrainingHooks.onWorkoutDeleted(appContext, row) // victor:training
+             loadWorkouts()
+             // #1195 follow-up: a workout removed in NOOP is removed from Health Connect too, so a session
+             // we wrote (manual or live) doesn't linger there after the user deletes it here. Opt-in, keyed
+@@ -2329,6 +2333,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
+     fun bulkDeleteWorkouts(rows: List<WorkoutRow>) {
+         viewModelScope.launch {
+             runCatching { repository.bulkDeleteWorkouts(rows) }
++            rows.forEach { com.noop.training.TrainingHooks.onWorkoutDeleted(appContext, it) } // victor:training
+             loadWorkouts()
+         }
+     }
+diff --git a/android/app/src/main/java/com/noop/ui/CoachScreen.kt b/android/app/src/main/java/com/noop/ui/CoachScreen.kt
+index 693bdaca..7242d749 100644
+--- a/android/app/src/main/java/com/noop/ui/CoachScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/CoachScreen.kt
+@@ -663,7 +663,8 @@ private fun SuggestedPrompts(prompts: List<String>, onPick: (String) -> Unit) {
+     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+         Overline("Try asking")
+         // Simple wrapped column of chips (one per row keeps long prompts readable).
+-        prompts.forEach { prompt ->
++        prompts.forEach { english ->
++            val prompt = com.noop.ai.VictorCoachLang.chip(english)   // victor:coach-lang
+             val shape = RoundedCornerShape(50)
+             val chipInteraction = remember { MutableInteractionSource() }
+             Text(
+diff --git a/android/app/src/main/java/com/noop/ui/ScaleCard.kt b/android/app/src/main/java/com/noop/ui/ScaleCard.kt
+index c5625ad4..6b78698a 100644
+--- a/android/app/src/main/java/com/noop/ui/ScaleCard.kt
++++ b/android/app/src/main/java/com/noop/ui/ScaleCard.kt
+@@ -159,10 +159,10 @@ private fun signedMass(deltaKg: Double, system: UnitSystem): String {
+     return signOf(deltaKg, magnitude.startsWith("0.0 ")) + magnitude
+ }
+ 
+-/** Signed one-decimal number: "−0.3", "+1.2", "±0.0". */
++/** Signed one-decimal number: "−0,3", "+1,2", "±0,0" (decimal mark of the phone). */
+ private fun signedPlain(delta: Double): String {
+     val magnitude = oneDecimal(abs(delta))
+-    return signOf(delta, magnitude == "0.0") + magnitude
++    return signOf(delta, abs(delta) < 0.05) + magnitude
+ }
+ 
+ private fun signOf(delta: Double, roundsToZero: Boolean): String = when {
+@@ -171,4 +171,5 @@ private fun signOf(delta: Double, roundsToZero: Boolean): String = when {
+     else -> "+"
+ }
+ 
+-private fun oneDecimal(v: Double): String = String.format(Locale.US, "%.1f", v)
++/** The phone's decimal mark ("18,5" in Spain), like «Mi día» and the rest of the app. */
++private fun oneDecimal(v: Double): String = String.format(Locale.getDefault(), "%.1f", v)
+diff --git a/android/app/src/main/java/com/noop/ui/WorkoutEditing.kt b/android/app/src/main/java/com/noop/ui/WorkoutEditing.kt
+index 0dde0ef3..9316cfce 100644
+--- a/android/app/src/main/java/com/noop/ui/WorkoutEditing.kt
++++ b/android/app/src/main/java/com/noop/ui/WorkoutEditing.kt
+@@ -56,6 +56,7 @@ object WorkoutEditing {
+      * renders "Traditional Strength Training". Already-spaced labels (manual/edited) pass through. (#175)
+      */
+     fun displaySport(sport: String): String {
++        com.noop.training.VictorSportNames.spanish(sport)?.let { return it }   // victor:sports
+         if (sport == "detected") return "Activity"
+         if (sport.isEmpty() || sport.contains(" ")) return sport
+         val out = StringBuilder()
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt b/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt
+index adf42c32..0a9f4277 100644
+--- a/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt
+@@ -83,7 +83,7 @@ fun WeeklyCard() {
+ private fun Mark(label: String, score: Int?, modifier: Modifier) {
+     Column(modifier, verticalArrangement = Arrangement.spacedBy(Metrics.space4)) {
+         Text(label, style = NoopType.caption, color = Palette.textSecondary)
+-        if (score != null) ScoreBadge(score) else Text("—", style = NoopType.bodyNumber, color = Palette.textTertiary)
++        if (score != null) ScoreBadge(score) else Text("—", style = NoopType.bodyNumber, color = Palette.textSecondary)
+     }
+ }
+ 
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
+index 9e5f6235..429d513e 100644
+--- a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
+@@ -33,7 +33,8 @@ data class WeeklyReview(
+     val foodNote: String,
+     val training: Int?,
+     val trainingNote: String,
+-    val overall: Int,
++    /** Null when Claude found too little to judge the week as a whole (-1). */
++    val overall: Int?,
+     val overallNote: String,
+     val focus: String,
+     val atMs: Long,
+@@ -153,7 +154,10 @@ object WeeklyReviews {
+     /** The answer, clamped; -1 (or nothing) for an area means "too little to judge". */
+     fun parse(o: JSONObject, weekStart: String, nowMs: Long): WeeklyReview? {
+         fun mark(key: String): Int? = o.optDouble(key, Double.NaN).takeIf { it.isFinite() && it >= 0 }?.roundToInt()?.coerceIn(0, 10)
+-        val overall = mark("overall_score") ?: return null
++        // A reply without the field is malformed; -1 ("too little to judge") is an answer and is kept, so the
++        // week is not asked for again on every look.
++        if (!o.has("overall_score")) return null
++        val overall = mark("overall_score")
+         return WeeklyReview(
+             weekStart = weekStart,
+             food = mark("food_score"),
+@@ -175,13 +179,13 @@ object WeeklyReviews {
+                     .put("week", r.weekStart)
+                     .put("food_note", r.foodNote)
+                     .put("training_note", r.trainingNote)
+-                    .put("overall", r.overall)
+                     .put("overall_note", r.overallNote)
+                     .put("focus", r.focus)
+                     .put("at", r.atMs)
+                     .apply {
+                         r.food?.let { put("food", it) }
+                         r.training?.let { put("training", it) }
++                        r.overall?.let { put("overall", it) }
+                     },
+             )
+         }
+@@ -200,7 +204,7 @@ object WeeklyReviews {
+                 foodNote = o.optString("food_note"),
+                 training = if (o.has("training")) o.optInt("training") else null,
+                 trainingNote = o.optString("training_note"),
+-                overall = o.optInt("overall"),
++                overall = if (o.has("overall")) o.optInt("overall") else null,
+                 overallNote = o.optString("overall_note"),
+                 focus = o.optString("focus"),
+                 atMs = o.optLong("at"),
+@@ -213,7 +217,7 @@ object WeeklyReviews {
+         val parts = buildList {
+             r.food?.let { add("food $it/10 («${r.foodNote}»)") }
+             r.training?.let { add("training $it/10 («${r.trainingNote}»)") }
+-            add("overall ${r.overall}/10 («${r.overallNote}»)")
++            r.overall?.let { add("overall $it/10 («${r.overallNote}»)") }
+             if (r.focus.isNotBlank()) add("focus for this week: «${r.focus}»")
+         }
+         return "LAST WEEK REVIEW (week of ${r.weekStart}, by Claude): " + parts.joinToString("; ")
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
+index 70559ca1..5e6f8fd0 100644
+--- a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
+@@ -33,8 +33,8 @@ import java.util.concurrent.atomic.AtomicBoolean
+ /**
+  * victor:weekly — the reviews on disk (`files/weekly/reviews.json`, the last 12 weeks) and the pass that asks
+  * Claude for last week's once the week is over. Called when the Today food card shows: the first look on or
+- * after a Monday reviews the week before it. A week with too little logged is skipped without a request, and
+- * a failure (offline, no key) leaves it for the next look.
++ * after a Monday reviews the week before it. Only with the coach's data consent. A week with too little logged
++ * is skipped without a request, and a failure (offline, no key) is tried again after [RETRY_MS].
+  */
+ object WeeklyReviewer {
+ 
+@@ -46,6 +46,9 @@ object WeeklyReviewer {
+     private val running = AtomicBoolean(false)
+     private val mutex = Mutex()
+     private var cache: List<WeeklyReview>? = null
++    /** The week last asked for and when, for [RETRY_MS]. */
++    @Volatile private var lastTry: Pair<String, Long>? = null
++    private const val RETRY_MS = 6 * 3_600_000L
+ 
+     private val _reviews = MutableStateFlow<List<WeeklyReview>>(emptyList())
+     /** Oldest first. Empty until the first [load]. */
+@@ -70,6 +73,11 @@ object WeeklyReviewer {
+         val start = WeeklyReviews.lastWeekStart(LocalDate.now(zone))
+         if (load(ctx).any { it.weekStart == start.toString() }) return
+         if (AiKeyStore.read(ctx, AiProvider.ANTHROPIC) == null) return
++        // The week's burn, heart rate and workouts are the wearer's data: only with the coach's data consent.
++        if (!AiKeyStore.readConsent(ctx)) return
++        // A failed request (offline, no credit, a refusal) is tried again hours later, not on every look at Today.
++        val nowMs = System.currentTimeMillis()
++        lastTry?.let { (week, at) -> if (week == start.toString() && nowMs - at < RETRY_MS) return }
+         val app = ctx.applicationContext as NoopApplication
+         val repo = app.repository
+         val strapId = app.sourceCoordinator.activeDeviceId.value ?: app.activeDeviceId
+@@ -95,6 +103,7 @@ object WeeklyReviewer {
+             personLines = personLines(ctx, repo, strapId),
+             zone = zone,
+         )
++        lastTry = start.toString() to nowMs
+         val r = TrainingAi.ask(ctx, prompt, WeeklyReviews.schema()) { WeeklyReviews.parse(it, start.toString(), System.currentTimeMillis()) }
+         if (r is TrainingAiResult.Ok) save(ctx, r.value)
+     }
+diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
+index 2a9677e3..9f932be8 100644
+--- a/android/app/src/main/res/values-es/strings_victor_food.xml
++++ b/android/app/src/main/res/values-es/strings_victor_food.xml
+@@ -61,6 +61,7 @@
+     <string name="victor_food_err_key">Anthropic ha rechazado la clave. Revísala en Entrenador → Ajustes.</string>
+     <string name="victor_food_err_busy">Claude está saturado ahora mismo. Prueba otra vez en un minuto.</string>
+     <string name="victor_food_err_server">Anthropic ha tenido un fallo en su servidor. Prueba otra vez en un rato.</string>
++    <string name="victor_food_err_no_credit">Tu cuenta de Anthropic se ha quedado sin saldo. Recárgala en console.anthropic.com.</string>
+     <string name="victor_food_err_bad_request">Anthropic no ha aceptado la petición. Revisa el modelo elegido en Entrenador → Ajustes.</string>
+     <string name="victor_food_err_offline">Sin conexión a internet.</string>
+     <string name="victor_food_err_timeout">Claude ha tardado demasiado en responder. Inténtalo otra vez.</string>
+diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
+index 37ab4811..4e8e1664 100644
+--- a/android/app/src/main/res/values/strings_victor_food.xml
++++ b/android/app/src/main/res/values/strings_victor_food.xml
+@@ -61,6 +61,7 @@
+     <string name="victor_food_err_key">Anthropic rejected the key. Check it in Coach → Settings.</string>
+     <string name="victor_food_err_busy">Claude is busy right now. Try again in a minute.</string>
+     <string name="victor_food_err_server">Anthropic had a server problem. Try again shortly.</string>
++    <string name="victor_food_err_no_credit">Your Anthropic account is out of credit. Top it up at console.anthropic.com.</string>
+     <string name="victor_food_err_bad_request">Anthropic did not accept the request. Check the model chosen in Coach → Settings.</string>
+     <string name="victor_food_err_offline">No internet connection.</string>
+     <string name="victor_food_err_timeout">Claude took too long to answer. Try again.</string>
+diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachLangTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachLangTest.kt
+new file mode 100644
+index 00000000..3325996a
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/ai/VictorCoachLangTest.kt
+@@ -0,0 +1,30 @@
++package com.noop.ai
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.util.Locale
++
++/** victor:coach-lang — the coach answers in the phone's language and its chips read in Spanish. */
++class VictorCoachLangTest {
++
++    private val es = Locale("es", "ES")
++
++    @Test
++    fun aSpanishPhoneGetsSpanishRepliesWithTheAppsScoreNames() {
++        val note = VictorCoachLang.systemNote(es)
++        assertTrue(note.contains("Always reply in Spanish"))
++        assertTrue(note.contains("Carga (charge), Esfuerzo (effort) and Descanso (rest)"))
++        assertEquals("", VictorCoachLang.systemNote(Locale.US))
++        assertTrue(VictorCoachLang.systemNote(Locale.GERMANY).contains("Always reply in German"))
++    }
++
++    @Test
++    fun chipsAndTheRefusalReadInSpanish() {
++        assertEquals("Cuéntame más", VictorCoachLang.chip("Tell me more about that", es))
++        assertEquals("Analiza mi sueño", VictorCoachLang.chip("Analyse my sleep", es))
++        assertEquals("A new upstream chip", VictorCoachLang.chip("A new upstream chip", es))
++        assertEquals("Tell me more about that", VictorCoachLang.chip("Tell me more about that", Locale.US))
++        assertTrue(VictorCoachLang.refusal(es).startsWith("Claude no ha querido"))
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/day/DayCalendarTest.kt b/android/app/src/test/java/com/noop/day/DayCalendarTest.kt
+index cb70162d..b91f029f 100644
+--- a/android/app/src/test/java/com/noop/day/DayCalendarTest.kt
++++ b/android/app/src/test/java/com/noop/day/DayCalendarTest.kt
+@@ -85,4 +85,24 @@ class DayCalendarTest {
+         assertEquals(1, placed["Café"]!!.lanes)
+         assertEquals(15 * 60 + 20, placed["Café"]!!.endMin) // 5 minutes drawn as 20
+     }
++
++    @Test
++    fun clockChangeDaysKeepEventsOnTheirClockHours() {
++        val madrid = ZoneId.of("Europe/Madrid")
++        for (day in listOf(LocalDate.of(2026, 10, 25), LocalDate.of(2027, 3, 28))) { // 25 h and 23 h days
++            fun at(h: Int) = day.atTime(h, 0).atZone(madrid).toInstant().toEpochMilli()
++            val placed = DayAgendaSource.layoutDay(
++                listOf(
++                    AgendaEvent("Mañana", at(10), at(11), false),
++                    AgendaEvent("Noche", at(23), day.plusDays(1).atStartOfDay(madrid).toInstant().toEpochMilli(), false),
++                ),
++                day,
++                madrid,
++            ).associateBy { it.event.title }
++            assertEquals(10 * 60, placed["Mañana"]!!.startMin)
++            assertEquals(11 * 60, placed["Mañana"]!!.endMin)
++            assertEquals(23 * 60, placed["Noche"]!!.startMin)
++            assertEquals(24 * 60, placed["Noche"]!!.endMin)
++        }
++    }
+ }
+diff --git a/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt b/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
+index de70a88a..c0e2291c 100644
+--- a/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
++++ b/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
+@@ -131,4 +131,12 @@ class FoodVisionReplyTest {
+         val slow = FoodVision.run("m", listOf("x"), "") { throw SocketTimeoutException("timeout") }
+         assertEquals(FoodResult.Failed(FoodError.TIMEOUT), slow)
+     }
++
++    @Test
++    fun anEmptyAccountIsToldApartFromABadRequest() {
++        val credit = """{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}"""
++        assertEquals(FoodError.NO_CREDIT, FoodVision.errorFor(400, credit))
++        assertEquals(FoodError.BAD_REQUEST, FoodVision.errorFor(400, """{"error":{"message":"model: not found"}}"""))
++        assertEquals(FoodError.KEY_REJECTED, FoodVision.errorFor(401, credit))
++    }
+ }
+diff --git a/android/app/src/test/java/com/noop/food/MealScoringTest.kt b/android/app/src/test/java/com/noop/food/MealScoringTest.kt
+index 857e5d5e..92b88538 100644
+--- a/android/app/src/test/java/com/noop/food/MealScoringTest.kt
++++ b/android/app/src/test/java/com/noop/food/MealScoringTest.kt
+@@ -72,6 +72,22 @@ class MealScoringTest {
+         assertTrue(p.trim().endsWith("GOALS: lose fat"))
+     }
+ 
++    @Test
++    fun aMealLoggedAfterItsSlotWaitsForItsLastPhotoToSettle() {
++        val late = entry("l", 16, 40, MealType.LUNCH, 600.0)
++        assertEquals(emptyList<Pair<String, MealType>>(), MealScoring.due(listOf(late), emptyMap(), at(16, 45), setOf(day), madrid))
++        assertEquals(listOf(day to MealType.LUNCH), MealScoring.due(listOf(late), emptyMap(), at(17, 1), setOf(day), madrid))
++    }
++
++    @Test
++    fun aDinnerAfterMidnightBelongsToTheNightBefore() {
++        fun ms(d: String, h: Int, m: Int) = LocalDate.parse(d).atTime(h, m).atZone(madrid).toInstant().toEpochMilli()
++        assertEquals("2026-10-18", FoodDays.mealDayOf(ms("2026-10-19", 0, 30), madrid))
++        assertEquals("2026-10-18", FoodDays.mealDayOf(ms("2026-10-19", 3, 59), madrid))
++        assertEquals("2026-10-19", FoodDays.mealDayOf(ms("2026-10-19", 4, 0), madrid))
++        assertEquals(MealType.DINNER, MealType.forTimestamp(ms("2026-10-19", 0, 30), madrid))
++    }
++
+     @Test
+     fun theReplyIsClampedAndScoresRoundTrip() {
+         assertEquals(10, MealScoring.parse(JSONObject("""{"score":12,"note":"x"}"""), "s", 0L)!!.score)
+diff --git a/android/app/src/test/java/com/noop/training/TrainingTest.kt b/android/app/src/test/java/com/noop/training/TrainingTest.kt
+index 70a1873b..05ce5390 100644
+--- a/android/app/src/test/java/com/noop/training/TrainingTest.kt
++++ b/android/app/src/test/java/com/noop/training/TrainingTest.kt
+@@ -299,8 +299,9 @@ class TrainingTest {
+         assertEquals(118, cardio.avgHr)
+ 
+         assertTrue(TrainingEnergy.needsReanalysis(null, 0))
+-        assertTrue(TrainingEnergy.needsReanalysis(0, 60))
+-        assertFalse(TrainingEnergy.needsReanalysis(0, 59))
++        // Analysed before the strap handed any heart rate over: 20 samples are enough to look again.
++        assertTrue(TrainingEnergy.needsReanalysis(0, 20))
++        assertFalse(TrainingEnergy.needsReanalysis(0, 19))
+         assertFalse(TrainingEnergy.needsReanalysis(1200, 1400))
+         assertTrue(TrainingEnergy.needsReanalysis(1200, 1500))
+ 
+@@ -315,4 +316,27 @@ class TrainingTest {
+         val line = TrainingCoachContext.line(listOf(stored), listOf(row), emptyMap(), madrid)!!
+         assertTrue(line.contains("effort with muscular load 52/100 (heart rate alone 18)"))
+     }
++
++    @Test
++    fun aWorkoutLoggedTwiceCountsOnce() {
++        val older = logged.copy(id = "a", analysis = logged.analysis!!.copy(totalKcal = 300.0, atMs = 1L))
++        val newer = logged.copy(id = "b", analysis = logged.analysis!!.copy(totalKcal = 380.0, atMs = 2L))
++        val live = logged.copy(id = "c", endTs = null, analysis = null)
++        val kept = TrainingEnergy.onePerWorkout(listOf(older, newer, live))
++        assertEquals(setOf("b", "c"), kept.map { it.id }.toSet())
++        val once = TrainingEnergy.extraByDay(listOf(newer), listOf(row), null, madrid)
++        assertEquals(once, TrainingEnergy.extraByDay(listOf(older, newer), listOf(row), null, madrid))
++        // Not paired with a stored workout (deleted, or re-timed): nothing added.
++        assertEquals(emptyMap<String, Double>(), TrainingEnergy.extraByDay(listOf(newer), emptyList(), null, madrid))
++    }
++
++    @Test
++    fun sportNamesShowInSpanishOnlyOnASpanishPhone() {
++        val es = Locale("es", "ES")
++        assertEquals("Fuerza", VictorSportNames.display("Strength", es))
++        assertEquals("Boxeo", VictorSportNames.display("Boxing", es))
++        assertEquals("Actividad", VictorSportNames.display("detected", es))
++        assertEquals("Sin catálogo", VictorSportNames.display("Sin catálogo", es))
++        assertNull(VictorSportNames.spanish("Strength", Locale.US))
++    }
+ }
+diff --git a/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt b/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt
+index a45e98f7..eaee3a69 100644
+--- a/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt
++++ b/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt
+@@ -50,4 +50,11 @@ class VictorDayEffortTest {
+         assertTrue(out[1].strain!! > 55.0)
+         assertSame(days, VictorDayEffort.apply(days, emptyMap()))
+     }
++
++    @Test
++    fun theSameWorkoutLoggedTwiceAddsItsLoadOnce() {
++        val once = VictorDayEffort.extraTrimpByDay(listOf(session(55.0, 15.0)), madrid)
++        val twice = VictorDayEffort.extraTrimpByDay(listOf(session(55.0, 15.0), session(55.0, 15.0).copy(id = "t")), madrid)
++        assertEquals(once, twice)
++    }
+ }
+diff --git a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
+index 4316f4b0..87e2ad0d 100644
+--- a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
++++ b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
+@@ -69,6 +69,10 @@ class WeeklyReviewTest {
+         assertEquals(6, r.overall)
+         assertEquals(listOf(r), WeeklyReviews.decode(WeeklyReviews.encode(listOf(r))))
+         assertNull(WeeklyReviews.parse(JSONObject("""{"food_score":5}"""), "2026-10-12", 9L))
++        // -1 overall is an answer (too little to judge): kept, so the week is not asked for again.
++        val thin = WeeklyReviews.parse(JSONObject("""{"food_score":-1,"training_score":3,"overall_score":-1,"overall_note":"Poco registrado."}"""), "2026-10-12", 9L)!!
++        assertNull(thin.overall)
++        assertEquals(listOf(thin), WeeklyReviews.decode(WeeklyReviews.encode(listOf(thin))))
+         val line = WeeklyReviews.coachLine(r)
+         assertEquals(
+             "LAST WEEK REVIEW (week of 2026-10-12, by Claude): food 7/10 («Buena proteína.»); overall 6/10 («Falta entrenar.»); focus for this week: «Tres sesiones de fuerza.»",
+-- 
+2.54.0
+

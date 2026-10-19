@@ -72,10 +72,10 @@ servidor, cuenta ni telemetría de este proyecto. Solo sale algo del móvil cuan
   coach (títulos y horas de hoy y mañana).
 - **Coach IA, comida por foto y entrenos** (opcional): el resumen, la foto o la descripción del entreno
   (al pedir una sugerencia, el mismo resumen de datos que usa el coach, con su mismo permiso; para la nota de
-  una comida o de la semana, sus comidas y entrenos y, con ese permiso, perfil, objetivos y datos de la pulsera)
-  van a Anthropic con la clave del propio usuario: al pulsar el botón correspondiente y, en un entreno con
-  ejercicios, al terminarlo (un resumen de series, perfil, báscula y pulso para estimar sus calorías).
-  Anthropic no entrena con los datos de su API.
+  una comida, las comidas de ese día y, con ese permiso, perfil, báscula y objetivos; la nota de la semana,
+  solo con ese permiso) van a Anthropic con la clave del propio usuario: al pulsar el botón correspondiente y,
+  en un entreno con ejercicios, al terminarlo (sus series y, con ese permiso, perfil, báscula y pulso para
+  estimar sus calorías). Anthropic no entrena con los datos de su API.
 
 El uso de la información recibida de las APIs de Google cumple la
 [Política de Datos del Usuario de los Servicios de las APIs de Google](https://developers.google.com/terms/api-services-user-data-policy),
