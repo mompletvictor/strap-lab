@@ -31,7 +31,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/main/java/com/noop/training/TrainingSuggestContext.kt
 
 diff --git a/android/app/src/main/java/com/noop/training/TrainingAi.kt b/android/app/src/main/java/com/noop/training/TrainingAi.kt
-index 3728c307..fb950157 100644
+index 3728c3074..fb9501573 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingAi.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingAi.kt
 @@ -28,6 +28,13 @@ sealed interface TrainingAiResult<out T> {
@@ -120,7 +120,7 @@ index 3728c307..fb950157 100644
      internal fun parsePlan(o: JSONObject, sports: List<String>): TrainingPlan? {
          val arr = o.optJSONArray("exercises") ?: return null
 diff --git a/android/app/src/main/java/com/noop/training/TrainingEditor.kt b/android/app/src/main/java/com/noop/training/TrainingEditor.kt
-index 9cecddad..f3ca5c4f 100644
+index 9cecddad2..f3ca5c4fa 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingEditor.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingEditor.kt
 @@ -71,6 +71,7 @@ private fun ExerciseEditor(ex: TrainingExercise, onChange: (TrainingExercise) ->
@@ -132,7 +132,7 @@ index 9cecddad..f3ca5c4f 100644
                  FoodChip(uiString(R.string.victor_training_kind_strength), selected = ex.kind == ExerciseKind.STRENGTH, small = true) {
                      onChange(ex.copy(kind = ExerciseKind.STRENGTH, sets = ex.sets.ifEmpty { listOf(TrainingSet()) }))
 diff --git a/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt b/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt
-index dc8b246f..dad26405 100644
+index dc8b246f3..dad264051 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt
 @@ -82,6 +82,7 @@ fun TrainingLivePanel(workoutStartMs: Long) {
@@ -144,7 +144,7 @@ index dc8b246f..dad26405 100644
                      TrainingFormat.summary(ex).takeIf { it.isNotEmpty() }?.let {
                          Text(it, style = NoopType.subhead, color = Palette.textSecondary)
 diff --git a/android/app/src/main/java/com/noop/training/TrainingSheet.kt b/android/app/src/main/java/com/noop/training/TrainingSheet.kt
-index 58f5b671..ec18b72e 100644
+index 58f5b671d..ec18b72eb 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingSheet.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingSheet.kt
 @@ -93,6 +93,10 @@ fun TrainingSheet(
@@ -283,7 +283,7 @@ index 58f5b671..ec18b72e 100644
      var open by remember { mutableStateOf(false) }
 diff --git a/android/app/src/main/java/com/noop/training/TrainingSuggestContext.kt b/android/app/src/main/java/com/noop/training/TrainingSuggestContext.kt
 new file mode 100644
-index 00000000..a2379f39
+index 000000000..a2379f39e
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/training/TrainingSuggestContext.kt
 @@ -0,0 +1,30 @@
@@ -318,7 +318,7 @@ index 00000000..a2379f39
 +    }
 +}
 diff --git a/android/app/src/main/res/values-es/strings_victor_training.xml b/android/app/src/main/res/values-es/strings_victor_training.xml
-index df6edd01..2ea32bd6 100644
+index df6edd010..2ea32bd62 100644
 --- a/android/app/src/main/res/values-es/strings_victor_training.xml
 +++ b/android/app/src/main/res/values-es/strings_victor_training.xml
 @@ -51,4 +51,15 @@
@@ -338,7 +338,7 @@ index df6edd01..2ea32bd6 100644
 +    <string name="victor_training_hard">Fuerte</string>
  </resources>
 diff --git a/android/app/src/main/res/values/strings_victor_training.xml b/android/app/src/main/res/values/strings_victor_training.xml
-index 56fce787..c1c7ac36 100644
+index 56fce787f..c1c7ac36a 100644
 --- a/android/app/src/main/res/values/strings_victor_training.xml
 +++ b/android/app/src/main/res/values/strings_victor_training.xml
 @@ -51,4 +51,15 @@
@@ -358,7 +358,7 @@ index 56fce787..c1c7ac36 100644
 +    <string name="victor_training_hard">Hard</string>
  </resources>
 diff --git a/android/app/src/test/java/com/noop/training/TrainingTest.kt b/android/app/src/test/java/com/noop/training/TrainingTest.kt
-index d4216fb5..382d82e4 100644
+index d4216fb57..382d82e47 100644
 --- a/android/app/src/test/java/com/noop/training/TrainingTest.kt
 +++ b/android/app/src/test/java/com/noop/training/TrainingTest.kt
 @@ -234,4 +234,17 @@ class TrainingTest {

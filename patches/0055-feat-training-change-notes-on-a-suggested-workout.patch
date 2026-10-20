@@ -24,7 +24,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  6 files changed, 191 insertions(+), 12 deletions(-)
 
 diff --git a/android/app/src/main/java/com/noop/training/TrainingAi.kt b/android/app/src/main/java/com/noop/training/TrainingAi.kt
-index f386487f..bfb38fbb 100644
+index f386487fc..bfb38fbb7 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingAi.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingAi.kt
 @@ -46,6 +46,27 @@ data class TrainingPlan(
@@ -131,7 +131,7 @@ index f386487f..bfb38fbb 100644
      internal fun parsePlan(o: JSONObject, sports: List<String>): TrainingPlan? {
          val arr = o.optJSONArray("exercises") ?: return null
 diff --git a/android/app/src/main/java/com/noop/training/TrainingEditor.kt b/android/app/src/main/java/com/noop/training/TrainingEditor.kt
-index 84beb47b..20bab855 100644
+index 84beb47bc..20bab855f 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingEditor.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingEditor.kt
 @@ -9,14 +9,17 @@ import androidx.compose.foundation.text.KeyboardOptions
@@ -230,7 +230,7 @@ index 84beb47b..20bab855 100644
              Row(horizontalArrangement = Arrangement.spacedBy(Metrics.space6)) {
                  FoodChip(uiString(R.string.victor_training_kind_strength), selected = ex.kind == ExerciseKind.STRENGTH, small = true) {
 diff --git a/android/app/src/main/java/com/noop/training/TrainingSheet.kt b/android/app/src/main/java/com/noop/training/TrainingSheet.kt
-index 72b7a327..88176c2b 100644
+index 72b7a3274..88176c2ba 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingSheet.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingSheet.kt
 @@ -105,6 +105,12 @@ fun TrainingSheet(
@@ -339,7 +339,7 @@ index 72b7a327..88176c2b 100644
                      NoopButton(text = uiString(R.string.victor_training_rewrite), kind = NoopButtonKind.Tertiary, fullWidth = true) {
                          error = null
 diff --git a/android/app/src/main/res/values-es/strings_victor_training.xml b/android/app/src/main/res/values-es/strings_victor_training.xml
-index 36ee2e17..5949138e 100644
+index 36ee2e178..5949138e7 100644
 --- a/android/app/src/main/res/values-es/strings_victor_training.xml
 +++ b/android/app/src/main/res/values-es/strings_victor_training.xml
 @@ -54,6 +54,13 @@
@@ -357,7 +357,7 @@ index 36ee2e17..5949138e 100644
      <string name="victor_training_minutes_n">%1$d min</string>
      <string name="victor_training_intensity">Intensidad</string>
 diff --git a/android/app/src/main/res/values/strings_victor_training.xml b/android/app/src/main/res/values/strings_victor_training.xml
-index 2a162a42..8201638a 100644
+index 2a162a42b..8201638aa 100644
 --- a/android/app/src/main/res/values/strings_victor_training.xml
 +++ b/android/app/src/main/res/values/strings_victor_training.xml
 @@ -54,6 +54,13 @@
@@ -375,7 +375,7 @@ index 2a162a42..8201638a 100644
      <string name="victor_training_minutes_n">%1$d min</string>
      <string name="victor_training_intensity">How hard</string>
 diff --git a/android/app/src/test/java/com/noop/training/TrainingTest.kt b/android/app/src/test/java/com/noop/training/TrainingTest.kt
-index ba1ca5d6..38ed7a55 100644
+index ba1ca5d60..38ed7a553 100644
 --- a/android/app/src/test/java/com/noop/training/TrainingTest.kt
 +++ b/android/app/src/test/java/com/noop/training/TrainingTest.kt
 @@ -224,6 +224,40 @@ class TrainingTest {

@@ -14,7 +14,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 145 insertions(+), 90 deletions(-)
 
 diff --git a/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt b/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
-index 012f28ae..2fb2276e 100644
+index 012f28aec..2fb2276e5 100644
 --- a/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
 +++ b/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
 @@ -352,6 +352,9 @@ object DayEnergyModel {

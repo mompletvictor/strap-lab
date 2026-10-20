@@ -42,7 +42,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/training/VictorEffortReadersTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/ai/AiCoach.kt b/android/app/src/main/java/com/noop/ai/AiCoach.kt
-index 1b31f8f7..33d4888f 100644
+index 1b31f8f72..33d4888f9 100644
 --- a/android/app/src/main/java/com/noop/ai/AiCoach.kt
 +++ b/android/app/src/main/java/com/noop/ai/AiCoach.kt
 @@ -418,6 +418,8 @@ class AiCoach(
@@ -73,7 +73,7 @@ index 1b31f8f7..33d4888f 100644
  
          // --- Recent workouts (derived from logged exercise counts + day strain) ---
 diff --git a/android/app/src/main/java/com/noop/analytics/IntelligenceEngine.kt b/android/app/src/main/java/com/noop/analytics/IntelligenceEngine.kt
-index 9683d3f2..4675c384 100644
+index 9683d3f29..4675c384e 100644
 --- a/android/app/src/main/java/com/noop/analytics/IntelligenceEngine.kt
 +++ b/android/app/src/main/java/com/noop/analytics/IntelligenceEngine.kt
 @@ -2115,7 +2115,7 @@ object IntelligenceEngine {
@@ -86,7 +86,7 @@ index 9683d3f2..4675c384 100644
          val faPts = fitnessAgeRows(faGate7, profile, computedId, saturdayKeyOnOrBefore(newestDay))
          // Strap-log proof: the RHR-night count the engine sees for the gate , should equal the "N of last 7
 diff --git a/android/app/src/main/java/com/noop/ble/WhoopConnectionService.kt b/android/app/src/main/java/com/noop/ble/WhoopConnectionService.kt
-index dd0e5b39..06c063d0 100644
+index dd0e5b39d..06c063d00 100644
 --- a/android/app/src/main/java/com/noop/ble/WhoopConnectionService.kt
 +++ b/android/app/src/main/java/com/noop/ble/WhoopConnectionService.kt
 @@ -129,7 +129,7 @@ internal class NotifyDayStateCache(
@@ -99,7 +99,7 @@ index dd0e5b39..06c063d0 100644
                  illnessEvaluator(days)
              } else null,
 diff --git a/android/app/src/main/java/com/noop/data/WhoopRepository.kt b/android/app/src/main/java/com/noop/data/WhoopRepository.kt
-index c3a49309..8c7bdd3e 100644
+index c3a49309a..8c7bdd3e2 100644
 --- a/android/app/src/main/java/com/noop/data/WhoopRepository.kt
 +++ b/android/app/src/main/java/com/noop/data/WhoopRepository.kt
 @@ -2240,7 +2240,9 @@ class WhoopRepository(
@@ -114,7 +114,7 @@ index c3a49309..8c7bdd3e 100644
          // computed pipeline writes a baseline DEVIATION, and the candidate list unions the imported and
          // computed identities, so first-wins can resolve older days to one kind and recent days to the
 diff --git a/android/app/src/main/java/com/noop/training/TrainingStore.kt b/android/app/src/main/java/com/noop/training/TrainingStore.kt
-index 8d10086b..2b2493f9 100644
+index 8d10086b4..2b2493f97 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingStore.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingStore.kt
 @@ -2,6 +2,8 @@ package com.noop.training
@@ -149,7 +149,7 @@ index 8d10086b..2b2493f9 100644
      }
  }
 diff --git a/android/app/src/main/java/com/noop/training/VictorDayEffort.kt b/android/app/src/main/java/com/noop/training/VictorDayEffort.kt
-index 7484132b..87f45f89 100644
+index 7484132b7..87f45f895 100644
 --- a/android/app/src/main/java/com/noop/training/VictorDayEffort.kt
 +++ b/android/app/src/main/java/com/noop/training/VictorDayEffort.kt
 @@ -5,8 +5,10 @@ import com.noop.data.DailyMetric
@@ -252,7 +252,7 @@ index 7484132b..87f45f89 100644
 +        values.filterIndexed { i, _ -> dates.getOrNull(i)?.let { it < todayKey } ?: true }
  }
 diff --git a/android/app/src/main/java/com/noop/ui/AppViewModel.kt b/android/app/src/main/java/com/noop/ui/AppViewModel.kt
-index 71982464..76784f9f 100644
+index 719824641..76784f9f6 100644
 --- a/android/app/src/main/java/com/noop/ui/AppViewModel.kt
 +++ b/android/app/src/main/java/com/noop/ui/AppViewModel.kt
 @@ -1132,7 +1132,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -288,7 +288,7 @@ index 71982464..76784f9f 100644
              hardOrLateWorkout = hardOrLate,
              alreadyUnwell = false,
 diff --git a/android/app/src/main/java/com/noop/ui/TodayScreen.kt b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
-index 03f25678..f32f21fe 100644
+index 03f256783..f32f21fe6 100644
 --- a/android/app/src/main/java/com/noop/ui/TodayScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
 @@ -741,9 +741,6 @@ fun TodayScreen(
@@ -329,7 +329,7 @@ index 03f25678..f32f21fe 100644
      // Recovery cold-start: recovery is null until the HRV baseline crosses the seed gate
      // (Baselines.minNightsSeed valid nights). Show honest "calibrating, N of 4 nights" progress
 diff --git a/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt b/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt
-index 3ffc1cd8..ca982f99 100644
+index 3ffc1cd8f..ca982f995 100644
 --- a/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt
 @@ -261,7 +261,7 @@ fun TrendsExploreScreen(vm: AppViewModel) {
@@ -342,7 +342,7 @@ index 3ffc1cd8..ca982f99 100644
      }
  
 diff --git a/android/app/src/main/java/com/noop/ui/TrendsScreen.kt b/android/app/src/main/java/com/noop/ui/TrendsScreen.kt
-index fed74247..885dec41 100644
+index fed742479..885dec410 100644
 --- a/android/app/src/main/java/com/noop/ui/TrendsScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/TrendsScreen.kt
 @@ -100,7 +100,7 @@ fun TrendsScreen(vm: AppViewModel) {
@@ -401,7 +401,7 @@ index fed74247..885dec41 100644
          changeFmt = fmt,
          footer = listOf(
 diff --git a/android/app/src/main/java/com/noop/ui/WeeklyDigestCard.kt b/android/app/src/main/java/com/noop/ui/WeeklyDigestCard.kt
-index 91efe322..d5fab461 100644
+index 91efe322d..d5fab4618 100644
 --- a/android/app/src/main/java/com/noop/ui/WeeklyDigestCard.kt
 +++ b/android/app/src/main/java/com/noop/ui/WeeklyDigestCard.kt
 @@ -81,9 +81,10 @@ fun buildWeeklyDigest(
@@ -417,7 +417,7 @@ index 91efe322..d5fab461 100644
          RestScorer.restFromDaily(d)?.let { rest[d.day] = it }
          d.restingHr?.let { rhr[d.day] = it.toDouble() }
 diff --git a/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt b/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt
-index eaee3a69..fc43cd11 100644
+index eaee3a699..fc43cd11c 100644
 --- a/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt
 +++ b/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt
 @@ -2,7 +2,9 @@ package com.noop.training
@@ -491,7 +491,7 @@ index eaee3a69..fc43cd11 100644
          val once = VictorDayEffort.extraTrimpByDay(listOf(session(55.0, 15.0)), madrid)
 diff --git a/android/app/src/test/java/com/noop/training/VictorEffortReadersTest.kt b/android/app/src/test/java/com/noop/training/VictorEffortReadersTest.kt
 new file mode 100644
-index 00000000..d01676d2
+index 000000000..d01676d27
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/training/VictorEffortReadersTest.kt
 @@ -0,0 +1,164 @@

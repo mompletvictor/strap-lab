@@ -1,0 +1,120 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 19:09:09 +0200
+Subject: [PATCH] fix(workouts): the day's workout count counts each activity
+ once
+
+The cycle engine counted workouts by exact (start, end, sport), so the same session from
+the strap and from Samsung a minute apart was two workouts (the coach's '2 workouts',
+Trends, Coupled), and a dismissed detected bout still counted. It now counts the
+Workouts list's own set: dismissed bouts out, then WorkoutEditing.dedupCrossSource.
+Calories were never doubled (the day model already collapses the pair).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../analytics/PhysiologicalStepCycleEngine.kt | 20 +++++++--
+ .../noop/analytics/VictorWorkoutCountTest.kt  | 43 +++++++++++++++++++
+ 2 files changed, 60 insertions(+), 3 deletions(-)
+ create mode 100644 android/app/src/test/java/com/noop/analytics/VictorWorkoutCountTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/analytics/PhysiologicalStepCycleEngine.kt b/android/app/src/main/java/com/noop/analytics/PhysiologicalStepCycleEngine.kt
+index b017af3bb..6c59a22bb 100644
+--- a/android/app/src/main/java/com/noop/analytics/PhysiologicalStepCycleEngine.kt
++++ b/android/app/src/main/java/com/noop/analytics/PhysiologicalStepCycleEngine.kt
+@@ -1,8 +1,11 @@
+ package com.noop.analytics
+ 
++import com.noop.data.DismissedWorkout
+ import com.noop.data.MetricSeriesRow
+ import com.noop.data.SleepSession
+ import com.noop.data.WhoopRepository
++import com.noop.data.WorkoutRow
++import com.noop.ui.WorkoutEditing
+ import kotlin.math.roundToLong
+ 
+ /**
+@@ -239,13 +242,14 @@ internal object PhysiologicalStepCycleEngine {
+             // Count the persisted all-source workout union, not only analyzer-detected bouts. Repository
+             // reads are inclusive, while ownership is [onset, nextOnset).
+             val workoutEndInclusive = window.endExclusive - 1L
+-            val cycleWorkouts = (
++            val cycleWorkouts = uniqueWorkouts(
+                 repo.workoutsUnion(fallbackOwner, window.onset, workoutEndInclusive, 100_000) +
+                     repo.detectedWorkoutsUnion(fallbackOwner, window.onset, workoutEndInclusive, 100_000) +
+                     listOf("apple-health", "health-connect", "lifting", "activity-file").flatMap { source ->
+                         repo.workouts(source, window.onset, workoutEndInclusive, 100_000)
+-                    }
+-                ).distinctBy { Triple(it.startTs, it.endTs, it.sport) }
++                    },
++                repo.dismissedDetectedUnion(fallbackOwner),
++            )
+             val freshDetectedKeys = scoredNights.asSequence().flatMap { it.workouts.asSequence() }
+                 .filter { it.start >= window.onset && it.start < window.endExclusive }
+                 .filter { detected ->
+@@ -383,4 +387,14 @@ internal object PhysiologicalStepCycleEngine {
+             ),
+         )
+     }
++
++    /**
++     * victor:workout-count — the cycle's workouts as the Workouts list shows them: dismissed bouts out, then
++     * the list's own cross-source collapse ([WorkoutEditing.dedupCrossSource]), so the same session from the
++     * strap and from Samsung a minute apart is ONE workout, not two (only exact copies collapsed before).
++     */
++    internal fun uniqueWorkouts(rows: List<WorkoutRow>, dismissed: List<DismissedWorkout>): List<WorkoutRow> =
++        WorkoutEditing.dedupCrossSource(
++            WorkoutEditing.filterDismissed(rows.distinctBy { Triple(it.startTs, it.endTs, it.sport) }, dismissed),
++        )
+ }
+diff --git a/android/app/src/test/java/com/noop/analytics/VictorWorkoutCountTest.kt b/android/app/src/test/java/com/noop/analytics/VictorWorkoutCountTest.kt
+new file mode 100644
+index 000000000..3cf970dfd
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/analytics/VictorWorkoutCountTest.kt
+@@ -0,0 +1,43 @@
++package com.noop.analytics
++
++import com.noop.data.DismissedWorkout
++import com.noop.data.WorkoutRow
++import org.junit.Assert.assertEquals
++import org.junit.Test
++
++/**
++ * victor:workout-count — the day's workout count (the coach's "2 workouts", Trends, Coupled) counts each
++ * activity once, as the Workouts list shows it.
++ */
++class VictorWorkoutCountTest {
++
++    private val t0 = 1_760_976_000L   // 2025-10-20 16:00 UTC
++
++    private fun row(source: String, start: Long, end: Long, sport: String = "Running", device: String = source) =
++        WorkoutRow(deviceId = device, startTs = start, endTs = end, sport = sport, source = source)
++
++    @Test
++    fun theSameSessionFromTwoSourcesCountsOnce() {
++        val strap = row("my-whoop", t0, t0 + 3600)
++        val samsung = row("health-connect", t0 + 60, t0 + 3720)            // a minute off at each end
++        assertEquals(1, PhysiologicalStepCycleEngine.uniqueWorkouts(listOf(strap, samsung), emptyList()).size)
++        // An exact copy still collapses, as before.
++        assertEquals(1, PhysiologicalStepCycleEngine.uniqueWorkouts(listOf(strap, strap.copy()), emptyList()).size)
++    }
++
++    @Test
++    fun twoRealSessionsStayTwo() {
++        val morning = row("my-whoop", t0, t0 + 3600)
++        val evening = row("health-connect", t0 + 8 * 3600, t0 + 9 * 3600)
++        val otherSport = row("health-connect", t0 + 600, t0 + 3000, sport = "Cycling")   // overlaps, but another activity
++        assertEquals(3, PhysiologicalStepCycleEngine.uniqueWorkouts(listOf(morning, evening, otherSport), emptyList()).size)
++    }
++
++    @Test
++    fun aDismissedBoutDoesNotCount() {
++        val detected = row("my-whoop-noop", t0, t0 + 1800, sport = "detected")
++        val dismissed = listOf(DismissedWorkout("my-whoop-noop", t0, t0 + 1800))
++        assertEquals(0, PhysiologicalStepCycleEngine.uniqueWorkouts(listOf(detected), dismissed).size)
++        assertEquals(1, PhysiologicalStepCycleEngine.uniqueWorkouts(listOf(detected), emptyList()).size)
++    }
++}
+-- 
+2.54.0
+

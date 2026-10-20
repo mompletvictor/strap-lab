@@ -26,7 +26,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  5 files changed, 113 insertions(+), 14 deletions(-)
 
 diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
-index abf32ad7..7348b546 100644
+index abf32ad7c..7348b5469 100644
 --- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 +++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 @@ -7,6 +7,7 @@ import androidx.compose.runtime.LaunchedEffect
@@ -60,7 +60,7 @@ index abf32ad7..7348b546 100644
          FoodScorer.scoreDue(ctx)   // victor:scores
          com.noop.training.TrainingAnalyzer.refreshStale(ctx)   // victor:training — workouts scored on part of their heart rate
 diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
-index 692339db..7da21127 100644
+index 692339db4..7da21127d 100644
 --- a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
 +++ b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
 @@ -12,6 +12,7 @@ import com.noop.training.TrainingFormat
@@ -135,7 +135,7 @@ index 692339db..7da21127 100644
          }.sortedBy { it.weekStart }
      }
 diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
-index 745b8edd..dd126dd9 100644
+index 745b8edd5..dd126dd92 100644
 --- a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
 +++ b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
 @@ -30,9 +30,10 @@ import java.util.concurrent.atomic.AtomicBoolean
@@ -205,7 +205,7 @@ index 745b8edd..dd126dd9 100644
  
      /**
 diff --git a/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt b/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
-index d6ee8372..75f4f6a4 100644
+index d6ee8372c..75f4f6a44 100644
 --- a/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
 +++ b/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
 @@ -56,6 +56,14 @@ class VictorWiringAuditTest {
@@ -224,7 +224,7 @@ index d6ee8372..75f4f6a4 100644
      fun theWearersProfileScaleAndGoalsAreReadInOnePlace() {
          // The meal marks, the week's review and the workout estimate each had their own copy of these lines.
 diff --git a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
-index 09e55196..62daa389 100644
+index 09e551961..62daa3892 100644
 --- a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
 +++ b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
 @@ -144,4 +144,47 @@ class WeeklyReviewTest {

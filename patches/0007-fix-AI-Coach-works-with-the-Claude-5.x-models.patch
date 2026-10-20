@@ -23,7 +23,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/ai/AiCoach.kt b/android/app/src/main/java/com/noop/ai/AiCoach.kt
-index 8a4667f1..10935d2e 100644
+index 8a4667f1b..10935d2e8 100644
 --- a/android/app/src/main/java/com/noop/ai/AiCoach.kt
 +++ b/android/app/src/main/java/com/noop/ai/AiCoach.kt
 @@ -70,7 +70,7 @@ class AiCoach(
@@ -104,7 +104,7 @@ index 8a4667f1..10935d2e 100644
           * The user-facing message for a 200 response whose assistant content is empty (#1074). Some
           * OpenAI-compatible servers (e.g. a hand-set model the provider doesn't offer) return the real
 diff --git a/android/app/src/main/java/com/noop/ai/AiProvider.kt b/android/app/src/main/java/com/noop/ai/AiProvider.kt
-index 9158a97d..6e37baa2 100644
+index 9158a97df..6e37baa29 100644
 --- a/android/app/src/main/java/com/noop/ai/AiProvider.kt
 +++ b/android/app/src/main/java/com/noop/ai/AiProvider.kt
 @@ -51,18 +51,24 @@ enum class AiProvider(
@@ -141,7 +141,7 @@ index 9158a97d..6e37baa2 100644
      /**
 diff --git a/android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt b/android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt
 new file mode 100644
-index 00000000..9bde863d
+index 000000000..9bde863d3
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt
 @@ -0,0 +1,55 @@

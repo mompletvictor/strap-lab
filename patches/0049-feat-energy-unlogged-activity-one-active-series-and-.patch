@@ -37,7 +37,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/energy/UnloggedMinutesTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt b/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
-index 4a545c14..df08dddd 100644
+index 4a545c142..df08dddda 100644
 --- a/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
 +++ b/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
 @@ -1,12 +1,14 @@
@@ -349,7 +349,7 @@ index 4a545c14..df08dddd 100644
 +    }
 +}
 diff --git a/android/app/src/main/java/com/noop/energy/EnergyCache.kt b/android/app/src/main/java/com/noop/energy/EnergyCache.kt
-index 8c93440c..15218a37 100644
+index 8c93440c9..15218a371 100644
 --- a/android/app/src/main/java/com/noop/energy/EnergyCache.kt
 +++ b/android/app/src/main/java/com/noop/energy/EnergyCache.kt
 @@ -26,6 +26,9 @@ data class WindowRaw(
@@ -414,7 +414,7 @@ index 8c93440c..15218a37 100644
          }
          return out
 diff --git a/android/app/src/main/java/com/noop/energy/EnergyModel.kt b/android/app/src/main/java/com/noop/energy/EnergyModel.kt
-index 1e2ce0e4..20644c48 100644
+index 1e2ce0e42..20644c483 100644
 --- a/android/app/src/main/java/com/noop/energy/EnergyModel.kt
 +++ b/android/app/src/main/java/com/noop/energy/EnergyModel.kt
 @@ -11,14 +11,14 @@ import kotlin.math.min
@@ -510,7 +510,7 @@ index 1e2ce0e4..20644c48 100644
              activeKcal = active,
 diff --git a/android/app/src/main/java/com/noop/energy/UnloggedMinutes.kt b/android/app/src/main/java/com/noop/energy/UnloggedMinutes.kt
 new file mode 100644
-index 00000000..b8c12c50
+index 000000000..b8c12c507
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/energy/UnloggedMinutes.kt
 @@ -0,0 +1,101 @@
@@ -616,7 +616,7 @@ index 00000000..b8c12c50
 +    }
 +}
 diff --git a/android/app/src/test/java/com/noop/energy/DayEnergyModelTest.kt b/android/app/src/test/java/com/noop/energy/DayEnergyModelTest.kt
-index 5ffd0938..388e08f4 100644
+index 5ffd0938c..388e08f44 100644
 --- a/android/app/src/test/java/com/noop/energy/DayEnergyModelTest.kt
 +++ b/android/app/src/test/java/com/noop/energy/DayEnergyModelTest.kt
 @@ -10,10 +10,14 @@ import com.noop.data.StepSample
@@ -807,7 +807,7 @@ index 5ffd0938..388e08f4 100644
 +    }
  }
 diff --git a/android/app/src/test/java/com/noop/energy/EnergyCacheTest.kt b/android/app/src/test/java/com/noop/energy/EnergyCacheTest.kt
-index 76612b46..da1d7540 100644
+index 76612b468..da1d7540d 100644
 --- a/android/app/src/test/java/com/noop/energy/EnergyCacheTest.kt
 +++ b/android/app/src/test/java/com/noop/energy/EnergyCacheTest.kt
 @@ -18,6 +18,8 @@ class EnergyCacheTest {
@@ -821,7 +821,7 @@ index 76612b46..da1d7540 100644
      @Test
 diff --git a/android/app/src/test/java/com/noop/energy/EnergyFixtures.kt b/android/app/src/test/java/com/noop/energy/EnergyFixtures.kt
 new file mode 100644
-index 00000000..f8f2d83c
+index 000000000..f8f2d83c6
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/energy/EnergyFixtures.kt
 @@ -0,0 +1,57 @@
@@ -883,7 +883,7 @@ index 00000000..f8f2d83c
 +    )
 +}
 diff --git a/android/app/src/test/java/com/noop/energy/EnergyModelTest.kt b/android/app/src/test/java/com/noop/energy/EnergyModelTest.kt
-index 1e6f6d0f..a4cd6178 100644
+index 1e6f6d0f8..a4cd6178d 100644
 --- a/android/app/src/test/java/com/noop/energy/EnergyModelTest.kt
 +++ b/android/app/src/test/java/com/noop/energy/EnergyModelTest.kt
 @@ -294,4 +294,43 @@ class EnergyModelTest {
@@ -932,7 +932,7 @@ index 1e6f6d0f..a4cd6178 100644
  }
 diff --git a/android/app/src/test/java/com/noop/energy/UnloggedMinutesTest.kt b/android/app/src/test/java/com/noop/energy/UnloggedMinutesTest.kt
 new file mode 100644
-index 00000000..81056d6c
+index 000000000..81056d6c5
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/energy/UnloggedMinutesTest.kt
 @@ -0,0 +1,82 @@

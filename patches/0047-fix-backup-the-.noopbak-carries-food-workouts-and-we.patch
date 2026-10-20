@@ -38,7 +38,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/data/VictorBackupFilesTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/data/DataBackup.kt b/android/app/src/main/java/com/noop/data/DataBackup.kt
-index 82ee87c7..9fe7a1e4 100644
+index 82ee87c7e..9fe7a1e43 100644
 --- a/android/app/src/main/java/com/noop/data/DataBackup.kt
 +++ b/android/app/src/main/java/com/noop/data/DataBackup.kt
 @@ -308,6 +308,7 @@ object DataBackup {
@@ -59,7 +59,7 @@ index 82ee87c7..9fe7a1e4 100644
          tempSqlite.delete()
 diff --git a/android/app/src/main/java/com/noop/data/VictorBackupFiles.kt b/android/app/src/main/java/com/noop/data/VictorBackupFiles.kt
 new file mode 100644
-index 00000000..ca4274f5
+index 000000000..ca4274f52
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/data/VictorBackupFiles.kt
 @@ -0,0 +1,376 @@
@@ -440,7 +440,7 @@ index 00000000..ca4274f5
 +    }
 +}
 diff --git a/android/app/src/main/res/values-es/strings_victor_l10n_settings.xml b/android/app/src/main/res/values-es/strings_victor_l10n_settings.xml
-index 82239a6b..59b78761 100644
+index 82239a6b1..59b787614 100644
 --- a/android/app/src/main/res/values-es/strings_victor_l10n_settings.xml
 +++ b/android/app/src/main/res/values-es/strings_victor_l10n_settings.xml
 @@ -88,7 +88,7 @@
@@ -453,7 +453,7 @@ index 82239a6b..59b78761 100644
      <string name="victor_l10n_settings_noop_all_your_data_none_of_the_cloud">NOOP: todos tus datos, nada de nube.</string>
      <string name="victor_l10n_settings_built_on">Basado en</string>
 diff --git a/android/app/src/main/res/values/strings_victor_l10n_settings.xml b/android/app/src/main/res/values/strings_victor_l10n_settings.xml
-index e52585f9..81f01b49 100644
+index e52585f9b..81f01b497 100644
 --- a/android/app/src/main/res/values/strings_victor_l10n_settings.xml
 +++ b/android/app/src/main/res/values/strings_victor_l10n_settings.xml
 @@ -88,7 +88,7 @@
@@ -467,7 +467,7 @@ index e52585f9..81f01b49 100644
      <string name="victor_l10n_settings_built_on">Built on</string>
 diff --git a/android/app/src/test/java/com/noop/data/VictorBackupFilesTest.kt b/android/app/src/test/java/com/noop/data/VictorBackupFilesTest.kt
 new file mode 100644
-index 00000000..647764f1
+index 000000000..647764f19
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/data/VictorBackupFilesTest.kt
 @@ -0,0 +1,320 @@

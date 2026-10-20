@@ -21,7 +21,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
-index 7673cb95..209221a1 100644
+index 7673cb95a..209221a19 100644
 --- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 +++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 @@ -17,16 +17,20 @@ import kotlin.math.roundToInt
@@ -50,7 +50,7 @@ index 7673cb95..209221a1 100644
              runCatching { VictorGoals.coachLine(VictorGoalsStore.load(ctx), scale?.weight?.value) }.getOrNull(),
 diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt b/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
 new file mode 100644
-index 00000000..f0d8a410
+index 000000000..f0d8a4107
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
 @@ -0,0 +1,140 @@
@@ -196,7 +196,7 @@ index 00000000..f0d8a410
 +}
 diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
 new file mode 100644
-index 00000000..828e79b5
+index 000000000..828e79b54
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
 @@ -0,0 +1,88 @@

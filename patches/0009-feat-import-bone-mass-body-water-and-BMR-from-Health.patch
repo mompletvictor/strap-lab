@@ -37,7 +37,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/ingest/ScaleImportTest.kt
 
 diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
-index 7d91c7ba..08b2041f 100644
+index 7d91c7ba8..08b2041f6 100644
 --- a/android/app/src/main/AndroidManifest.xml
 +++ b/android/app/src/main/AndroidManifest.xml
 @@ -137,6 +137,10 @@
@@ -53,7 +53,7 @@ index 7d91c7ba..08b2041f 100644
      <queries>
 diff --git a/android/app/src/main/java/com/noop/analytics/ScaleBody.kt b/android/app/src/main/java/com/noop/analytics/ScaleBody.kt
 new file mode 100644
-index 00000000..e1d9f840
+index 000000000..e1d9f840e
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/analytics/ScaleBody.kt
 @@ -0,0 +1,128 @@
@@ -186,7 +186,7 @@ index 00000000..e1d9f840
 +    private fun parseDay(day: String): LocalDate? = runCatching { LocalDate.parse(day) }.getOrNull()
 +}
 diff --git a/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt b/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt
-index b620aa73..a839766e 100644
+index b620aa731..a839766ef 100644
 --- a/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt
 +++ b/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt
 @@ -139,6 +139,7 @@ object HealthConnectImporter {
@@ -220,7 +220,7 @@ index b620aa73..a839766e 100644
          try {
 diff --git a/android/app/src/main/java/com/noop/ingest/ScaleImport.kt b/android/app/src/main/java/com/noop/ingest/ScaleImport.kt
 new file mode 100644
-index 00000000..301478c2
+index 000000000..301478c26
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/ingest/ScaleImport.kt
 @@ -0,0 +1,189 @@
@@ -415,7 +415,7 @@ index 00000000..301478c2
 +}
 diff --git a/android/app/src/test/java/com/noop/analytics/ScaleBodyTest.kt b/android/app/src/test/java/com/noop/analytics/ScaleBodyTest.kt
 new file mode 100644
-index 00000000..01ac902b
+index 000000000..01ac902b7
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/analytics/ScaleBodyTest.kt
 @@ -0,0 +1,105 @@
@@ -526,7 +526,7 @@ index 00000000..01ac902b
 +}
 diff --git a/android/app/src/test/java/com/noop/ingest/ScaleImportTest.kt b/android/app/src/test/java/com/noop/ingest/ScaleImportTest.kt
 new file mode 100644
-index 00000000..c6713513
+index 000000000..c67135136
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/ingest/ScaleImportTest.kt
 @@ -0,0 +1,207 @@

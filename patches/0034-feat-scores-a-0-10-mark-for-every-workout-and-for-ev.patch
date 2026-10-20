@@ -42,7 +42,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/food/MealScoringTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/food/FoodCoachContext.kt b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
-index e36085df..a56f2e1e 100644
+index e36085df1..a56f2e1e9 100644
 --- a/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
 @@ -15,14 +15,14 @@ object FoodCoachContext {
@@ -84,7 +84,7 @@ index e36085df..a56f2e1e 100644
          MealType.MID_MORNING -> "mid-morning snack"
 diff --git a/android/app/src/main/java/com/noop/food/FoodScorer.kt b/android/app/src/main/java/com/noop/food/FoodScorer.kt
 new file mode 100644
-index 00000000..6f54c6bb
+index 000000000..6f54c6bb7
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/food/FoodScorer.kt
 @@ -0,0 +1,74 @@
@@ -163,7 +163,7 @@ index 00000000..6f54c6bb
 +    }
 +}
 diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
-index f945b013..982d1c36 100644
+index f945b0138..982d1c365 100644
 --- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
 @@ -61,6 +61,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -260,7 +260,7 @@ index f945b013..982d1c36 100644
  
  @Composable
 diff --git a/android/app/src/main/java/com/noop/food/FoodStore.kt b/android/app/src/main/java/com/noop/food/FoodStore.kt
-index b4588ffe..fbb4f1bd 100644
+index b4588ffe6..fbb4f1bd5 100644
 --- a/android/app/src/main/java/com/noop/food/FoodStore.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodStore.kt
 @@ -20,6 +20,8 @@ internal data class FoodState(
@@ -352,7 +352,7 @@ index b4588ffe..fbb4f1bd 100644
  }
 diff --git a/android/app/src/main/java/com/noop/food/MealScoring.kt b/android/app/src/main/java/com/noop/food/MealScoring.kt
 new file mode 100644
-index 00000000..974eae84
+index 000000000..974eae844
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/food/MealScoring.kt
 @@ -0,0 +1,113 @@
@@ -470,7 +470,7 @@ index 00000000..974eae84
 +    private val HHMM = DateTimeFormatter.ofPattern("HH:mm", Locale.ROOT)
 +}
 diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
-index c11e6fd6..9f351372 100644
+index c11e6fd6e..9f3513725 100644
 --- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 +++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 @@ -1,6 +1,7 @@
@@ -491,7 +491,7 @@ index c11e6fd6..9f351372 100644
          value = withContext(Dispatchers.IO) { runCatching { FoodEnergy.load(ctx, vm.repo, vm.activeStrapId, today) }.getOrNull() }
 diff --git a/android/app/src/main/java/com/noop/training/ScoreBadge.kt b/android/app/src/main/java/com/noop/training/ScoreBadge.kt
 new file mode 100644
-index 00000000..520dc21b
+index 000000000..520dc21b8
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/training/ScoreBadge.kt
 @@ -0,0 +1,32 @@
@@ -528,7 +528,7 @@ index 00000000..520dc21b
 +    else -> Palette.statusCritical
 +}
 diff --git a/android/app/src/main/java/com/noop/training/TrainingAi.kt b/android/app/src/main/java/com/noop/training/TrainingAi.kt
-index f79d134c..0499f5c4 100644
+index f79d134c7..0499f5c43 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingAi.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingAi.kt
 @@ -79,6 +79,10 @@ object TrainingAi {
@@ -576,7 +576,7 @@ index f79d134c..0499f5c4 100644
      }
  
 diff --git a/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt b/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
-index 23a2ede6..e0c11e21 100644
+index 23a2ede60..e0c11e212 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
 @@ -55,7 +55,8 @@ internal object TrainingCoachContext {
@@ -590,7 +590,7 @@ index 23a2ede6..e0c11e21 100644
              "${start.toLocalDate()} ${start.format(HHMM)}-${end.format(HHMM)} ${row.sport} ($how): $exercises" +
                  listOfNotNull(hr.ifEmpty { null }, ai).joinToString("") { " | $it" }
 diff --git a/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt b/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
-index 2856d90c..c4d7fb5b 100644
+index 2856d90c2..c4d7fb5bd 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
 @@ -102,6 +102,12 @@ fun TrainingDetailSection(vm: AppViewModel, row: WorkoutRow) {
@@ -607,7 +607,7 @@ index 2856d90c..c4d7fb5b 100644
          }
          errors[session.id]?.let { Text(uiString(trainingError(it)), style = NoopType.subhead, color = Palette.statusWarning) }
 diff --git a/android/app/src/main/java/com/noop/training/TrainingModels.kt b/android/app/src/main/java/com/noop/training/TrainingModels.kt
-index 5147074a..e78a233c 100644
+index 5147074ae..e78a233c4 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingModels.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingModels.kt
 @@ -73,6 +73,9 @@ data class TrainingAnalysis(
@@ -621,7 +621,7 @@ index 5147074a..e78a233c 100644
  
  data class TrainingSession(
 diff --git a/android/app/src/main/java/com/noop/training/TrainingStore.kt b/android/app/src/main/java/com/noop/training/TrainingStore.kt
-index 1cc4b136..2f3e4ede 100644
+index 1cc4b1369..2f3e4edef 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingStore.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingStore.kt
 @@ -45,6 +45,8 @@ internal object TrainingStoreCodec {
@@ -643,7 +643,7 @@ index 1cc4b136..2f3e4ede 100644
              }
              out += TrainingSession(
 diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
-index 86c4fba9..2a9677e3 100644
+index 86c4fba94..2a9677e31 100644
 --- a/android/app/src/main/res/values-es/strings_victor_food.xml
 +++ b/android/app/src/main/res/values-es/strings_victor_food.xml
 @@ -131,4 +131,5 @@
@@ -653,7 +653,7 @@ index 86c4fba9..2a9677e3 100644
 +    <string name="victor_food_ok">Vale</string>
  </resources>
 diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
-index fb8d1530..37ab4811 100644
+index fb8d15309..37ab4811b 100644
 --- a/android/app/src/main/res/values/strings_victor_food.xml
 +++ b/android/app/src/main/res/values/strings_victor_food.xml
 @@ -131,4 +131,5 @@
@@ -664,7 +664,7 @@ index fb8d1530..37ab4811 100644
  </resources>
 diff --git a/android/app/src/test/java/com/noop/food/MealScoringTest.kt b/android/app/src/test/java/com/noop/food/MealScoringTest.kt
 new file mode 100644
-index 00000000..857e5d5e
+index 000000000..857e5d5ea
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/food/MealScoringTest.kt
 @@ -0,0 +1,85 @@
@@ -754,7 +754,7 @@ index 00000000..857e5d5e
 +    }
 +}
 diff --git a/android/app/src/test/java/com/noop/training/TrainingTest.kt b/android/app/src/test/java/com/noop/training/TrainingTest.kt
-index 03cbaa98..9dee5b0c 100644
+index 03cbaa988..9dee5b0cd 100644
 --- a/android/app/src/test/java/com/noop/training/TrainingTest.kt
 +++ b/android/app/src/test/java/com/noop/training/TrainingTest.kt
 @@ -270,4 +270,18 @@ class TrainingTest {

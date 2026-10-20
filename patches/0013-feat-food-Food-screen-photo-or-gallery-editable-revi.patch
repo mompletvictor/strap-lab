@@ -44,7 +44,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 
 diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
 new file mode 100644
-index 00000000..14ebed8f
+index 000000000..14ebed8fa
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
 @@ -0,0 +1,402 @@
@@ -452,7 +452,7 @@ index 00000000..14ebed8f
 +}
 diff --git a/android/app/src/main/java/com/noop/food/FoodSheet.kt b/android/app/src/main/java/com/noop/food/FoodSheet.kt
 new file mode 100644
-index 00000000..5fa25345
+index 000000000..5fa253457
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/food/FoodSheet.kt
 @@ -0,0 +1,327 @@
@@ -785,7 +785,7 @@ index 00000000..5fa25345
 +)
 diff --git a/android/app/src/main/java/com/noop/food/FoodViewModel.kt b/android/app/src/main/java/com/noop/food/FoodViewModel.kt
 new file mode 100644
-index 00000000..42a3b38d
+index 000000000..42a3b38d7
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/food/FoodViewModel.kt
 @@ -0,0 +1,207 @@
@@ -997,7 +997,7 @@ index 00000000..42a3b38d
 +    }
 +}
 diff --git a/android/app/src/main/java/com/noop/ui/AppRoot.kt b/android/app/src/main/java/com/noop/ui/AppRoot.kt
-index b4b61123..84634483 100644
+index b4b611238..846344835 100644
 --- a/android/app/src/main/java/com/noop/ui/AppRoot.kt
 +++ b/android/app/src/main/java/com/noop/ui/AppRoot.kt
 @@ -172,6 +172,7 @@ internal enum class Destination(
@@ -1026,7 +1026,7 @@ index b4b61123..84634483 100644
                  composable(Destination.Intelligence.route) { IntelligenceScreen(viewModel) }
 diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
 new file mode 100644
-index 00000000..12c780da
+index 000000000..12c780da5
 --- /dev/null
 +++ b/android/app/src/main/res/values-es/strings_victor_food.xml
 @@ -0,0 +1,75 @@
@@ -1107,7 +1107,7 @@ index 00000000..12c780da
 +</resources>
 diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
 new file mode 100644
-index 00000000..9e9a0af8
+index 000000000..9e9a0af8f
 --- /dev/null
 +++ b/android/app/src/main/res/values/strings_victor_food.xml
 @@ -0,0 +1,75 @@
@@ -1187,7 +1187,7 @@ index 00000000..9e9a0af8
 +    <string name="victor_food_camera_denied">Camera permission denied.</string>
 +</resources>
 diff --git a/android/app/src/main/res/xml/file_paths.xml b/android/app/src/main/res/xml/file_paths.xml
-index 478f027f..f26fe920 100644
+index 478f027f9..f26fe920b 100644
 --- a/android/app/src/main/res/xml/file_paths.xml
 +++ b/android/app/src/main/res/xml/file_paths.xml
 @@ -9,4 +9,5 @@

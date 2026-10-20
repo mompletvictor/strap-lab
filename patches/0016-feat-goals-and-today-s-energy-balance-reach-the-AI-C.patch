@@ -37,7 +37,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/goals/VictorGoalsTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/ai/AiCoach.kt b/android/app/src/main/java/com/noop/ai/AiCoach.kt
-index 81a4ebb4..2f73785c 100644
+index 81a4ebb49..2f73785c2 100644
 --- a/android/app/src/main/java/com/noop/ai/AiCoach.kt
 +++ b/android/app/src/main/java/com/noop/ai/AiCoach.kt
 @@ -128,7 +128,7 @@ class AiCoach(
@@ -59,7 +59,7 @@ index 81a4ebb4..2f73785c 100644
                  append(buildContext(days))
                  if (!workouts.isNullOrBlank()) append("\n\n").append(workouts)
 diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
-index c62bd4da..7673cb95 100644
+index c62bd4daf..7673cb95a 100644
 --- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 +++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 @@ -3,16 +3,65 @@ package com.noop.ai
@@ -135,7 +135,7 @@ index c62bd4da..7673cb95 100644
 +    private fun r(v: Double) = v.roundToInt()
  }
 diff --git a/android/app/src/main/java/com/noop/food/FoodDayCard.kt b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
-index cf7e5ebe..373efe5d 100644
+index cf7e5ebec..373efe5db 100644
 --- a/android/app/src/main/java/com/noop/food/FoodDayCard.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
 @@ -27,8 +27,9 @@ import kotlin.math.abs
@@ -178,7 +178,7 @@ index cf7e5ebe..373efe5d 100644
              if (onAdd != null) {
                  NoopButton(
 diff --git a/android/app/src/main/java/com/noop/food/FoodEnergy.kt b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
-index 7188bca7..d0599d91 100644
+index 7188bca7f..d0599d914 100644
 --- a/android/app/src/main/java/com/noop/food/FoodEnergy.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
 @@ -1,5 +1,6 @@
@@ -209,7 +209,7 @@ index 7188bca7..d0599d91 100644
                  }.getOrNull()
              val phoneBasal = phoneRows.firstNotNullOfOrNull { r -> r.basalKcal?.takeIf { it > 0 } }
 diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
-index 9e89e3a5..60c3c1dc 100644
+index 9e89e3a5a..60c3c1dcd 100644
 --- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
 @@ -56,6 +56,7 @@ import androidx.core.content.FileProvider
@@ -230,7 +230,7 @@ index 9e89e3a5..60c3c1dc 100644
              Row(horizontalArrangement = Arrangement.spacedBy(Metrics.space12)) {
                  NoopButton(
 diff --git a/android/app/src/main/java/com/noop/food/FoodSheet.kt b/android/app/src/main/java/com/noop/food/FoodSheet.kt
-index 5fa25345..36a67e42 100644
+index 5fa253457..36a67e42f 100644
 --- a/android/app/src/main/java/com/noop/food/FoodSheet.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodSheet.kt
 @@ -309,7 +309,7 @@ private fun confidenceLabel(confidence: String?) = when (confidence) {
@@ -243,7 +243,7 @@ index 5fa25345..36a67e42 100644
      unfocusedTextColor = Palette.textPrimary,
      disabledTextColor = Palette.textTertiary,
 diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
-index de5411b9..131cacdb 100644
+index de5411b94..131cacdb5 100644
 --- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 +++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 @@ -5,6 +5,7 @@ import androidx.compose.runtime.getValue
@@ -264,7 +264,7 @@ index de5411b9..131cacdb 100644
  }
 diff --git a/android/app/src/main/java/com/noop/goals/VictorGoals.kt b/android/app/src/main/java/com/noop/goals/VictorGoals.kt
 new file mode 100644
-index 00000000..965e6e6c
+index 000000000..965e6e6c0
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/goals/VictorGoals.kt
 @@ -0,0 +1,93 @@
@@ -363,7 +363,7 @@ index 00000000..965e6e6c
 +}
 diff --git a/android/app/src/main/java/com/noop/goals/VictorGoalsCard.kt b/android/app/src/main/java/com/noop/goals/VictorGoalsCard.kt
 new file mode 100644
-index 00000000..ede3f23a
+index 000000000..ede3f23af
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/goals/VictorGoalsCard.kt
 @@ -0,0 +1,130 @@
@@ -498,7 +498,7 @@ index 00000000..ede3f23a
 +
 +private fun trimNumber(v: Double): String = if (v % 1.0 == 0.0) v.toInt().toString() else v.toString()
 diff --git a/android/app/src/main/java/com/noop/ui/CoachSettingsScreen.kt b/android/app/src/main/java/com/noop/ui/CoachSettingsScreen.kt
-index 4cff263b..82dc6efa 100644
+index 4cff263bd..82dc6efa4 100644
 --- a/android/app/src/main/java/com/noop/ui/CoachSettingsScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/CoachSettingsScreen.kt
 @@ -85,6 +85,7 @@ fun CoachSettingsScreen(vm: CoachViewModel) {
@@ -511,7 +511,7 @@ index 4cff263b..82dc6efa 100644
          }
 diff --git a/android/app/src/main/res/values-es/strings_victor_goals.xml b/android/app/src/main/res/values-es/strings_victor_goals.xml
 new file mode 100644
-index 00000000..bb3c8c93
+index 000000000..bb3c8c932
 --- /dev/null
 +++ b/android/app/src/main/res/values-es/strings_victor_goals.xml
 @@ -0,0 +1,16 @@
@@ -533,7 +533,7 @@ index 00000000..bb3c8c93
 +</resources>
 diff --git a/android/app/src/main/res/values/strings_victor_goals.xml b/android/app/src/main/res/values/strings_victor_goals.xml
 new file mode 100644
-index 00000000..e96ce791
+index 000000000..e96ce791d
 --- /dev/null
 +++ b/android/app/src/main/res/values/strings_victor_goals.xml
 @@ -0,0 +1,16 @@
@@ -555,7 +555,7 @@ index 00000000..e96ce791
 +</resources>
 diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
 new file mode 100644
-index 00000000..478e3ebf
+index 000000000..478e3ebfd
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
 @@ -0,0 +1,37 @@
@@ -598,7 +598,7 @@ index 00000000..478e3ebf
 +}
 diff --git a/android/app/src/test/java/com/noop/goals/VictorGoalsTest.kt b/android/app/src/test/java/com/noop/goals/VictorGoalsTest.kt
 new file mode 100644
-index 00000000..ac389f32
+index 000000000..ac389f32c
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/goals/VictorGoalsTest.kt
 @@ -0,0 +1,42 @@

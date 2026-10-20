@@ -26,7 +26,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/main/res/values/strings_victor_haptics.xml
 
 diff --git a/android/app/src/main/java/com/noop/ble/WhoopBleClient.kt b/android/app/src/main/java/com/noop/ble/WhoopBleClient.kt
-index b7a7a7e7..dbbaaa32 100644
+index b7a7a7e7e..dbbaaa322 100644
 --- a/android/app/src/main/java/com/noop/ble/WhoopBleClient.kt
 +++ b/android/app/src/main/java/com/noop/ble/WhoopBleClient.kt
 @@ -4608,6 +4608,7 @@ class WhoopBleClient(
@@ -39,7 +39,7 @@ index b7a7a7e7..dbbaaa32 100644
          log("Buzz: patternId=2 loops=$n")
 diff --git a/android/app/src/main/java/com/noop/haptics/StrapVibration.kt b/android/app/src/main/java/com/noop/haptics/StrapVibration.kt
 new file mode 100644
-index 00000000..769f8d08
+index 000000000..769f8d08f
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/haptics/StrapVibration.kt
 @@ -0,0 +1,23 @@
@@ -68,7 +68,7 @@ index 00000000..769f8d08
 +}
 diff --git a/android/app/src/main/java/com/noop/haptics/StrapVibrationSection.kt b/android/app/src/main/java/com/noop/haptics/StrapVibrationSection.kt
 new file mode 100644
-index 00000000..3fc67aea
+index 000000000..3fc67aea3
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/haptics/StrapVibrationSection.kt
 @@ -0,0 +1,50 @@
@@ -123,7 +123,7 @@ index 00000000..3fc67aea
 +    }
 +}
 diff --git a/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt b/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt
-index d77d799e..29decf5f 100644
+index d77d799ed..29decf5f1 100644
 --- a/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt
 @@ -122,6 +122,7 @@ fun AutomationsScreen(viewModel: AppViewModel) {
@@ -136,7 +136,7 @@ index d77d799e..29decf5f 100644
          item {
 diff --git a/android/app/src/main/res/values-es/strings_victor_haptics.xml b/android/app/src/main/res/values-es/strings_victor_haptics.xml
 new file mode 100644
-index 00000000..f507b522
+index 000000000..f507b5225
 --- /dev/null
 +++ b/android/app/src/main/res/values-es/strings_victor_haptics.xml
 @@ -0,0 +1,9 @@
@@ -151,7 +151,7 @@ index 00000000..f507b522
 +</resources>
 diff --git a/android/app/src/main/res/values/strings_victor_haptics.xml b/android/app/src/main/res/values/strings_victor_haptics.xml
 new file mode 100644
-index 00000000..5b510b6b
+index 000000000..5b510b6b7
 --- /dev/null
 +++ b/android/app/src/main/res/values/strings_victor_haptics.xml
 @@ -0,0 +1,9 @@

@@ -27,7 +27,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/main/res/values/strings_victor_scale.xml
 
 diff --git a/android/app/src/main/java/com/noop/ui/HealthScreen.kt b/android/app/src/main/java/com/noop/ui/HealthScreen.kt
-index 93aec86f..74792a32 100644
+index 93aec86fe..74792a32a 100644
 --- a/android/app/src/main/java/com/noop/ui/HealthScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/HealthScreen.kt
 @@ -209,6 +209,7 @@ fun HealthScreen(
@@ -40,7 +40,7 @@ index 93aec86f..74792a32 100644
              // destination (umbrella §2.4). Non-clinical observations about your own numbers.
 diff --git a/android/app/src/main/java/com/noop/ui/ScaleCard.kt b/android/app/src/main/java/com/noop/ui/ScaleCard.kt
 new file mode 100644
-index 00000000..c5625ad4
+index 000000000..c5625ad4a
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/ui/ScaleCard.kt
 @@ -0,0 +1,174 @@
@@ -220,7 +220,7 @@ index 00000000..c5625ad4
 +private fun oneDecimal(v: Double): String = String.format(Locale.US, "%.1f", v)
 diff --git a/android/app/src/main/res/values-es/strings_victor_scale.xml b/android/app/src/main/res/values-es/strings_victor_scale.xml
 new file mode 100644
-index 00000000..07f9fe03
+index 000000000..07f9fe033
 --- /dev/null
 +++ b/android/app/src/main/res/values-es/strings_victor_scale.xml
 @@ -0,0 +1,19 @@
@@ -245,7 +245,7 @@ index 00000000..07f9fe03
 +</resources>
 diff --git a/android/app/src/main/res/values/strings_victor_scale.xml b/android/app/src/main/res/values/strings_victor_scale.xml
 new file mode 100644
-index 00000000..7b9ef683
+index 000000000..7b9ef6831
 --- /dev/null
 +++ b/android/app/src/main/res/values/strings_victor_scale.xml
 @@ -0,0 +1,19 @@

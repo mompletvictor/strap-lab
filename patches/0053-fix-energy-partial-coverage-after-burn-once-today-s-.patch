@@ -41,7 +41,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/energy/EnergyHooksTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt b/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
-index df08dddd..012f28ae 100644
+index df08dddda..012f28aec 100644
 --- a/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
 +++ b/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
 @@ -22,8 +22,12 @@ import com.noop.training.TrainingStore
@@ -256,7 +256,7 @@ index df08dddd..012f28ae 100644
      /** The model's points for an `active_kcal` / `energy_kcal` read, or null when not installed or on failure. */
      suspend fun activeSeries(key: String, from: String, to: String): List<WhoopRepository.ResolvedMetricPoint>? {
 diff --git a/android/app/src/main/java/com/noop/energy/EnergyModel.kt b/android/app/src/main/java/com/noop/energy/EnergyModel.kt
-index 20644c48..e3d4b366 100644
+index 20644c483..e3d4b3668 100644
 --- a/android/app/src/main/java/com/noop/energy/EnergyModel.kt
 +++ b/android/app/src/main/java/com/noop/energy/EnergyModel.kt
 @@ -227,11 +227,16 @@ object EnergyModel {
@@ -307,7 +307,7 @@ index 20644c48..e3d4b366 100644
          }
          if (steps == null && bmrRate != null) missing += EnergyMissing.STEPS
 diff --git a/android/app/src/main/java/com/noop/energy/HrIntegral.kt b/android/app/src/main/java/com/noop/energy/HrIntegral.kt
-index f4883e5f..58a13894 100644
+index f4883e5f9..58a13894c 100644
 --- a/android/app/src/main/java/com/noop/energy/HrIntegral.kt
 +++ b/android/app/src/main/java/com/noop/energy/HrIntegral.kt
 @@ -57,10 +57,21 @@ data class HrIntegral(
@@ -334,7 +334,7 @@ index f4883e5f..58a13894 100644
          val EMPTY_HRMAX = 220.0
  
 diff --git a/android/app/src/main/java/com/noop/energy/UnloggedMinutes.kt b/android/app/src/main/java/com/noop/energy/UnloggedMinutes.kt
-index b8c12c50..27422bd2 100644
+index b8c12c507..27422bd24 100644
 --- a/android/app/src/main/java/com/noop/energy/UnloggedMinutes.kt
 +++ b/android/app/src/main/java/com/noop/energy/UnloggedMinutes.kt
 @@ -22,6 +22,9 @@ data class UnloggedMinute(
@@ -373,7 +373,7 @@ index b8c12c50..27422bd2 100644
              .sortedBy { it.minute }
              .toList()
 diff --git a/android/app/src/main/java/com/noop/ui/AppViewModel.kt b/android/app/src/main/java/com/noop/ui/AppViewModel.kt
-index b87246ea..4e152924 100644
+index b87246ea9..4e1529242 100644
 --- a/android/app/src/main/java/com/noop/ui/AppViewModel.kt
 +++ b/android/app/src/main/java/com/noop/ui/AppViewModel.kt
 @@ -2121,7 +2121,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -387,7 +387,7 @@ index b87246ea..4e152924 100644
              // one-shot Effort + duration + avg-HR notification when it's strictly newer than the last one
 diff --git a/android/app/src/test/java/com/noop/energy/DayEnergyModelLoadTest.kt b/android/app/src/test/java/com/noop/energy/DayEnergyModelLoadTest.kt
 new file mode 100644
-index 00000000..3ac0d7ef
+index 000000000..3ac0d7ef1
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/energy/DayEnergyModelLoadTest.kt
 @@ -0,0 +1,87 @@
@@ -480,7 +480,7 @@ index 00000000..3ac0d7ef
 +}
 diff --git a/android/app/src/test/java/com/noop/energy/EnergyHooksTest.kt b/android/app/src/test/java/com/noop/energy/EnergyHooksTest.kt
 new file mode 100644
-index 00000000..2707f7a2
+index 000000000..2707f7a27
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/energy/EnergyHooksTest.kt
 @@ -0,0 +1,70 @@
@@ -555,7 +555,7 @@ index 00000000..2707f7a2
 +    }
 +}
 diff --git a/android/app/src/test/java/com/noop/energy/EnergyModelTest.kt b/android/app/src/test/java/com/noop/energy/EnergyModelTest.kt
-index a4cd6178..2a89d567 100644
+index a4cd6178d..2a89d5671 100644
 --- a/android/app/src/test/java/com/noop/energy/EnergyModelTest.kt
 +++ b/android/app/src/test/java/com/noop/energy/EnergyModelTest.kt
 @@ -228,8 +228,8 @@ class EnergyModelTest {
@@ -614,7 +614,7 @@ index a4cd6178..2a89d567 100644
 +    }
  }
 diff --git a/android/app/src/test/java/com/noop/energy/UnloggedMinutesTest.kt b/android/app/src/test/java/com/noop/energy/UnloggedMinutesTest.kt
-index 81056d6c..01022806 100644
+index 81056d6c5..01022806c 100644
 --- a/android/app/src/test/java/com/noop/energy/UnloggedMinutesTest.kt
 +++ b/android/app/src/test/java/com/noop/energy/UnloggedMinutesTest.kt
 @@ -66,9 +66,11 @@ class UnloggedMinutesTest {

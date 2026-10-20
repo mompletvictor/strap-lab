@@ -27,7 +27,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/day/DayCoachContextTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
-index bf567dd8..858e88f4 100644
+index bf567dd85..858e88f44 100644
 --- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 +++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 @@ -2,6 +2,7 @@ package com.noop.ai
@@ -59,7 +59,7 @@ index bf567dd8..858e88f4 100644
  
 diff --git a/android/app/src/main/java/com/noop/day/DayCoachContext.kt b/android/app/src/main/java/com/noop/day/DayCoachContext.kt
 new file mode 100644
-index 00000000..3851a213
+index 000000000..3851a2130
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/day/DayCoachContext.kt
 @@ -0,0 +1,149 @@
@@ -213,7 +213,7 @@ index 00000000..3851a213
 +    }
 +}
 diff --git a/android/app/src/main/java/com/noop/ui/CoachSettingsScreen.kt b/android/app/src/main/java/com/noop/ui/CoachSettingsScreen.kt
-index 82dc6efa..3be54a09 100644
+index 82dc6efa4..3be54a09f 100644
 --- a/android/app/src/main/java/com/noop/ui/CoachSettingsScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/CoachSettingsScreen.kt
 @@ -86,6 +86,7 @@ fun CoachSettingsScreen(vm: CoachViewModel) {
@@ -225,7 +225,7 @@ index 82dc6efa..3be54a09 100644
              MorningBriefCard(vm = vm)
          }
 diff --git a/android/app/src/main/res/values-es/strings_victor_day.xml b/android/app/src/main/res/values-es/strings_victor_day.xml
-index 28a384b2..f030c09f 100644
+index 28a384b2c..f030c09f3 100644
 --- a/android/app/src/main/res/values-es/strings_victor_day.xml
 +++ b/android/app/src/main/res/values-es/strings_victor_day.xml
 @@ -27,4 +27,7 @@
@@ -237,7 +237,7 @@ index 28a384b2..f030c09f 100644
 +    <string name="victor_coach_agenda_off">Apagado: el entrenador no ve tu calendario</string>
  </resources>
 diff --git a/android/app/src/main/res/values/strings_victor_day.xml b/android/app/src/main/res/values/strings_victor_day.xml
-index 212f5be9..0055df71 100644
+index 212f5be9a..0055df713 100644
 --- a/android/app/src/main/res/values/strings_victor_day.xml
 +++ b/android/app/src/main/res/values/strings_victor_day.xml
 @@ -27,4 +27,7 @@
@@ -250,7 +250,7 @@ index 212f5be9..0055df71 100644
  </resources>
 diff --git a/android/app/src/test/java/com/noop/day/DayCoachContextTest.kt b/android/app/src/test/java/com/noop/day/DayCoachContextTest.kt
 new file mode 100644
-index 00000000..9fbcf163
+index 000000000..9fbcf1630
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/day/DayCoachContextTest.kt
 @@ -0,0 +1,48 @@

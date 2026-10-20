@@ -28,7 +28,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/data/WhoopRepository.kt b/android/app/src/main/java/com/noop/data/WhoopRepository.kt
-index a62b4680..c3a49309 100644
+index a62b4680c..c3a49309a 100644
 --- a/android/app/src/main/java/com/noop/data/WhoopRepository.kt
 +++ b/android/app/src/main/java/com/noop/data/WhoopRepository.kt
 @@ -1997,9 +1997,12 @@ class WhoopRepository(
@@ -66,7 +66,7 @@ index a62b4680..c3a49309 100644
      /** Pooled user-edited sleep sessions across every computed source in the active∪canonical union, so a
       *  re-add doesn't drop an earlier-id night's edit precedence (#509 + HIGH-2). Single-source ⇒ the plain
 diff --git a/android/app/src/main/java/com/noop/training/TrainingStore.kt b/android/app/src/main/java/com/noop/training/TrainingStore.kt
-index 634407c7..145b71cb 100644
+index 634407c70..145b71cbd 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingStore.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingStore.kt
 @@ -216,6 +216,7 @@ object TrainingStore {
@@ -86,7 +86,7 @@ index 634407c7..145b71cb 100644
  }
 diff --git a/android/app/src/main/java/com/noop/training/VictorDayEffort.kt b/android/app/src/main/java/com/noop/training/VictorDayEffort.kt
 new file mode 100644
-index 00000000..1d62d7dd
+index 000000000..1d62d7dd4
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/training/VictorDayEffort.kt
 @@ -0,0 +1,64 @@
@@ -156,7 +156,7 @@ index 00000000..1d62d7dd
 +}
 diff --git a/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt b/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt
 new file mode 100644
-index 00000000..a45e98f7
+index 000000000..a45e98f75
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt
 @@ -0,0 +1,53 @@

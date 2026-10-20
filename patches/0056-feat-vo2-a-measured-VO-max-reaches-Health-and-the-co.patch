@@ -1,0 +1,277 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 19:07:19 +0200
+Subject: [PATCH] =?UTF-8?q?feat(vo2):=20a=20measured=20VO=E2=82=82max=20re?=
+ =?UTF-8?q?aches=20Health=20and=20the=20coach?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A VO₂max a watch or test measured (Health Connect / Apple Health daily rows) was only
+on Compare and the Apple Health screen. One resolver, VictorCoachVitals.measuredVo2max
+(newest of either source within a year), now feeds the coach (told apart from the
+estimate, and preferred) and Health's Fitness Age card (a 'Measured: N · day' line under
+the estimate). The estimate and the fitness age derived from it are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../java/com/noop/ai/VictorCoachVitals.kt     | 42 ++++++++++++++++---
+ .../src/main/java/com/noop/ui/HealthScreen.kt | 42 ++++++++++++++-----
+ .../src/main/res/values-es/strings_victor.xml |  3 ++
+ .../src/main/res/values/strings_victor.xml    |  3 ++
+ .../java/com/noop/ai/VictorCoachBlockTest.kt  | 18 ++++++++
+ .../java/com/noop/ai/VictorCoachVitalsTest.kt | 10 +++++
+ 6 files changed, 101 insertions(+), 17 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt b/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
+index a216904b5..360be1a5c 100644
+--- a/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
++++ b/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
+@@ -10,6 +10,7 @@ import com.noop.data.DailyMetric
+ import com.noop.data.LabMarkerRow
+ import com.noop.data.SleepSession
+ import com.noop.data.WhoopRepository
++import com.noop.ingest.HealthConnectImporter
+ import com.noop.ui.ProfileStore
+ import java.time.Instant
+ import java.time.LocalDate
+@@ -33,6 +34,9 @@ internal object VictorCoachVitals {
+     private const val WATER_DAYS = 7
+     private const val FITNESS_LOOKBACK_DAYS = 120L
+ 
++    /** How long a measured VO₂max still describes the wearer: it moves slowly, and its day is always shown. */
++    private const val MEASURED_VO2_DAYS = 365L
++
+     /** The Lab Book's own read id ("my-whoop", where Health Connect writes blood pressure). */
+     private const val LAB_DEVICE_ID = WhoopRepository.WHOOP_SOURCE
+ 
+@@ -143,24 +147,50 @@ internal object VictorCoachVitals {
+         return "WATER: today ${today.roundToInt()} ml so far$prior"
+     }
+ 
+-    /** The app's own VO₂max and fitness-age estimates (Health screen), newest of the last 120 days. */
++    /**
++     * The app's own VO₂max and fitness-age estimates (Health screen), newest of the last 120 days, and a
++     * VO₂max a watch or test MEASURED ([measuredVo2max]) when there is one.
++     */
+     suspend fun fitnessLine(repo: WhoopRepository, strapId: String): String? {
+         val to = LocalDate.now().toString()
+         val from = LocalDate.now().minusDays(FITNESS_LOOKBACK_DAYS).toString()
+         suspend fun latest(key: String) = runCatching {
+             repo.resolvedSeries(key, LAB_DEVICE_ID, from, to, strapDeviceId = strapId).points.lastOrNull { it.value > 0 }
+         }.getOrNull()?.let { it.day to it.value }
+-        return fitnessLine(latest("vo2max_est"), latest("fitness_age"))
++        return fitnessLine(latest("vo2max_est"), latest("fitness_age"), measuredVo2max(repo))
+     }
+ 
+-    /** Pure: (day, value) of each estimate; null when neither exists. */
+-    internal fun fitnessLine(vo2max: Pair<String, Double>?, fitnessAge: Pair<String, Double>?): String? {
++    /** Pure: (day, value) of each estimate and of the measured VO₂max; null when none exists. */
++    internal fun fitnessLine(
++        vo2max: Pair<String, Double>?,
++        fitnessAge: Pair<String, Double>?,
++        measured: Pair<String, Double>? = null,
++    ): String? {
+         val parts = listOfNotNull(
+             vo2max?.let { "VO₂max ~${it.second.roundToInt()} ml/kg/min (${it.first})" },
+             fitnessAge?.let { "fitness age ${it.second.roundToInt()} (${it.first})" },
+         )
+-        if (parts.isEmpty()) return null
+-        return "FITNESS (the app's own estimates from resting HR and profile): " + parts.joinToString("; ")
++        val estimates = parts.takeIf { it.isNotEmpty() }
++            ?.let { "FITNESS (the app's own estimates from resting HR and profile): " + it.joinToString("; ") }
++        val measuredLine = measured?.let {
++            "VO₂max MEASURED by a watch or test (Health Connect): ${it.second.roundToInt()} ml/kg/min (${it.first}); " +
++                "prefer it over the estimate"
++        }
++        return listOfNotNull(estimates, measuredLine).takeIf { it.isNotEmpty() }?.joinToString("\n")
++    }
++
++    /**
++     * victor:vo2-measured — the newest VO₂max a watch or a test MEASURED, from the Health Connect / Apple
++     * Health daily rows, as (day, ml/kg/min); null when none in the last [MEASURED_VO2_DAYS]. The one place
++     * the Health screen and the coach read it from; the app's own estimate stays `vo2max_est`.
++     */
++    suspend fun measuredVo2max(repo: WhoopRepository, today: LocalDate = LocalDate.now()): Pair<String, Double>? {
++        val from = today.minusDays(MEASURED_VO2_DAYS).toString()
++        val to = today.toString()
++        return listOf(HealthConnectImporter.HC_DEVICE, "apple-health")
++            .flatMap { id -> runCatching { repo.appleDaily(id, from, to) }.getOrDefault(emptyList()) }
++            .mapNotNull { r -> r.vo2max?.takeIf { it > 0 }?.let { r.day to it } }
++            .maxByOrNull { it.first }
+     }
+ 
+     private data class Bp(val ts: Long, val sys: Double, val dia: Double, val pulse: Double?)
+diff --git a/android/app/src/main/java/com/noop/ui/HealthScreen.kt b/android/app/src/main/java/com/noop/ui/HealthScreen.kt
+index 5ebb7d841..3b5ff6f68 100644
+--- a/android/app/src/main/java/com/noop/ui/HealthScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/HealthScreen.kt
+@@ -675,6 +675,7 @@ private fun FitnessAgeSection(vm: AppViewModel, days: List<DailyMetric>, profile
+     var fitnessAge by remember { mutableStateOf<Double?>(null) }
+     var vo2max by remember { mutableStateOf<Double?>(null) }
+     var vo2maxEstimator by remember { mutableStateOf<Vo2MaxEstimator?>(null) }
++    var vo2Measured by remember { mutableStateOf<Pair<String, Double>?>(null) }   // victor:vo2-measured
+     // Manual-refresh plumbing: the not-ready card's refresh button recomputes Fitness Age NOW and bumps
+     // this tick, which re-keys the read below so a freshly written value shows without waiting for a sync.
+     var refreshTick by remember { mutableStateOf(0) }
+@@ -697,6 +698,7 @@ private fun FitnessAgeSection(vm: AppViewModel, days: List<DailyMetric>, profile
+         fitnessAge = fa
+         vo2max = vo2Row?.value
+         vo2maxEstimator = estimator
++        vo2Measured = com.noop.ai.VictorCoachVitals.measuredVo2max(vm.repo)
+     }
+ 
+     // Readiness from what THIS screen can see: the last 7 merged daily rows. RHR coverage drives the
+@@ -718,6 +720,7 @@ private fun FitnessAgeSection(vm: AppViewModel, days: List<DailyMetric>, profile
+                 chronoAge = profile.age,
+                 vo2max = vo2max,
+                 vo2maxEstimator = vo2maxEstimator,
++                vo2Measured = vo2Measured,
+                 onHowAccurate = { showChecklist = !showChecklist },
+                 checklistOpen = showChecklist,
+             )
+@@ -968,6 +971,7 @@ private fun FitnessAgeHero(
+     vo2maxEstimator: Vo2MaxEstimator?,
+     onHowAccurate: () -> Unit,
+     checklistOpen: Boolean,
++    vo2Measured: Pair<String, Double>? = null,
+ ) {
+     val shown = fitnessAge.roundToInt()
+     val boundSymbol = fitnessAgeBoundSymbol(fitnessAge)
+@@ -1025,18 +1029,34 @@ private fun FitnessAgeHero(
+                         else if (younger) Palette.statusPositive else Palette.statusWarning,
+                     )
+                 }
+-                if (vo2max != null) {
++                if (vo2max != null || vo2Measured != null) {
+                     Column(horizontalAlignment = Alignment.End) {
+-                        StatePill(
+-                            title = uiString(R.string.l10n_health_screen_vo_max_vo2max_roundtoint_c32a04b3, vo2max.roundToInt()),
+-                            tone = StrandTone.Accent,
+-                            showsDot = false,
+-                        )
+-                        Text(
+-                            text = uiString(vo2MaxAttributionLabelRes(vo2maxEstimator)),
+-                            style = NoopType.footnote,
+-                            color = Palette.textTertiary,
+-                        )
++                        if (vo2max != null) {
++                            StatePill(
++                                title = uiString(R.string.l10n_health_screen_vo_max_vo2max_roundtoint_c32a04b3, vo2max.roundToInt()),
++                                tone = StrandTone.Accent,
++                                showsDot = false,
++                            )
++                            Text(
++                                text = uiString(vo2MaxAttributionLabelRes(vo2maxEstimator)),
++                                style = NoopType.footnote,
++                                color = Palette.textTertiary,
++                            )
++                        }
++                        // victor:vo2-measured — a watch's or test's VO₂max beside the estimate, with its day.
++                        vo2Measured?.let { (day, value) ->
++                            Text(
++                                text = uiString(
++                                    R.string.victor_vo2_measured,
++                                    value.roundToInt(),
++                                    runCatching {
++                                        java.time.LocalDate.parse(day).format(java.time.format.DateTimeFormatter.ofPattern("d MMM", java.util.Locale.getDefault()))
++                                    }.getOrDefault(day),
++                                ),
++                                style = NoopType.footnote,
++                                color = Palette.textSecondary,
++                            )
++                        }
+                     }
+                 }
+             }
+diff --git a/android/app/src/main/res/values-es/strings_victor.xml b/android/app/src/main/res/values-es/strings_victor.xml
+index c8e28c0e8..b943cc5c7 100644
+--- a/android/app/src/main/res/values-es/strings_victor.xml
++++ b/android/app/src/main/res/values-es/strings_victor.xml
+@@ -15,4 +15,7 @@
+ 
+     <string name="victor_light_style_paper">Papel</string>
+     <string name="victor_light_style_porcelain">Porcelana</string>
++
++    <!-- victor:vo2-measured — a watch's or test's VO₂max beside the estimate on Health. -->
++    <string name="victor_vo2_measured">Medido: %1$d · %2$s</string>
+ </resources>
+diff --git a/android/app/src/main/res/values/strings_victor.xml b/android/app/src/main/res/values/strings_victor.xml
+index 9f8917b12..2966b442d 100644
+--- a/android/app/src/main/res/values/strings_victor.xml
++++ b/android/app/src/main/res/values/strings_victor.xml
+@@ -15,4 +15,7 @@
+ 
+     <string name="victor_light_style_paper">Paper</string>
+     <string name="victor_light_style_porcelain">Porcelain</string>
++
++    <!-- victor:vo2-measured — a watch's or test's VO₂max beside the estimate on Health. -->
++    <string name="victor_vo2_measured">Measured: %1$d · %2$s</string>
+ </resources>
+diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachBlockTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachBlockTest.kt
+index 5afa95b23..ff1565dbd 100644
+--- a/android/app/src/test/java/com/noop/ai/VictorCoachBlockTest.kt
++++ b/android/app/src/test/java/com/noop/ai/VictorCoachBlockTest.kt
+@@ -3,6 +3,7 @@ package com.noop.ai
+ import android.content.Context
+ import androidx.room.Room
+ import com.noop.analytics.HydrationStore
++import com.noop.data.AppleDaily
+ import com.noop.data.DailyMetric
+ import com.noop.data.MetricSeriesRow
+ import com.noop.data.WhoopDatabase
+@@ -10,7 +11,9 @@ import com.noop.data.WhoopRepository
+ import com.noop.ui.ProfileStore
+ import kotlinx.coroutines.runBlocking
+ import org.junit.After
++import org.junit.Assert.assertEquals
+ import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
+ import org.junit.Assert.assertTrue
+ import org.junit.Before
+ import org.junit.Test
+@@ -41,6 +44,21 @@ class VictorCoachBlockTest {
+     @After
+     fun tearDown() = db.close()
+ 
++    @Test
++    fun aMeasuredVo2maxIsTheNewestOfEitherSourceWithinAYear() = runBlocking {
++        val today = LocalDate.of(2026, 10, 20)
++        assertNull(VictorCoachVitals.measuredVo2max(repo, today))
++        repo.upsertAppleDaily(
++            listOf(
++                AppleDaily("health-connect", "2025-09-01", vo2max = 52.0),   // over a year old: no longer counts
++                AppleDaily("health-connect", "2026-09-30", vo2max = 47.5),
++                AppleDaily("health-connect", "2026-10-15", steps = 9000),    // a day without a VO₂max reading
++                AppleDaily("apple-health", "2026-10-05", vo2max = 48.8),
++            ),
++        )
++        assertEquals("2026-10-05" to 48.8, VictorCoachVitals.measuredVo2max(repo, today))
++    }
++
+     @Test
+     fun todaysWeighInReachesTheCoachAndEverySectionIsThere() = runBlocking {
+         val today = LocalDate.now()
+diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
+index 548da2056..37dd52e41 100644
+--- a/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
++++ b/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
+@@ -127,5 +127,15 @@ class VictorCoachVitalsTest {
+             VictorCoachVitals.fitnessLine("2026-10-14" to 45.6, "2026-10-14" to 23.2),
+         )
+         assertNull(VictorCoachVitals.fitnessLine(null, null))
++        // A measured VO₂max is told apart from the estimate, and is said even with no estimate at all.
++        assertEquals(
++            "FITNESS (the app's own estimates from resting HR and profile): VO₂max ~46 ml/kg/min (2026-10-14)\n" +
++                "VO₂max MEASURED by a watch or test (Health Connect): 49 ml/kg/min (2026-10-02); prefer it over the estimate",
++            VictorCoachVitals.fitnessLine("2026-10-14" to 45.6, null, "2026-10-02" to 48.8),
++        )
++        assertEquals(
++            "VO₂max MEASURED by a watch or test (Health Connect): 49 ml/kg/min (2026-10-02); prefer it over the estimate",
++            VictorCoachVitals.fitnessLine(null, null, "2026-10-02" to 48.8),
++        )
+     }
+ }
+-- 
+2.54.0
+

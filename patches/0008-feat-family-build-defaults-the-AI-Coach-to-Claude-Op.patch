@@ -14,7 +14,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 12 insertions(+), 3 deletions(-)
 
 diff --git a/android/app/src/main/java/com/noop/ai/AiProvider.kt b/android/app/src/main/java/com/noop/ai/AiProvider.kt
-index 6e37baa2..8d9085d7 100644
+index 6e37baa29..8d9085d71 100644
 --- a/android/app/src/main/java/com/noop/ai/AiProvider.kt
 +++ b/android/app/src/main/java/com/noop/ai/AiProvider.kt
 @@ -53,7 +53,7 @@ enum class AiProvider(
@@ -40,7 +40,7 @@ index 6e37baa2..8d9085d7 100644
  }
  
 diff --git a/android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt b/android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt
-index 9bde863d..d7ffed46 100644
+index 9bde863d3..d7ffed460 100644
 --- a/android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt
 +++ b/android/app/src/test/java/com/noop/ai/AnthropicReplyTextTest.kt
 @@ -52,4 +52,12 @@ class AnthropicReplyTextTest {

@@ -36,7 +36,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
-index eff28c1b..abf138a3 100644
+index eff28c1b3..abf138a31 100644
 --- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 +++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 @@ -66,12 +66,19 @@ internal object VictorCoachExtras {
@@ -60,7 +60,7 @@ index eff28c1b..abf138a3 100644
      private suspend fun newestStrapSample(repo: WhoopRepository, strapId: String): Long? {
          val now = System.currentTimeMillis() / 1000L
 diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
-index 9f351372..82e8ef42 100644
+index 9f3513725..82e8ef425 100644
 --- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 +++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 @@ -1,5 +1,7 @@
@@ -105,7 +105,7 @@ index 9f351372..82e8ef42 100644
  }
 diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt b/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt
 new file mode 100644
-index 00000000..adf42c32
+index 000000000..adf42c325
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt
 @@ -0,0 +1,105 @@
@@ -216,7 +216,7 @@ index 00000000..adf42c32
 +}
 diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
 new file mode 100644
-index 00000000..6aa2934a
+index 000000000..6aa2934a0
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
 @@ -0,0 +1,228 @@
@@ -450,7 +450,7 @@ index 00000000..6aa2934a
 +}
 diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
 new file mode 100644
-index 00000000..70559ca1
+index 000000000..70559ca18
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
 @@ -0,0 +1,147 @@
@@ -603,7 +603,7 @@ index 00000000..70559ca1
 +}
 diff --git a/android/app/src/main/res/values-es/strings_victor_weekly.xml b/android/app/src/main/res/values-es/strings_victor_weekly.xml
 new file mode 100644
-index 00000000..86aaca5b
+index 000000000..86aaca5bd
 --- /dev/null
 +++ b/android/app/src/main/res/values-es/strings_victor_weekly.xml
 @@ -0,0 +1,9 @@
@@ -618,7 +618,7 @@ index 00000000..86aaca5b
 +</resources>
 diff --git a/android/app/src/main/res/values/strings_victor_weekly.xml b/android/app/src/main/res/values/strings_victor_weekly.xml
 new file mode 100644
-index 00000000..13c413e9
+index 000000000..13c413e9d
 --- /dev/null
 +++ b/android/app/src/main/res/values/strings_victor_weekly.xml
 @@ -0,0 +1,9 @@
@@ -633,7 +633,7 @@ index 00000000..13c413e9
 +</resources>
 diff --git a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
 new file mode 100644
-index 00000000..4316f4b0
+index 000000000..4316f4b0b
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
 @@ -0,0 +1,78 @@

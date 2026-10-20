@@ -1,0 +1,141 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 19:59:50 +0200
+Subject: [PATCH] fix(food): no push on the amounts, fat only on evidence,
+ default effort
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+On 60 weighed Nutrition5k plates the first version over-estimated energy by a further 36 kcal
+(MAPE 63.7 % against 53.2 % for the old prompt): told that large portions are the ones
+underestimated and to assume cooking fat, the model inflated every plate, while its
+composition per gram was right. The prompt now sizes the food against the references without a
+direction, lists cooking fat, dressing or sauce only on a visual cue or the wearer's note, and
+sends no effort setting (high cost 2.2× the tokens and sized nothing better). Grams ×
+composition per 100 g, the "what the photo cannot show" note and the hint stay.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../src/main/java/com/noop/food/FoodVision.kt | 39 ++++++++-----------
+ .../com/noop/food/FoodVisionRequestTest.kt    | 11 +++---
+ 2 files changed, 21 insertions(+), 29 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/food/FoodVision.kt b/android/app/src/main/java/com/noop/food/FoodVision.kt
+index 65a66f55e..b4e8dd0a3 100644
+--- a/android/app/src/main/java/com/noop/food/FoodVision.kt
++++ b/android/app/src/main/java/com/noop/food/FoodVision.kt
+@@ -64,12 +64,6 @@ object FoodVision {
+     private const val API_VERSION = "2023-06-01"
+     private val JSON = "application/json; charset=utf-8".toMediaType()
+ 
+-    /**
+-     * Thinking depth for a photo. Opus 5.5 defaults to `medium`; sizing the portions is the part the
+-     * published evaluations find hardest, so the request asks for `high`.
+-     */
+-    internal const val EFFORT = "high"
+-
+     /** One item of the reply, in the order the model writes them: what it is, how much, then what it is made of. */
+     internal val ITEM_FIELDS = listOf("name", "portion", "grams", "kcal_per_100g", "protein_per_100g", "carbs_per_100g", "fat_per_100g")
+ 
+@@ -186,10 +180,12 @@ object FoodVision {
+ 
+     /**
+      * The instructions, one step per lever the 2024-2026 evaluations found to cut the error: name every
+-     * food including the hidden layers, size each one against known objects instead of a typical
+-     * serving (large portions are the ones underestimated), add the cooking fat and sauces that do not
+-     * show as items of their own, and give grams plus composition per 100 g rather than a kcal guess.
+-     * The notes end with the one thing the photo cannot show, so the wearer can correct it.
++     * food including the hidden layers, size each one against known objects, list the cooking fat and
++     * sauces the photo or the note gives evidence of as items of their own, and give grams plus
++     * composition per 100 g rather than a kcal guess. The notes end with the one thing the photo cannot
++     * show, so the wearer can correct it. No push in either direction: told that large portions are
++     * underestimated and to assume cooking fat, the model over-estimated 60 weighed plates by a further
++     * 36 kcal (Nutrition5k, 2026-10-20).
+      */
+     internal fun prompt(note: String, structured: Boolean, photos: Int = 1): String = buildString {
+         if (photos > 1) {
+@@ -203,14 +199,12 @@ object FoodVision {
+         append("1. Foods: list each distinct food or drink as one item, including what is partly hidden (the rice ")
+         append("under a stew, the filling of a sandwich, the sauce under the meat). The meal is from Spain unless ")
+         append("the note says otherwise.\n")
+-        append("2. Amounts: judge each amount from the scene, never from a typical serving. Size references: a dinner ")
+-        append("plate is about 26 cm across, a dessert plate 20 cm, a fork or spoon 19 cm, a glass 250 ml, a hand ")
+-        append("18 cm. Estimate the area each food covers and how high it is piled, then its weight in grams ")
+-        append("(ml for drinks). Large or heaped portions are the ones most often underestimated.\n")
+-        append("3. Hidden fat: decide how each food was cooked and list the cooking fat, dressing or sauce that does ")
+-        append("not show as its own item (olive oil is the default fat in Spain): about 10 g of oil for a sautéed ")
+-        append("or grilled portion, 15-20 g for fried or breaded food, 10-15 g for a dressed salad, unless the ")
+-        append("note says otherwise.\n")
++        append("2. Amounts: judge each amount from the scene. Size references: a dinner plate is about 26 cm across, ")
++        append("a dessert plate 20 cm, a fork or spoon 19 cm, a glass 250 ml, a hand 18 cm. Estimate the area each ")
++        append("food covers and how high it is piled, then its weight in grams (ml for drinks).\n")
++        append("3. Hidden fat: decide how each food was cooked. When there is a visual cue (a sheen of oil, a fried ")
++        append("or breaded coating, a visible dressing or sauce) or the note says so, list the cooking fat, dressing ")
++        append("or sauce as its own item (olive oil is the default fat in Spain); do not add fat on assumption alone.\n")
+         append("4. Composition: for each item give grams and the kcal, protein, carbs and fat PER 100 g from ")
+         append("standard food composition tables (BEDCA, USDA). The totals are computed from grams × per 100 g, ")
+         append("so never bend the per-100 g values to fit a guessed total.\n")
+@@ -238,8 +232,9 @@ object FoodVision {
+ 
+     /**
+      * The Messages API body: model, reply cap, one user turn of [image…, text], and (when
+-     * [structured]) `output_config` with [outputSchema] as the format and [EFFORT]. Never
+-     * temperature/top_p/thinking/tool_choice: Claude 5.x answers those with HTTP 400.
++     * [structured]) `output_config.format` with [outputSchema]. Never temperature/top_p/thinking/
++     * tool_choice: Claude 5.x answers those with HTTP 400. No `effort` either: `high` cost 2.2× the
++     * tokens of the default and sized the portions no better.
+      */
+     internal fun buildRequestBody(model: String, imagesBase64: List<String>, note: String, structured: Boolean): JSONObject {
+         val content = JSONArray()
+@@ -267,9 +262,7 @@ object FoodVision {
+         if (structured) {
+             body.put(
+                 "output_config",
+-                JSONObject()
+-                    .put("format", JSONObject().put("type", "json_schema").put("schema", outputSchema()))
+-                    .put("effort", EFFORT),
++                JSONObject().put("format", JSONObject().put("type", "json_schema").put("schema", outputSchema())),
+             )
+         }
+         return body
+diff --git a/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt b/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
+index 9d1670614..732a65bf4 100644
+--- a/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
++++ b/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
+@@ -39,8 +39,7 @@ class FoodVisionRequestTest {
+         assertTrue(text.getString("text").contains("Spanish"))
+ 
+         val outputConfig = body.getJSONObject("output_config")
+-        assertEquals(setOf("format", "effort"), outputConfig.keySet())
+-        assertEquals("high", outputConfig.getString("effort"))
++        assertEquals(setOf("format"), outputConfig.keySet())
+         val format = outputConfig.getJSONObject("format")
+         assertEquals("json_schema", format.getString("type"))
+         assertEquals(FoodVision.outputSchema().toString(), format.getJSONObject("schema").toString())
+@@ -55,10 +54,10 @@ class FoodVisionRequestTest {
+         assertTrue(at.all { it >= 0 })
+         assertEquals(at, at.sorted())
+         assertTrue(prompt.contains("partly hidden"))                      // hidden layers under other food
+-        assertTrue(prompt.contains("never from a typical serving"))       // no regression to a standard serving
+         assertTrue(prompt.contains("26 cm") && prompt.contains("19 cm"))  // plate and cutlery as size references
+-        assertTrue(prompt.contains("most often underestimated"))          // the published bias
+-        assertTrue(prompt.contains("olive oil") && prompt.contains("as its own item")) // cooking fat listed, visible, editable
++        assertTrue(prompt.contains("visual cue") && prompt.contains("olive oil") && prompt.contains("as its own item")) // fat on evidence, visible, editable
++        // No push in either direction: a nudge against under-estimation made the model over-estimate weighed plates.
++        assertFalse(prompt.contains("underestimated") || prompt.contains("typical serving") || prompt.contains("about 10 g"))
+         assertTrue(prompt.contains("PER 100 g") && prompt.contains("grams × per 100 g"))
+         assertTrue(prompt.contains("the photo cannot show"))              // the correction the wearer can make
+         assertTrue(prompt.contains("from Spain"))
+@@ -70,7 +69,7 @@ class FoodVisionRequestTest {
+             val body = FoodVision.buildRequestBody("m", listOf("x"), "", structured)
+             for (k in banned) assertFalse("$k must not be sent", body.has(k))
+             assertFalse(body.toString().contains("\"temperature\""))
+-            assertFalse("effort lives inside output_config", body.has("effort"))
++            assertFalse("no effort setting: the default sized portions as well as high at half the cost", body.toString().contains("\"effort\""))
+         }
+     }
+ 
+-- 
+2.54.0
+

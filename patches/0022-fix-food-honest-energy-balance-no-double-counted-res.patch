@@ -42,7 +42,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/food/FoodAdaptiveTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
-index 209221a1..1cbb49e4 100644
+index 209221a19..1cbb49e4c 100644
 --- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 +++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 @@ -2,6 +2,9 @@ package com.noop.ai
@@ -151,7 +151,7 @@ index 209221a1..1cbb49e4 100644
  }
 diff --git a/android/app/src/main/java/com/noop/food/FoodAdaptive.kt b/android/app/src/main/java/com/noop/food/FoodAdaptive.kt
 new file mode 100644
-index 00000000..2ad57f0a
+index 000000000..2ad57f0a6
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/food/FoodAdaptive.kt
 @@ -0,0 +1,72 @@
@@ -228,7 +228,7 @@ index 00000000..2ad57f0a
 +    }
 +}
 diff --git a/android/app/src/main/java/com/noop/food/FoodDayCard.kt b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
-index 373efe5d..5f251f7f 100644
+index 373efe5db..5f251f7f6 100644
 --- a/android/app/src/main/java/com/noop/food/FoodDayCard.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
 @@ -93,42 +93,46 @@ internal fun FoodDayCard(
@@ -310,7 +310,7 @@ index 373efe5d..5f251f7f 100644
  private fun MacroStat(label: String, grams: Double, accent: Color, modifier: Modifier) {
      Column(modifier, verticalArrangement = Arrangement.spacedBy(Metrics.space2)) {
 diff --git a/android/app/src/main/java/com/noop/food/FoodEnergy.kt b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
-index d0599d91..df6e5cfa 100644
+index d0599d914..df6e5cfa6 100644
 --- a/android/app/src/main/java/com/noop/food/FoodEnergy.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
 @@ -1,62 +1,118 @@
@@ -462,7 +462,7 @@ index d0599d91..df6e5cfa 100644
      }
  }
 diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
-index 26e19686..42ce5751 100644
+index 26e196863..42ce57513 100644
 --- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
 @@ -77,6 +77,7 @@ import java.time.LocalDate
@@ -576,7 +576,7 @@ index 26e19686..42ce5751 100644
  @Composable
  internal fun FoodThumb(relativePath: String?, size: Dp) {
 diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
-index 131cacdb..8666f167 100644
+index 131cacdb5..8666f1672 100644
 --- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 +++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 @@ -24,7 +24,7 @@ internal fun TodayFoodSection(vm: AppViewModel, onOpenFood: () -> Unit) {
@@ -589,7 +589,7 @@ index 131cacdb..8666f167 100644
      val todays = entries.filter { it.day == today }
      FoodDayCard(
 diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
-index 58eb8737..c961d49c 100644
+index 58eb87371..c961d49c4 100644
 --- a/android/app/src/main/res/values-es/strings_victor_food.xml
 +++ b/android/app/src/main/res/values-es/strings_victor_food.xml
 @@ -18,11 +18,8 @@
@@ -625,7 +625,7 @@ index 58eb8737..c961d49c 100644
 +    <string name="victor_food_adaptive_building">Se calcula con 3 semanas que tengan 14 días de comidas y 6 pesajes. Llevas %1$d/14 días de comidas y %2$d/6 pesajes.</string>
  </resources>
 diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
-index 31697711..7eb580e3 100644
+index 31697711d..7eb580e3c 100644
 --- a/android/app/src/main/res/values/strings_victor_food.xml
 +++ b/android/app/src/main/res/values/strings_victor_food.xml
 @@ -18,11 +18,8 @@
@@ -661,7 +661,7 @@ index 31697711..7eb580e3 100644
 +    <string name="victor_food_adaptive_building">Needs 3 weeks with 14 days of meals and 6 weigh-ins. So far: %1$d/14 days of meals, %2$d/6 weigh-ins.</string>
  </resources>
 diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
-index 478e3ebf..f1db8d8c 100644
+index 478e3ebfd..f1db8d8c2 100644
 --- a/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
 +++ b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
 @@ -1,37 +1,58 @@
@@ -739,7 +739,7 @@ index 478e3ebf..f1db8d8c 100644
  }
 diff --git a/android/app/src/test/java/com/noop/food/FoodAdaptiveTest.kt b/android/app/src/test/java/com/noop/food/FoodAdaptiveTest.kt
 new file mode 100644
-index 00000000..14ccab68
+index 000000000..14ccab687
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/food/FoodAdaptiveTest.kt
 @@ -0,0 +1,51 @@
@@ -795,7 +795,7 @@ index 00000000..14ccab68
 +    }
 +}
 diff --git a/android/app/src/test/java/com/noop/food/FoodEnergyTest.kt b/android/app/src/test/java/com/noop/food/FoodEnergyTest.kt
-index 3b253043..a3f561e8 100644
+index 3b253043a..a3f561e8f 100644
 --- a/android/app/src/test/java/com/noop/food/FoodEnergyTest.kt
 +++ b/android/app/src/test/java/com/noop/food/FoodEnergyTest.kt
 @@ -8,33 +8,64 @@ import org.junit.Assert.assertNull

@@ -43,7 +43,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/food/FoodHistoryTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
-index 1cbb49e4..359a24a8 100644
+index 1cbb49e4c..359a24a87 100644
 --- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 +++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 @@ -74,9 +74,10 @@ internal object VictorCoachExtras {
@@ -59,7 +59,7 @@ index 1cbb49e4..359a24a8 100644
          }
          return weekBalanceLine(days)
 diff --git a/android/app/src/main/java/com/noop/day/DayAgenda.kt b/android/app/src/main/java/com/noop/day/DayAgenda.kt
-index 8f1f01b8..7f5114c2 100644
+index 8f1f01b87..7f5114c22 100644
 --- a/android/app/src/main/java/com/noop/day/DayAgenda.kt
 +++ b/android/app/src/main/java/com/noop/day/DayAgenda.kt
 @@ -26,10 +26,17 @@ object DayAgendaSource {
@@ -108,7 +108,7 @@ index 8f1f01b8..7f5114c2 100644
       * midnights, so it belongs when [day] falls in its UTC date range (the Instances window, being local,
 diff --git a/android/app/src/main/java/com/noop/day/DayCalendar.kt b/android/app/src/main/java/com/noop/day/DayCalendar.kt
 new file mode 100644
-index 00000000..97e84b7c
+index 000000000..97e84b7cc
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/day/DayCalendar.kt
 @@ -0,0 +1,81 @@
@@ -195,7 +195,7 @@ index 00000000..97e84b7c
 +}
 diff --git a/android/app/src/main/java/com/noop/day/DayCalendarViews.kt b/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
 new file mode 100644
-index 00000000..852e20da
+index 000000000..852e20da0
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
 @@ -0,0 +1,148 @@
@@ -348,7 +348,7 @@ index 00000000..852e20da
 +    }
 +}
 diff --git a/android/app/src/main/java/com/noop/day/GoogleTasks.kt b/android/app/src/main/java/com/noop/day/GoogleTasks.kt
-index 6c8aa4b2..fc819ab8 100644
+index 6c8aa4b20..fc819ab8b 100644
 --- a/android/app/src/main/java/com/noop/day/GoogleTasks.kt
 +++ b/android/app/src/main/java/com/noop/day/GoogleTasks.kt
 @@ -28,7 +28,7 @@ sealed interface TasksState {
@@ -392,7 +392,7 @@ index 6c8aa4b2..fc819ab8 100644
      internal fun forDay(tasks: List<DayTask>, today: LocalDate): List<DayTask> =
          tasks.filter { it.due != null && !it.due.isAfter(today) }
 diff --git a/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
-index e06ecf6c..503a12da 100644
+index e06ecf6cf..503a12da4 100644
 --- a/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
 +++ b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
 @@ -15,6 +15,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
@@ -652,7 +652,7 @@ index e06ecf6c..503a12da 100644
  }
  
 diff --git a/android/app/src/main/java/com/noop/food/FoodAdaptive.kt b/android/app/src/main/java/com/noop/food/FoodAdaptive.kt
-index 2ad57f0a..bc2b9589 100644
+index 2ad57f0a6..bc2b95898 100644
 --- a/android/app/src/main/java/com/noop/food/FoodAdaptive.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodAdaptive.kt
 @@ -64,9 +64,11 @@ internal object FoodAdaptive {
@@ -671,7 +671,7 @@ index 2ad57f0a..bc2b9589 100644
      }
  }
 diff --git a/android/app/src/main/java/com/noop/food/FoodEnergy.kt b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
-index df6e5cfa..3a68828b 100644
+index df6e5cfa6..3a68828bd 100644
 --- a/android/app/src/main/java/com/noop/food/FoodEnergy.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
 @@ -97,22 +97,42 @@ internal data class FoodEnergy(
@@ -727,7 +727,7 @@ index df6e5cfa..3a68828b 100644
  }
 diff --git a/android/app/src/main/java/com/noop/food/FoodHistory.kt b/android/app/src/main/java/com/noop/food/FoodHistory.kt
 new file mode 100644
-index 00000000..56b4587f
+index 000000000..56b4587fa
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/food/FoodHistory.kt
 @@ -0,0 +1,307 @@
@@ -1039,7 +1039,7 @@ index 00000000..56b4587f
 +    }
 +}
 diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
-index 42ce5751..b1482785 100644
+index 42ce57513..b1482785f 100644
 --- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
 @@ -152,49 +152,62 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
@@ -1138,7 +1138,7 @@ index 42ce5751..b1482785 100644
          }
          item {
 diff --git a/android/app/src/main/res/values-es/strings_victor_day.xml b/android/app/src/main/res/values-es/strings_victor_day.xml
-index 0100d8ee..28a384b2 100644
+index 0100d8ee2..28a384b2c 100644
 --- a/android/app/src/main/res/values-es/strings_victor_day.xml
 +++ b/android/app/src/main/res/values-es/strings_victor_day.xml
 @@ -20,4 +20,11 @@
@@ -1154,7 +1154,7 @@ index 0100d8ee..28a384b2 100644
 +    <string name="victor_day_next">Siguiente</string>
  </resources>
 diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
-index c961d49c..5337b5c2 100644
+index c961d49c4..5337b5c2a 100644
 --- a/android/app/src/main/res/values-es/strings_victor_food.xml
 +++ b/android/app/src/main/res/values-es/strings_victor_food.xml
 @@ -106,4 +106,18 @@
@@ -1177,7 +1177,7 @@ index c961d49c..5337b5c2 100644
 +    <string name="victor_food_history_meals_title">Media por comida (kcal)</string>
  </resources>
 diff --git a/android/app/src/main/res/values/strings_victor_day.xml b/android/app/src/main/res/values/strings_victor_day.xml
-index 215e7fad..212f5be9 100644
+index 215e7fad5..212f5be9a 100644
 --- a/android/app/src/main/res/values/strings_victor_day.xml
 +++ b/android/app/src/main/res/values/strings_victor_day.xml
 @@ -20,4 +20,11 @@
@@ -1193,7 +1193,7 @@ index 215e7fad..212f5be9 100644
 +    <string name="victor_day_next">Next</string>
  </resources>
 diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
-index 7eb580e3..441607c9 100644
+index 7eb580e3c..441607c9d 100644
 --- a/android/app/src/main/res/values/strings_victor_food.xml
 +++ b/android/app/src/main/res/values/strings_victor_food.xml
 @@ -106,4 +106,18 @@
@@ -1217,7 +1217,7 @@ index 7eb580e3..441607c9 100644
  </resources>
 diff --git a/android/app/src/test/java/com/noop/day/DayCalendarTest.kt b/android/app/src/test/java/com/noop/day/DayCalendarTest.kt
 new file mode 100644
-index 00000000..e2bfa35a
+index 000000000..e2bfa35a1
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/day/DayCalendarTest.kt
 @@ -0,0 +1,61 @@
@@ -1284,7 +1284,7 @@ index 00000000..e2bfa35a
 +}
 diff --git a/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt b/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt
 new file mode 100644
-index 00000000..e2ef2887
+index 000000000..e2ef2887a
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt
 @@ -0,0 +1,66 @@

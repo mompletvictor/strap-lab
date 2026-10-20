@@ -24,7 +24,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  8 files changed, 74 insertions(+), 12 deletions(-)
 
 diff --git a/android/app/src/main/java/com/noop/training/TrainingAi.kt b/android/app/src/main/java/com/noop/training/TrainingAi.kt
-index fb950157..f79d134c 100644
+index fb9501573..f79d134c7 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingAi.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingAi.kt
 @@ -166,6 +166,7 @@ object TrainingAi {
@@ -82,7 +82,7 @@ index fb950157..f79d134c 100644
              if (ex.note.isNotBlank()) append("; note: ${ex.note}")
              perExercise[i]?.let { append("; HR during it avg ${it.avg}, max ${it.max}") }
 diff --git a/android/app/src/main/java/com/noop/training/TrainingEditor.kt b/android/app/src/main/java/com/noop/training/TrainingEditor.kt
-index f3ca5c4f..7bf7189b 100644
+index f3ca5c4fa..7bf7189b0 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingEditor.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingEditor.kt
 @@ -84,10 +84,17 @@ private fun ExerciseEditor(ex: TrainingExercise, onChange: (TrainingExercise) ->
@@ -122,7 +122,7 @@ index f3ca5c4f..7bf7189b 100644
              Icon(Icons.Filled.Close, contentDescription = uiString(R.string.victor_training_remove), tint = Palette.textTertiary)
          }
 diff --git a/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt b/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt
-index dad26405..7e7c360e 100644
+index dad264051..7e7c360e4 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt
 @@ -111,7 +111,7 @@ fun TrainingLivePanel(workoutStartMs: Long) {
@@ -144,7 +144,7 @@ index dad26405..7e7c360e 100644
                          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                          modifier = Modifier.weight(1f),
 diff --git a/android/app/src/main/java/com/noop/training/TrainingModels.kt b/android/app/src/main/java/com/noop/training/TrainingModels.kt
-index f44d0f5c..5147074a 100644
+index f44d0f5c4..5147074ae 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingModels.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingModels.kt
 @@ -56,6 +56,11 @@ data class TrainingExercise(
@@ -205,7 +205,7 @@ index f44d0f5c..5147074a 100644
  
      /** 20 → "20", 12.5 → "12,5" in Spanish. */
 diff --git a/android/app/src/main/java/com/noop/training/TrainingStore.kt b/android/app/src/main/java/com/noop/training/TrainingStore.kt
-index e805c42e..1cc4b136 100644
+index e805c42e9..1cc4b1369 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingStore.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingStore.kt
 @@ -108,6 +108,7 @@ internal object TrainingStoreCodec {
@@ -225,7 +225,7 @@ index e805c42e..1cc4b136 100644
      }
  
 diff --git a/android/app/src/main/res/values-es/strings_victor_training.xml b/android/app/src/main/res/values-es/strings_victor_training.xml
-index 2ea32bd6..ee9f8b22 100644
+index 2ea32bd62..ee9f8b226 100644
 --- a/android/app/src/main/res/values-es/strings_victor_training.xml
 +++ b/android/app/src/main/res/values-es/strings_victor_training.xml
 @@ -62,4 +62,8 @@
@@ -238,7 +238,7 @@ index 2ea32bd6..ee9f8b22 100644
 +    <string name="victor_training_kg_each">kg c/u</string>
  </resources>
 diff --git a/android/app/src/main/res/values/strings_victor_training.xml b/android/app/src/main/res/values/strings_victor_training.xml
-index c1c7ac36..4f279a45 100644
+index c1c7ac36a..4f279a45d 100644
 --- a/android/app/src/main/res/values/strings_victor_training.xml
 +++ b/android/app/src/main/res/values/strings_victor_training.xml
 @@ -62,4 +62,8 @@
@@ -251,7 +251,7 @@ index c1c7ac36..4f279a45 100644
 +    <string name="victor_training_kg_each">kg each</string>
  </resources>
 diff --git a/android/app/src/test/java/com/noop/training/TrainingTest.kt b/android/app/src/test/java/com/noop/training/TrainingTest.kt
-index 382d82e4..03cbaa98 100644
+index 382d82e47..03cbaa988 100644
 --- a/android/app/src/test/java/com/noop/training/TrainingTest.kt
 +++ b/android/app/src/test/java/com/noop/training/TrainingTest.kt
 @@ -49,7 +49,7 @@ class TrainingTest {

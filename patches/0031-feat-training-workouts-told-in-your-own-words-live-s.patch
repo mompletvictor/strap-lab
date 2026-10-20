@@ -68,7 +68,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/training/TrainingTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
-index 858e88f4..eff28c1b 100644
+index 858e88f44..eff28c1b3 100644
 --- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 +++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 @@ -14,6 +14,7 @@ import com.noop.goals.VictorGoals
@@ -110,7 +110,7 @@ index 858e88f4..eff28c1b 100644
                  add("eaten ${r(eatenKcal)} kcal (photo food log)")
                  energy?.let { e ->
 diff --git a/android/app/src/main/java/com/noop/food/FoodDayCard.kt b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
-index 5f251f7f..bbf6b623 100644
+index 5f251f7f6..bbf6b6239 100644
 --- a/android/app/src/main/java/com/noop/food/FoodDayCard.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
 @@ -110,6 +110,9 @@ private fun EnergyLines(intakeKcal: Double, energy: FoodEnergy?) {
@@ -124,7 +124,7 @@ index 5f251f7f..bbf6b623 100644
          Text(
              uiString(
 diff --git a/android/app/src/main/java/com/noop/food/FoodEnergy.kt b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
-index 3a68828b..b8ce1a34 100644
+index 3a68828bd..b8ce1a340 100644
 --- a/android/app/src/main/java/com/noop/food/FoodEnergy.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
 @@ -4,6 +4,8 @@ import android.content.Context
@@ -209,7 +209,7 @@ index 3a68828b..b8ce1a34 100644
      }
  }
 diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
-index 9c8a7e3d..f945b013 100644
+index 9c8a7e3de..f945b0138 100644
 --- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
 @@ -114,7 +114,8 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
@@ -233,7 +233,7 @@ index 9c8a7e3d..f945b013 100644
      }
      NoopCard {
 diff --git a/android/app/src/main/java/com/noop/food/FoodVision.kt b/android/app/src/main/java/com/noop/food/FoodVision.kt
-index af913a84..dc8cd14c 100644
+index af913a840..dc8cd14c8 100644
 --- a/android/app/src/main/java/com/noop/food/FoodVision.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodVision.kt
 @@ -318,13 +318,13 @@ object FoodVision {
@@ -253,7 +253,7 @@ index af913a84..dc8cd14c 100644
              val request = Request.Builder()
                  .url(url)
 diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
-index 218f6be6..c11e6fd6 100644
+index 218f6be64..c11e6fd6e 100644
 --- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 +++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 @@ -26,7 +26,8 @@ internal fun TodayFoodSection(vm: AppViewModel, onOpenFood: () -> Unit) {
@@ -268,7 +268,7 @@ index 218f6be6..c11e6fd6 100644
      val todays = entries.filter { it.day == today }
 diff --git a/android/app/src/main/java/com/noop/training/TrainingAi.kt b/android/app/src/main/java/com/noop/training/TrainingAi.kt
 new file mode 100644
-index 00000000..3728c307
+index 000000000..3728c3074
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/training/TrainingAi.kt
 @@ -0,0 +1,333 @@
@@ -607,7 +607,7 @@ index 00000000..3728c307
 +}
 diff --git a/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
 new file mode 100644
-index 00000000..6fc1539b
+index 000000000..6fc1539b4
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
 @@ -0,0 +1,131 @@
@@ -744,7 +744,7 @@ index 00000000..6fc1539b
 +}
 diff --git a/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt b/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
 new file mode 100644
-index 00000000..23a2ede6
+index 000000000..23a2ede60
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
 @@ -0,0 +1,68 @@
@@ -818,7 +818,7 @@ index 00000000..23a2ede6
 +}
 diff --git a/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt b/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
 new file mode 100644
-index 00000000..2856d90c
+index 000000000..2856d90c2
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
 @@ -0,0 +1,161 @@
@@ -985,7 +985,7 @@ index 00000000..2856d90c
 +}
 diff --git a/android/app/src/main/java/com/noop/training/TrainingEditor.kt b/android/app/src/main/java/com/noop/training/TrainingEditor.kt
 new file mode 100644
-index 00000000..9cecddad
+index 000000000..9cecddad2
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/training/TrainingEditor.kt
 @@ -0,0 +1,161 @@
@@ -1152,7 +1152,7 @@ index 00000000..9cecddad
 +}
 diff --git a/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt b/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt
 new file mode 100644
-index 00000000..dc8b246f
+index 000000000..dc8b246f3
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/training/TrainingLivePanel.kt
 @@ -0,0 +1,181 @@
@@ -1339,7 +1339,7 @@ index 00000000..dc8b246f
 +}
 diff --git a/android/app/src/main/java/com/noop/training/TrainingModels.kt b/android/app/src/main/java/com/noop/training/TrainingModels.kt
 new file mode 100644
-index 00000000..f44d0f5c
+index 000000000..f44d0f5c4
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/training/TrainingModels.kt
 @@ -0,0 +1,211 @@
@@ -1556,7 +1556,7 @@ index 00000000..f44d0f5c
 +}
 diff --git a/android/app/src/main/java/com/noop/training/TrainingSheet.kt b/android/app/src/main/java/com/noop/training/TrainingSheet.kt
 new file mode 100644
-index 00000000..58f5b671
+index 000000000..58f5b671d
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/training/TrainingSheet.kt
 @@ -0,0 +1,412 @@
@@ -1974,7 +1974,7 @@ index 00000000..58f5b671
 +}
 diff --git a/android/app/src/main/java/com/noop/training/TrainingStore.kt b/android/app/src/main/java/com/noop/training/TrainingStore.kt
 new file mode 100644
-index 00000000..e805c42e
+index 000000000..e805c42e9
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/training/TrainingStore.kt
 @@ -0,0 +1,223 @@
@@ -2202,7 +2202,7 @@ index 00000000..e805c42e
 +    }
 +}
 diff --git a/android/app/src/main/java/com/noop/ui/AppViewModel.kt b/android/app/src/main/java/com/noop/ui/AppViewModel.kt
-index d95c5a48..e395f350 100644
+index d95c5a482..e395f3508 100644
 --- a/android/app/src/main/java/com/noop/ui/AppViewModel.kt
 +++ b/android/app/src/main/java/com/noop/ui/AppViewModel.kt
 @@ -1724,6 +1724,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -2222,7 +2222,7 @@ index d95c5a48..e395f350 100644
                  runCatching { HealthConnectWriter.writeExercise(appContext, row, w.sport.exerciseType) }
                  // #528: export the just-captured HR series now (workout row already upserted above, so
 diff --git a/android/app/src/main/java/com/noop/ui/LiveWorkoutScreen.kt b/android/app/src/main/java/com/noop/ui/LiveWorkoutScreen.kt
-index a504647d..7aa12405 100644
+index a504647d5..7aa124051 100644
 --- a/android/app/src/main/java/com/noop/ui/LiveWorkoutScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/LiveWorkoutScreen.kt
 @@ -193,6 +193,8 @@ fun LiveWorkoutScreen(vm: AppViewModel, onClose: () -> Unit) {
@@ -2235,7 +2235,7 @@ index a504647d..7aa12405 100644
              // and published on every accepted fix (mirrored from GpsSession into ActiveWorkout) — this only
              // surfaces them live, where before they appeared solely in the post-workout detail. Hidden until
 diff --git a/android/app/src/main/java/com/noop/ui/WorkoutStart.kt b/android/app/src/main/java/com/noop/ui/WorkoutStart.kt
-index 9532d197..042f1fe5 100644
+index 9532d1975..042f1fe5e 100644
 --- a/android/app/src/main/java/com/noop/ui/WorkoutStart.kt
 +++ b/android/app/src/main/java/com/noop/ui/WorkoutStart.kt
 @@ -191,6 +191,7 @@ fun WorkoutStartSection(vm: AppViewModel, onAdd: (() -> Unit)? = null) {
@@ -2271,7 +2271,7 @@ index 9532d197..042f1fe5 100644
      // The full-screen live workout overlay (#238). A plain full-screen Dialog so it floats over
      // whichever screen launched it. Dismiss just hides it; End (inside) stops the workout.
 diff --git a/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt b/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt
-index c26e72cc..659c9b4b 100644
+index c26e72ccd..659c9b4b4 100644
 --- a/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt
 @@ -173,6 +173,7 @@ fun WorkoutsScreen(vm: AppViewModel) {
@@ -2317,7 +2317,7 @@ index c26e72cc..659c9b4b 100644
                  CardDivider()
                  HeartRateRecoveryCard(it)
 diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
-index a51346df..86c4fba9 100644
+index a51346df3..86c4fba94 100644
 --- a/android/app/src/main/res/values-es/strings_victor_food.xml
 +++ b/android/app/src/main/res/values-es/strings_victor_food.xml
 @@ -130,4 +130,5 @@
@@ -2328,7 +2328,7 @@ index a51346df..86c4fba9 100644
  </resources>
 diff --git a/android/app/src/main/res/values-es/strings_victor_training.xml b/android/app/src/main/res/values-es/strings_victor_training.xml
 new file mode 100644
-index 00000000..df6edd01
+index 000000000..df6edd010
 --- /dev/null
 +++ b/android/app/src/main/res/values-es/strings_victor_training.xml
 @@ -0,0 +1,54 @@
@@ -2387,7 +2387,7 @@ index 00000000..df6edd01
 +    <string name="victor_training_err_unreadable">No se ha podido leer la respuesta de Claude. Inténtalo otra vez o dilo de otra forma.</string>
 +</resources>
 diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
-index 3d7823d5..fb8d1530 100644
+index 3d7823d53..fb8d15309 100644
 --- a/android/app/src/main/res/values/strings_victor_food.xml
 +++ b/android/app/src/main/res/values/strings_victor_food.xml
 @@ -130,4 +130,5 @@
@@ -2398,7 +2398,7 @@ index 3d7823d5..fb8d1530 100644
  </resources>
 diff --git a/android/app/src/main/res/values/strings_victor_training.xml b/android/app/src/main/res/values/strings_victor_training.xml
 new file mode 100644
-index 00000000..56fce787
+index 000000000..56fce787f
 --- /dev/null
 +++ b/android/app/src/main/res/values/strings_victor_training.xml
 @@ -0,0 +1,54 @@
@@ -2458,7 +2458,7 @@ index 00000000..56fce787
 +</resources>
 diff --git a/android/app/src/test/java/com/noop/training/TrainingTest.kt b/android/app/src/test/java/com/noop/training/TrainingTest.kt
 new file mode 100644
-index 00000000..d4216fb5
+index 000000000..d4216fb57
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/training/TrainingTest.kt
 @@ -0,0 +1,237 @@

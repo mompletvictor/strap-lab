@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 19:20:03 +0200
+Subject: [PATCH] feat(food): the note hint asks for what a photo cannot show
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A short user note about the fat used, the cooking method, the part eaten or a known weight is
+the second-largest error cut in the published evaluations (ChatGPT-5 study: 30.5 % → 24.4 %
+MAPE with non-visual descriptors). The placeholder now suggests exactly those facts.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ android/app/src/main/res/values-es/strings_victor_food.xml | 2 +-
+ android/app/src/main/res/values/strings_victor_food.xml    | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
+index 3fb6970c0..9890d5a3d 100644
+--- a/android/app/src/main/res/values-es/strings_victor_food.xml
++++ b/android/app/src/main/res/values-es/strings_victor_food.xml
+@@ -32,7 +32,7 @@
+     <string name="victor_food_sheet_new">Nueva comida</string>
+     <string name="victor_food_sheet_edit">Editar comida</string>
+     <string name="victor_food_note_label">Nota (opcional)</string>
+-    <string name="victor_food_note_hint">me comí la mitad del filete, sin aceite…</string>
++    <string name="victor_food_note_hint">frito con aceite, solo la mitad del filete, 150 g de pasta…</string>
+     <string name="victor_food_analyze">Analizar con Claude</string>
+     <string name="victor_food_by_hand">Rellenar a mano</string>
+     <string name="victor_food_discard">Descartar</string>
+diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
+index 21bab7566..4b5f35d4d 100644
+--- a/android/app/src/main/res/values/strings_victor_food.xml
++++ b/android/app/src/main/res/values/strings_victor_food.xml
+@@ -32,7 +32,7 @@
+     <string name="victor_food_sheet_new">New meal</string>
+     <string name="victor_food_sheet_edit">Edit meal</string>
+     <string name="victor_food_note_label">Note (optional)</string>
+-    <string name="victor_food_note_hint">ate half the steak, no oil…</string>
++    <string name="victor_food_note_hint">fried in oil, only half the steak, 150 g of pasta…</string>
+     <string name="victor_food_analyze">Analyse with Claude</string>
+     <string name="victor_food_by_hand">Fill in by hand</string>
+     <string name="victor_food_discard">Discard</string>
+-- 
+2.54.0
+

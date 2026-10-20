@@ -19,7 +19,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 
 diff --git a/Tools/victor_l10n/sports.json b/Tools/victor_l10n/sports.json
 new file mode 100644
-index 00000000..f9c9d804
+index 000000000..f9c9d804b
 --- /dev/null
 +++ b/Tools/victor_l10n/sports.json
 @@ -0,0 +1,47 @@

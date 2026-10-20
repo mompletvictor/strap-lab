@@ -22,7 +22,7 @@ styles require.
 
 diff --git a/android/INTER-OFL.txt b/android/INTER-OFL.txt
 new file mode 100644
-index 00000000..9b2ca37b
+index 000000000..9b2ca37b3
 --- /dev/null
 +++ b/android/INTER-OFL.txt
 @@ -0,0 +1,92 @@
@@ -119,7 +119,7 @@ index 00000000..9b2ca37b
 +FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 +OTHER DEALINGS IN THE FONT SOFTWARE.
 diff --git a/android/app/src/main/java/com/noop/ui/Theme.kt b/android/app/src/main/java/com/noop/ui/Theme.kt
-index abafff64..b45d74c4 100644
+index abafff64b..b45d74c42 100644
 --- a/android/app/src/main/java/com/noop/ui/Theme.kt
 +++ b/android/app/src/main/java/com/noop/ui/Theme.kt
 @@ -23,8 +23,10 @@ import androidx.compose.ui.platform.LocalView

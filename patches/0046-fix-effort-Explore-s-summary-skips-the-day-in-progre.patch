@@ -14,7 +14,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 7 insertions(+), 5 deletions(-)
 
 diff --git a/android/app/src/main/java/com/noop/ui/TodayScreen.kt b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
-index f32f21fe..1cbe0528 100644
+index f32f21fe6..1cbe05284 100644
 --- a/android/app/src/main/java/com/noop/ui/TodayScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
 @@ -738,9 +738,6 @@ fun TodayScreen(
@@ -40,7 +40,7 @@ index f32f21fe..1cbe0528 100644
      // Recovery cold-start: recovery is null until the HRV baseline crosses the seed gate
      // (Baselines.minNightsSeed valid nights). Show honest "calibrating, N of 4 nights" progress
 diff --git a/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt b/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt
-index ca982f99..bc2166f2 100644
+index ca982f995..bc2166f2e 100644
 --- a/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt
 @@ -778,7 +778,9 @@ private fun StatRow(

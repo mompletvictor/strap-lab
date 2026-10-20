@@ -18,7 +18,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  4 files changed, 111 insertions(+), 27 deletions(-)
 
 diff --git a/android/app/src/main/java/com/noop/food/FoodHistory.kt b/android/app/src/main/java/com/noop/food/FoodHistory.kt
-index 56b4587f..4579f5ce 100644
+index 56b4587fa..4579f5ce4 100644
 --- a/android/app/src/main/java/com/noop/food/FoodHistory.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodHistory.kt
 @@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.Color
@@ -200,7 +200,7 @@ index 56b4587f..4579f5ce 100644
          }
      }
 diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
-index 5337b5c2..4a7cef24 100644
+index 5337b5c2a..4a7cef241 100644
 --- a/android/app/src/main/res/values-es/strings_victor_food.xml
 +++ b/android/app/src/main/res/values-es/strings_victor_food.xml
 @@ -108,9 +108,9 @@
@@ -225,7 +225,7 @@ index 5337b5c2..4a7cef24 100644
 +    <string name="victor_food_history_per_week">media por semana</string>
  </resources>
 diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
-index 441607c9..fc039a2f 100644
+index 441607c9d..fc039a2f2 100644
 --- a/android/app/src/main/res/values/strings_victor_food.xml
 +++ b/android/app/src/main/res/values/strings_victor_food.xml
 @@ -108,9 +108,9 @@
@@ -250,7 +250,7 @@ index 441607c9..fc039a2f 100644
 +    <string name="victor_food_history_per_week">weekly average</string>
  </resources>
 diff --git a/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt b/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt
-index e2ef2887..c09c8612 100644
+index e2ef2887a..c09c86125 100644
 --- a/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt
 +++ b/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt
 @@ -2,6 +2,7 @@ package com.noop.food

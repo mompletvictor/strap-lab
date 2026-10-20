@@ -46,7 +46,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/ai/AiCoach.kt b/android/app/src/main/java/com/noop/ai/AiCoach.kt
-index 2f73785c..e6ebb79f 100644
+index 2f73785c2..e6ebb79f9 100644
 --- a/android/app/src/main/java/com/noop/ai/AiCoach.kt
 +++ b/android/app/src/main/java/com/noop/ai/AiCoach.kt
 @@ -112,6 +112,7 @@ class AiCoach(
@@ -66,7 +66,7 @@ index 2f73785c..e6ebb79f 100644
              val stress = runCatching { stressLineToday() }.getOrNull()
              val signals = if (includeSignals) runCatching { buildSignalsContext() }.getOrNull() else null
 diff --git a/android/app/src/main/java/com/noop/ai/ScaleCoachContext.kt b/android/app/src/main/java/com/noop/ai/ScaleCoachContext.kt
-index e1198114..d1bc154b 100644
+index e1198114c..d1bc154bd 100644
 --- a/android/app/src/main/java/com/noop/ai/ScaleCoachContext.kt
 +++ b/android/app/src/main/java/com/noop/ai/ScaleCoachContext.kt
 @@ -3,6 +3,9 @@ package com.noop.ai
@@ -116,7 +116,7 @@ index e1198114..d1bc154b 100644
  
      /** "+0.4" / "-0.6"; a change that rounds to zero reads "+0.0", never "-0.0". */
 diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
-index 359a24a8..bf567dd8 100644
+index 359a24a87..bf567dd85 100644
 --- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 +++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 @@ -12,35 +12,83 @@ import com.noop.food.FoodStore
@@ -214,7 +214,7 @@ index 359a24a8..bf567dd8 100644
      private suspend fun todayLine(ctx: Context, repo: WhoopRepository, strapId: String, today: String): String? {
 diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachStress.kt b/android/app/src/main/java/com/noop/ai/VictorCoachStress.kt
 new file mode 100644
-index 00000000..e2059096
+index 000000000..e20590968
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/ai/VictorCoachStress.kt
 @@ -0,0 +1,109 @@
@@ -328,7 +328,7 @@ index 00000000..e2059096
 +    private fun signed(v: Double): String = v.roundToInt().let { if (it > 0) "+$it" else "$it" }
 +}
 diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt b/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
-index f0d8a410..65677edd 100644
+index f0d8a4107..65677edd9 100644
 --- a/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
 +++ b/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
 @@ -2,6 +2,7 @@ package com.noop.ai
@@ -425,7 +425,7 @@ index f0d8a410..65677edd 100644
  
      private fun format(r: Bp, zone: ZoneId): String {
 diff --git a/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
-index 68eb73ac..74673fba 100644
+index 68eb73ac4..74673fbae 100644
 --- a/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
 +++ b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
 @@ -51,7 +51,10 @@ import com.google.android.gms.auth.api.identity.Identity
@@ -455,7 +455,7 @@ index 68eb73ac..74673fba 100644
      var calendarAllowed by remember { mutableStateOf(DayAgendaSource.hasPermission(ctx)) }
      val calendarPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
 diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
-index b1482785..1ad43f65 100644
+index b1482785f..1ad43f657 100644
 --- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
 @@ -57,6 +57,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -483,7 +483,7 @@ index b1482785..1ad43f65 100644
      }
  
 diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
-index 8666f167..218f6be6 100644
+index 8666f1672..218f6be64 100644
 --- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 +++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 @@ -4,8 +4,10 @@ import androidx.compose.runtime.Composable
@@ -508,7 +508,7 @@ index 8666f167..218f6be6 100644
      }
      val todays = entries.filter { it.day == today }
 diff --git a/android/app/src/main/java/com/noop/ingest/ScaleImport.kt b/android/app/src/main/java/com/noop/ingest/ScaleImport.kt
-index 301478c2..b680cba2 100644
+index 301478c26..b680cba26 100644
 --- a/android/app/src/main/java/com/noop/ingest/ScaleImport.kt
 +++ b/android/app/src/main/java/com/noop/ingest/ScaleImport.kt
 @@ -147,16 +147,23 @@ object ScaleImport {
@@ -544,7 +544,7 @@ index 301478c2..b680cba2 100644
          val p = prefs(context)
 diff --git a/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt b/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt
 new file mode 100644
-index 00000000..d67f03bd
+index 000000000..d67f03bd2
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt
 @@ -0,0 +1,218 @@
@@ -768,7 +768,7 @@ index 00000000..d67f03bd
 +}
 diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachBlockTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachBlockTest.kt
 new file mode 100644
-index 00000000..5afa95b2
+index 000000000..5afa95b23
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/ai/VictorCoachBlockTest.kt
 @@ -0,0 +1,75 @@
@@ -848,7 +848,7 @@ index 00000000..5afa95b2
 +    }
 +}
 diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
-index f1db8d8c..83667bf9 100644
+index f1db8d8c2..83667bf94 100644
 --- a/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
 +++ b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
 @@ -55,4 +55,19 @@ class VictorCoachExtrasTest {
@@ -873,7 +873,7 @@ index f1db8d8c..83667bf9 100644
  }
 diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachStressTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachStressTest.kt
 new file mode 100644
-index 00000000..3b1df082
+index 000000000..3b1df0824
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/ai/VictorCoachStressTest.kt
 @@ -0,0 +1,38 @@
@@ -916,7 +916,7 @@ index 00000000..3b1df082
 +    }
 +}
 diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
-index 828e79b5..f1a536b9 100644
+index 828e79b54..f1a536b9d 100644
 --- a/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
 +++ b/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
 @@ -85,4 +85,32 @@ class VictorCoachVitalsTest {
@@ -954,7 +954,7 @@ index 828e79b5..f1a536b9 100644
  }
 diff --git a/android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt b/android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt
 new file mode 100644
-index 00000000..c3126426
+index 000000000..c31264262
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt
 @@ -0,0 +1,50 @@

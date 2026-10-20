@@ -14,7 +14,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 24 insertions(+), 6 deletions(-)
 
 diff --git a/android/app/src/main/java/com/noop/day/DayCalendarViews.kt b/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
-index 39f3b1e9..5049d482 100644
+index 39f3b1e99..5049d482b 100644
 --- a/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
 +++ b/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
 @@ -81,6 +81,13 @@ internal fun PeriodBar(label: String, atToday: Boolean, onPrevious: () -> Unit,

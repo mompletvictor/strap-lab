@@ -40,7 +40,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  12 files changed, 188 insertions(+), 22 deletions(-)
 
 diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
-index 982d1c36..5d4c099e 100644
+index 982d1c365..5d4c099ef 100644
 --- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
 @@ -105,7 +105,10 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
@@ -56,7 +56,7 @@ index 982d1c36..5d4c099e 100644
      val locale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
  
 diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
-index 82e8ef42..0f3cc5c9 100644
+index 82e8ef425..0f3cc5c94 100644
 --- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 +++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 @@ -30,7 +30,10 @@ internal fun TodayFoodSection(vm: AppViewModel, onOpenFood: () -> Unit) {
@@ -72,7 +72,7 @@ index 82e8ef42..0f3cc5c9 100644
      val energy by produceState<FoodEnergy?>(null, today, entries, hcVersion, training) {
          value = withContext(Dispatchers.IO) { runCatching { FoodEnergy.load(ctx, vm.repo, vm.activeStrapId, today) }.getOrNull() }
 diff --git a/android/app/src/main/java/com/noop/training/TrainingAi.kt b/android/app/src/main/java/com/noop/training/TrainingAi.kt
-index 0499f5c4..6cf43772 100644
+index 0499f5c43..6cf43772f 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingAi.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingAi.kt
 @@ -317,6 +317,7 @@ object TrainingAi {
@@ -116,7 +116,7 @@ index 0499f5c4..6cf43772 100644
      }
  
 diff --git a/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
-index 6fc1539b..e1b5ccf3 100644
+index 6fc1539b4..e1b5ccf36 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
 @@ -8,6 +8,7 @@ import com.noop.analytics.ManualWorkoutRescore
@@ -230,7 +230,7 @@ index 6fc1539b..e1b5ccf3 100644
  
  /**
 diff --git a/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt b/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
-index e0c11e21..ae7112b1 100644
+index e0c11e212..ae7112b1f 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
 @@ -51,11 +51,12 @@ internal object TrainingCoachContext {
@@ -249,7 +249,7 @@ index e0c11e21..ae7112b1 100644
              }
              "${start.toLocalDate()} ${start.format(HHMM)}-${end.format(HHMM)} ${row.sport} ($how): $exercises" +
 diff --git a/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt b/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
-index c4d7fb5b..b78a5aed 100644
+index c4d7fb5bd..b78a5aedb 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
 @@ -37,6 +37,8 @@ import com.noop.ui.NoopType
@@ -306,7 +306,7 @@ index c4d7fb5b..b78a5aed 100644
                  a.score?.let { s ->
                      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space8)) {
 diff --git a/android/app/src/main/java/com/noop/training/TrainingModels.kt b/android/app/src/main/java/com/noop/training/TrainingModels.kt
-index e78a233c..6293de35 100644
+index e78a233c4..6293de354 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingModels.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingModels.kt
 @@ -76,6 +76,15 @@ data class TrainingAnalysis(
@@ -369,7 +369,7 @@ index e78a233c..6293de35 100644
 +    }
  }
 diff --git a/android/app/src/main/java/com/noop/training/TrainingStore.kt b/android/app/src/main/java/com/noop/training/TrainingStore.kt
-index 2f3e4ede..634407c7 100644
+index 2f3e4edef..634407c70 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingStore.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingStore.kt
 @@ -47,6 +47,9 @@ internal object TrainingStoreCodec {
@@ -393,7 +393,7 @@ index 2f3e4ede..634407c7 100644
              }
              out += TrainingSession(
 diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
-index 6aa2934a..9e5f6235 100644
+index 6aa2934a0..9e5f6235c 100644
 --- a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
 +++ b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
 @@ -124,9 +124,15 @@ object WeeklyReviews {
@@ -416,7 +416,7 @@ index 6aa2934a..9e5f6235 100644
                  append(s.exercises.joinToString("; ") { ex -> "${ex.name} ${TrainingFormat.summary(ex, s::performed, Locale.US).ifEmpty { "skipped" }}" })
                  s.analysis?.let { a ->
 diff --git a/android/app/src/main/res/values-es/strings_victor_training.xml b/android/app/src/main/res/values-es/strings_victor_training.xml
-index ee9f8b22..15d2811c 100644
+index ee9f8b226..15d2811c1 100644
 --- a/android/app/src/main/res/values-es/strings_victor_training.xml
 +++ b/android/app/src/main/res/values-es/strings_victor_training.xml
 @@ -66,4 +66,5 @@
@@ -426,7 +426,7 @@ index ee9f8b22..15d2811c 100644
 +    <string name="victor_training_effort">Esfuerzo con la carga muscular: %1$s/%2$s (solo por pulso %3$s)</string>
  </resources>
 diff --git a/android/app/src/main/res/values/strings_victor_training.xml b/android/app/src/main/res/values/strings_victor_training.xml
-index 4f279a45..0b9d5b18 100644
+index 4f279a45d..0b9d5b18c 100644
 --- a/android/app/src/main/res/values/strings_victor_training.xml
 +++ b/android/app/src/main/res/values/strings_victor_training.xml
 @@ -66,4 +66,5 @@
@@ -436,7 +436,7 @@ index 4f279a45..0b9d5b18 100644
 +    <string name="victor_training_effort">Effort with the muscular load: %1$s/%2$s (heart rate alone %3$s)</string>
  </resources>
 diff --git a/android/app/src/test/java/com/noop/training/TrainingTest.kt b/android/app/src/test/java/com/noop/training/TrainingTest.kt
-index 9dee5b0c..70a1873b 100644
+index 9dee5b0cd..70a1873bf 100644
 --- a/android/app/src/test/java/com/noop/training/TrainingTest.kt
 +++ b/android/app/src/test/java/com/noop/training/TrainingTest.kt
 @@ -103,10 +103,10 @@ class TrainingTest {

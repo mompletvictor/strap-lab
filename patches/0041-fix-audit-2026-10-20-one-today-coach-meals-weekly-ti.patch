@@ -67,7 +67,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
 
 diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
-index abf138a3..f2a2791d 100644
+index abf138a31..f2a2791d1 100644
 --- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 +++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
 @@ -1,6 +1,8 @@
@@ -154,7 +154,7 @@ index abf138a3..f2a2791d 100644
  
      private suspend fun weekBalanceLine(ctx: Context, repo: WhoopRepository, strapId: String, today: LocalDate): String? {
 diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt b/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
-index 65677edd..a216904b 100644
+index 65677edd9..a216904b5 100644
 --- a/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
 +++ b/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
 @@ -63,9 +63,12 @@ internal object VictorCoachVitals {
@@ -174,7 +174,7 @@ index 65677edd..a216904b 100644
              val parts = buildList {
 diff --git a/android/app/src/main/java/com/noop/ai/VictorPersonLines.kt b/android/app/src/main/java/com/noop/ai/VictorPersonLines.kt
 new file mode 100644
-index 00000000..0034471b
+index 000000000..0034471b2
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/ai/VictorPersonLines.kt
 @@ -0,0 +1,32 @@
@@ -211,7 +211,7 @@ index 00000000..0034471b
 +    }
 +}
 diff --git a/android/app/src/main/java/com/noop/food/FoodCoachContext.kt b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
-index a56f2e1e..dcc75168 100644
+index a56f2e1e9..dcc75168d 100644
 --- a/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
 @@ -5,21 +5,26 @@ import java.time.LocalDate
@@ -301,7 +301,7 @@ index a56f2e1e..dcc75168 100644
 +        scores[MealScoring.key(day, meal)]?.takeIf { MealScoring.isCurrent(it, list) }?.let { " (meal score ${it.score}/10)" }.orEmpty()
  }
 diff --git a/android/app/src/main/java/com/noop/food/FoodDayCard.kt b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
-index bbf6b623..4f57c2bb 100644
+index bbf6b6239..4f57c2bb1 100644
 --- a/android/app/src/main/java/com/noop/food/FoodDayCard.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
 @@ -10,10 +10,16 @@ import androidx.compose.material.icons.Icons
@@ -407,7 +407,7 @@ index bbf6b623..4f57c2bb 100644
      EnergySource.STRAP -> R.string.victor_food_source_strap
      EnergySource.PHONE -> R.string.victor_food_source_phone
 diff --git a/android/app/src/main/java/com/noop/food/FoodHistory.kt b/android/app/src/main/java/com/noop/food/FoodHistory.kt
-index 27ff165a..c898470e 100644
+index 27ff165a8..c898470ec 100644
 --- a/android/app/src/main/java/com/noop/food/FoodHistory.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodHistory.kt
 @@ -35,6 +35,7 @@ import androidx.compose.ui.platform.LocalConfiguration
@@ -446,7 +446,7 @@ index 27ff165a..c898470e 100644
              runCatching { FoodEnergy.loadRange(ctx, vm.repo, vm.activeStrapId, from.toString(), today.toString()) }.getOrDefault(emptyMap())
          }
 diff --git a/android/app/src/main/java/com/noop/food/FoodModels.kt b/android/app/src/main/java/com/noop/food/FoodModels.kt
-index 1c3fed14..78bc3922 100644
+index 1c3fed14e..78bc3922b 100644
 --- a/android/app/src/main/java/com/noop/food/FoodModels.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodModels.kt
 @@ -4,6 +4,7 @@ import java.time.Instant
@@ -515,7 +515,7 @@ index 1c3fed14..78bc3922 100644
  
      /** The day's totals, or null when nothing is logged that day (distinct from a logged 0 kcal). */
 diff --git a/android/app/src/main/java/com/noop/food/FoodNutritionSync.kt b/android/app/src/main/java/com/noop/food/FoodNutritionSync.kt
-index 6a1b02b4..6a49077a 100644
+index 6a1b02b4c..6a49077a5 100644
 --- a/android/app/src/main/java/com/noop/food/FoodNutritionSync.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodNutritionSync.kt
 @@ -21,8 +21,8 @@ import kotlin.math.abs
@@ -555,7 +555,7 @@ index 6a1b02b4..6a49077a 100644
      suspend fun storedValues(repo: WhoopRepository, day: String): Map<String, Double?> =
          KEYS.associateWith { k -> repo.metricSeries(SOURCE_ID, k, day, day).firstOrNull()?.value }
 diff --git a/android/app/src/main/java/com/noop/food/FoodScorer.kt b/android/app/src/main/java/com/noop/food/FoodScorer.kt
-index 80fda57f..0652e33c 100644
+index 80fda57fe..0652e33c1 100644
 --- a/android/app/src/main/java/com/noop/food/FoodScorer.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodScorer.kt
 @@ -4,17 +4,14 @@ import android.content.Context
@@ -609,7 +609,7 @@ index 80fda57f..0652e33c 100644
 -    }
  }
 diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
-index a103047a..95607b3e 100644
+index a103047ad..95607b3e4 100644
 --- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
 @@ -119,14 +119,14 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
@@ -653,7 +653,7 @@ index a103047a..95607b3e 100644
                      ScoreBadge(score.score, Modifier.clip(RoundedCornerShape(50)).clickable { showing = meal to score })
                  }
 diff --git a/android/app/src/main/java/com/noop/food/FoodSheet.kt b/android/app/src/main/java/com/noop/food/FoodSheet.kt
-index 68ec0a96..6ad15502 100644
+index 68ec0a967..6ad15502e 100644
 --- a/android/app/src/main/java/com/noop/food/FoodSheet.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodSheet.kt
 @@ -385,7 +385,7 @@ private fun WhenPicker(draft: FoodDraft, food: FoodViewModel) {
@@ -666,7 +666,7 @@ index 68ec0a96..6ad15502 100644
                      .apply {
                          datePicker.maxDate = LocalDate.parse(today).plusDays(1)
 diff --git a/android/app/src/main/java/com/noop/food/FoodStore.kt b/android/app/src/main/java/com/noop/food/FoodStore.kt
-index fbb4f1bd..8634b6c8 100644
+index fbb4f1bd5..8634b6c8d 100644
 --- a/android/app/src/main/java/com/noop/food/FoodStore.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodStore.kt
 @@ -308,14 +308,17 @@ object FoodStore {
@@ -692,7 +692,7 @@ index fbb4f1bd..8634b6c8 100644
          }
      }
 diff --git a/android/app/src/main/java/com/noop/food/MealScoring.kt b/android/app/src/main/java/com/noop/food/MealScoring.kt
-index a08d6b42..f2ba638a 100644
+index a08d6b423..f2ba638ab 100644
 --- a/android/app/src/main/java/com/noop/food/MealScoring.kt
 +++ b/android/app/src/main/java/com/noop/food/MealScoring.kt
 @@ -28,8 +28,25 @@ object MealScoring {
@@ -777,7 +777,7 @@ index a08d6b42..f2ba638a 100644
  
      private val HHMM = DateTimeFormatter.ofPattern("HH:mm", Locale.ROOT)
 diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
-index 0f3cc5c9..abf32ad7 100644
+index 0f3cc5c94..abf32ad7c 100644
 --- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 +++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
 @@ -7,10 +7,8 @@ import androidx.compose.runtime.LaunchedEffect
@@ -809,7 +809,7 @@ index 0f3cc5c9..abf32ad7 100644
      }
      val todays = entries.filter { it.day == today }
 diff --git a/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt b/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt
-index fb606868..1eaaff40 100644
+index fb6068680..1eaaff403 100644
 --- a/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt
 +++ b/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt
 @@ -176,7 +176,9 @@ object VictorHcRefresh {
@@ -834,7 +834,7 @@ index fb606868..1eaaff40 100644
              steps = if (steps > 0L) steps.toInt() else base.steps,
              activeKcal = if (activeKcal > 0.0) round1(activeKcal) else base.activeKcal,
 diff --git a/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
-index 6dffa852..25395d18 100644
+index 6dffa852c..25395d18f 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
 @@ -3,12 +3,10 @@ package com.noop.training
@@ -923,7 +923,7 @@ index 6dffa852..25395d18 100644
  }
  
 diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt b/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt
-index 0a9f4277..efa279da 100644
+index 0a9f4277b..efa279da3 100644
 --- a/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt
 +++ b/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt
 @@ -31,13 +31,15 @@ import com.noop.ui.Overline
@@ -954,7 +954,7 @@ index 0a9f4277..efa279da 100644
      val locale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
      var open by rememberSaveable { mutableStateOf(false) }
 diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
-index 429d513e..692339db 100644
+index 429d513e9..692339db4 100644
 --- a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
 +++ b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
 @@ -1,33 +1,34 @@
@@ -1063,7 +1063,7 @@ index 429d513e..692339db 100644
      private fun signed(v: Double): String = v.roundToInt().let { if (it > 0) "+$it" else "$it" }
  
 diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
-index 5e6f8fd0..745b8edd 100644
+index 5e6f8fd0b..745b8edd5 100644
 --- a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
 +++ b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
 @@ -5,13 +5,10 @@ import com.noop.NoopApplication
@@ -1149,7 +1149,7 @@ index 5e6f8fd0..745b8edd 100644
  
      private suspend fun save(ctx: Context, review: WeeklyReview) = withContext(Dispatchers.IO) {
 diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
-index 83667bf9..830578dd 100644
+index 83667bf94..830578ddf 100644
 --- a/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
 +++ b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
 @@ -2,6 +2,8 @@ package com.noop.ai
@@ -1188,7 +1188,7 @@ index 83667bf9..830578dd 100644
      fun nothingKnownMeansNoLine() {
          assertNull(VictorCoachExtras.todayLine("2026-10-16", teatime, null, null, null))
 diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
-index f1a536b9..548da205 100644
+index f1a536b9d..548da2056 100644
 --- a/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
 +++ b/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
 @@ -49,6 +49,21 @@ class VictorCoachVitalsTest {
@@ -1214,7 +1214,7 @@ index f1a536b9..548da205 100644
      fun noFiguresMeansNoNightsBlock() {
          assertNull(VictorCoachVitals.nightsBlock(listOf(DailyMetric("my-whoop", "2026-10-15")), emptyList(), zone))
 diff --git a/android/app/src/test/java/com/noop/food/FoodLogTest.kt b/android/app/src/test/java/com/noop/food/FoodLogTest.kt
-index 1f2175b2..96e6c06d 100644
+index 1f2175b22..96e6c06d7 100644
 --- a/android/app/src/test/java/com/noop/food/FoodLogTest.kt
 +++ b/android/app/src/test/java/com/noop/food/FoodLogTest.kt
 @@ -107,6 +107,31 @@ class FoodLogTest {
@@ -1331,7 +1331,7 @@ index 1f2175b2..96e6c06d 100644
 +    }
  }
 diff --git a/android/app/src/test/java/com/noop/food/MealScoringTest.kt b/android/app/src/test/java/com/noop/food/MealScoringTest.kt
-index 92b88538..640be4e4 100644
+index 92b885383..640be4e43 100644
 --- a/android/app/src/test/java/com/noop/food/MealScoringTest.kt
 +++ b/android/app/src/test/java/com/noop/food/MealScoringTest.kt
 @@ -98,4 +98,50 @@ class MealScoringTest {
@@ -1387,7 +1387,7 @@ index 92b88538..640be4e4 100644
  }
 diff --git a/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt b/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
 new file mode 100644
-index 00000000..d6ee8372
+index 000000000..d6ee8372c
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
 @@ -0,0 +1,70 @@
@@ -1462,7 +1462,7 @@ index 00000000..d6ee8372
 +    }
 +}
 diff --git a/android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt b/android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt
-index c3126426..56f95516 100644
+index c31264262..56f95516c 100644
 --- a/android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt
 +++ b/android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt
 @@ -47,4 +47,18 @@ class VictorHcRefreshTest {
@@ -1485,7 +1485,7 @@ index c3126426..56f95516 100644
 +    }
  }
 diff --git a/android/app/src/test/java/com/noop/training/TrainingTest.kt b/android/app/src/test/java/com/noop/training/TrainingTest.kt
-index 05ce5390..8ccae7cb 100644
+index 05ce53901..8ccae7cb6 100644
 --- a/android/app/src/test/java/com/noop/training/TrainingTest.kt
 +++ b/android/app/src/test/java/com/noop/training/TrainingTest.kt
 @@ -339,4 +339,21 @@ class TrainingTest {
@@ -1511,7 +1511,7 @@ index 05ce5390..8ccae7cb 100644
 +    }
  }
 diff --git a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
-index 87e2ad0d..09e55196 100644
+index 87e2ad0d9..09e551961 100644
 --- a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
 +++ b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
 @@ -13,24 +13,89 @@ import org.junit.Assert.assertNull

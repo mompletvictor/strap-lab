@@ -38,7 +38,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  16 files changed, 650 insertions(+), 171 deletions(-)
 
 diff --git a/android/app/src/main/java/com/noop/food/FoodCoachContext.kt b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
-index 689f397a..e36085df 100644
+index 689f397a2..e36085df1 100644
 --- a/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
 @@ -18,9 +18,9 @@ object FoodCoachContext {
@@ -81,7 +81,7 @@ index 689f397a..e36085df 100644
 +    }
  }
 diff --git a/android/app/src/main/java/com/noop/food/FoodDraft.kt b/android/app/src/main/java/com/noop/food/FoodDraft.kt
-index 225dc70c..5a6351ae 100644
+index 225dc70ca..5a6351ae2 100644
 --- a/android/app/src/main/java/com/noop/food/FoodDraft.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodDraft.kt
 @@ -3,7 +3,10 @@ package com.noop.food
@@ -220,7 +220,7 @@ index 225dc70c..5a6351ae 100644
 +    }
  }
 diff --git a/android/app/src/main/java/com/noop/food/FoodModels.kt b/android/app/src/main/java/com/noop/food/FoodModels.kt
-index 160dbeef..8fcea86f 100644
+index 160dbeef7..8fcea86fd 100644
 --- a/android/app/src/main/java/com/noop/food/FoodModels.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodModels.kt
 @@ -2,6 +2,7 @@ package com.noop.food
@@ -332,7 +332,7 @@ index 160dbeef..8fcea86f 100644
      fun groupedByDay(entries: List<FoodEntry>): List<Pair<String, List<FoodEntry>>> =
          entries.groupBy { it.day }
 diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
-index 60c3c1dc..26e19686 100644
+index 60c3c1dcd..26e196863 100644
 --- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
 @@ -122,7 +122,7 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
@@ -472,7 +472,7 @@ index 60c3c1dc..26e19686 100644
      val t = runCatching { LocalDate.parse(today) }.getOrNull() ?: return day
      if (d == t.minusDays(1)) return uiString(R.string.victor_food_yesterday)
 diff --git a/android/app/src/main/java/com/noop/food/FoodSheet.kt b/android/app/src/main/java/com/noop/food/FoodSheet.kt
-index 36a67e42..ecdd3ab2 100644
+index 36a67e42f..ecdd3ab24 100644
 --- a/android/app/src/main/java/com/noop/food/FoodSheet.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodSheet.kt
 @@ -1,8 +1,14 @@
@@ -836,7 +836,7 @@ index 36a67e42..ecdd3ab2 100644
  private fun AmountField(value: String, labelRes: Int, modifier: Modifier, onChange: (String) -> Unit) {
      OutlinedTextField(
 diff --git a/android/app/src/main/java/com/noop/food/FoodStore.kt b/android/app/src/main/java/com/noop/food/FoodStore.kt
-index 52ade9e6..95f2a583 100644
+index 52ade9e60..95f2a583b 100644
 --- a/android/app/src/main/java/com/noop/food/FoodStore.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodStore.kt
 @@ -40,7 +40,8 @@ internal object FoodStoreCodec {
@@ -939,7 +939,7 @@ index 52ade9e6..95f2a583 100644
              persist(ctx, next)
              next = syncDays(repo, next, setOf(old.day))
 diff --git a/android/app/src/main/java/com/noop/food/FoodViewModel.kt b/android/app/src/main/java/com/noop/food/FoodViewModel.kt
-index 42a3b38d..db05fd92 100644
+index 42a3b38d7..db05fd928 100644
 --- a/android/app/src/main/java/com/noop/food/FoodViewModel.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodViewModel.kt
 @@ -44,30 +44,46 @@ class FoodViewModel(app: Application) : AndroidViewModel(app) {
@@ -1059,7 +1059,7 @@ index 42a3b38d..db05fd92 100644
                  _draft.value = null
              } else {
 diff --git a/android/app/src/main/java/com/noop/food/FoodVision.kt b/android/app/src/main/java/com/noop/food/FoodVision.kt
-index adcefae0..af913a84 100644
+index adcefae0a..af913a840 100644
 --- a/android/app/src/main/java/com/noop/food/FoodVision.kt
 +++ b/android/app/src/main/java/com/noop/food/FoodVision.kt
 @@ -66,12 +66,15 @@ object FoodVision {
@@ -1171,7 +1171,7 @@ index adcefae0..af913a84 100644
              .put("model", model)
              .put("max_tokens", AiCoach.ANTHROPIC_MAX_TOKENS)
 diff --git a/android/app/src/main/java/com/noop/goals/VictorGoalsCard.kt b/android/app/src/main/java/com/noop/goals/VictorGoalsCard.kt
-index ede3f23a..b028d2aa 100644
+index ede3f23af..b028d2aa2 100644
 --- a/android/app/src/main/java/com/noop/goals/VictorGoalsCard.kt
 +++ b/android/app/src/main/java/com/noop/goals/VictorGoalsCard.kt
 @@ -1,17 +1,13 @@
@@ -1233,7 +1233,7 @@ index ede3f23a..b028d2aa 100644
      VictorGoals.Goal.LOSE_FAT -> R.string.victor_goals_lose_fat
      VictorGoals.Goal.MAINTAIN -> R.string.victor_goals_maintain
 diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
-index e635bf42..58eb8737 100644
+index e635bf422..58eb87371 100644
 --- a/android/app/src/main/res/values-es/strings_victor_food.xml
 +++ b/android/app/src/main/res/values-es/strings_victor_food.xml
 @@ -27,7 +27,7 @@
@@ -1311,7 +1311,7 @@ index e635bf42..58eb8737 100644
 +    <string name="victor_food_eaten_result">Comido: %1$s kcal · %2$s</string>
  </resources>
 diff --git a/android/app/src/main/res/values-es/strings_victor_goals.xml b/android/app/src/main/res/values-es/strings_victor_goals.xml
-index bb3c8c93..bec67ece 100644
+index bb3c8c932..bec67ece3 100644
 --- a/android/app/src/main/res/values-es/strings_victor_goals.xml
 +++ b/android/app/src/main/res/values-es/strings_victor_goals.xml
 @@ -2,7 +2,7 @@
@@ -1324,7 +1324,7 @@ index bb3c8c93..bec67ece 100644
      <string name="victor_goals_maintain">Mantener</string>
      <string name="victor_goals_gain_muscle">Ganar músculo</string>
 diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
-index 0e8aefcd..31697711 100644
+index 0e8aefcdc..31697711d 100644
 --- a/android/app/src/main/res/values/strings_victor_food.xml
 +++ b/android/app/src/main/res/values/strings_victor_food.xml
 @@ -27,7 +27,7 @@
@@ -1388,7 +1388,7 @@ index 0e8aefcd..31697711 100644
 +    <string name="victor_food_eaten_result">Eaten: %1$s kcal · %2$s</string>
  </resources>
 diff --git a/android/app/src/test/java/com/noop/food/FoodLogTest.kt b/android/app/src/test/java/com/noop/food/FoodLogTest.kt
-index b48d0d07..1f2175b2 100644
+index b48d0d078..1f2175b22 100644
 --- a/android/app/src/test/java/com/noop/food/FoodLogTest.kt
 +++ b/android/app/src/test/java/com/noop/food/FoodLogTest.kt
 @@ -11,10 +11,13 @@ import java.time.ZoneId
@@ -1508,7 +1508,7 @@ index b48d0d07..1f2175b2 100644
          )
      }
 diff --git a/android/app/src/test/java/com/noop/food/FoodStoreCodecTest.kt b/android/app/src/test/java/com/noop/food/FoodStoreCodecTest.kt
-index 8369ae42..c0acc9ac 100644
+index 8369ae42d..c0acc9ac7 100644
 --- a/android/app/src/test/java/com/noop/food/FoodStoreCodecTest.kt
 +++ b/android/app/src/test/java/com/noop/food/FoodStoreCodecTest.kt
 @@ -14,19 +14,21 @@ class FoodStoreCodecTest {
@@ -1565,7 +1565,7 @@ index 8369ae42..c0acc9ac 100644
  
      @Test
 diff --git a/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt b/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
-index d05e6ef9..de70a88a 100644
+index d05e6ef97..de70a88a5 100644
 --- a/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
 +++ b/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
 @@ -97,7 +97,7 @@ class FoodVisionReplyTest {
@@ -1599,7 +1599,7 @@ index d05e6ef9..de70a88a 100644
      }
  }
 diff --git a/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt b/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
-index d7802def..9c56bd76 100644
+index d7802def3..9c56bd76c 100644
 --- a/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
 +++ b/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
 @@ -13,7 +13,7 @@ class FoodVisionRequestTest {

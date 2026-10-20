@@ -11,7 +11,7 @@ The ring rendered at ~82% of the masked tile (launchers show ~72dp of the
  2 files changed, 6 insertions(+), 6 deletions(-)
 
 diff --git a/android/app/src/main/res/drawable/ic_launcher_foreground.xml b/android/app/src/main/res/drawable/ic_launcher_foreground.xml
-index e7b98243..a1243fd3 100644
+index e7b982434..a1243fd3e 100644
 --- a/android/app/src/main/res/drawable/ic_launcher_foreground.xml
 +++ b/android/app/src/main/res/drawable/ic_launcher_foreground.xml
 @@ -4,12 +4,12 @@
@@ -31,7 +31,7 @@ index e7b98243..a1243fd3 100644
          android:fillColor="#FFFFFF"/>
  </vector>
 diff --git a/android/app/src/main/res/drawable/ic_launcher_monochrome.xml b/android/app/src/main/res/drawable/ic_launcher_monochrome.xml
-index 2abb112e..e62856d4 100644
+index 2abb112e0..e62856d41 100644
 --- a/android/app/src/main/res/drawable/ic_launcher_monochrome.xml
 +++ b/android/app/src/main/res/drawable/ic_launcher_monochrome.xml
 @@ -3,7 +3,7 @@

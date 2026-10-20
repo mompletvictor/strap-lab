@@ -16,7 +16,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  3 files changed, 40 insertions(+), 1 deletion(-)
 
 diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
-index 7da21127..5b0d53f9 100644
+index 7da21127d..5b0d53f96 100644
 --- a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
 +++ b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
 @@ -48,6 +48,26 @@ data class WeeklyReview(
@@ -47,7 +47,7 @@ index 7da21127..5b0d53f9 100644
   * victor:weekly — the pure half of the weekly review: which week is due, what Claude is told about it, the
   * answer's shape, and the JSON on disk.
 diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
-index dd126dd9..1dbace25 100644
+index dd126dd92..1dbace25e 100644
 --- a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
 +++ b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
 @@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicBoolean
@@ -77,7 +77,7 @@ index dd126dd9..1dbace25 100644
  
          val energy = runCatching { FoodEnergy.loadRange(ctx, repo, strapId, start.toString(), end.toString()) }.getOrDefault(emptyMap())
 diff --git a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
-index 62daa389..10448d0b 100644
+index 62daa3892..10448d0b6 100644
 --- a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
 +++ b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
 @@ -187,4 +187,20 @@ class WeeklyReviewTest {

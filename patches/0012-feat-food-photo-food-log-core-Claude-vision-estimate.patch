@@ -60,7 +60,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 
 diff --git a/android/app/src/main/java/com/noop/food/FoodCoachContext.kt b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
 new file mode 100644
-index 00000000..689f397a
+index 000000000..689f397a2
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
 @@ -0,0 +1,48 @@
@@ -114,7 +114,7 @@ index 00000000..689f397a
 +}
 diff --git a/android/app/src/main/java/com/noop/food/FoodDraft.kt b/android/app/src/main/java/com/noop/food/FoodDraft.kt
 new file mode 100644
-index 00000000..225dc70c
+index 000000000..225dc70ca
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/food/FoodDraft.kt
 @@ -0,0 +1,94 @@
@@ -214,7 +214,7 @@ index 00000000..225dc70c
 +}
 diff --git a/android/app/src/main/java/com/noop/food/FoodImage.kt b/android/app/src/main/java/com/noop/food/FoodImage.kt
 new file mode 100644
-index 00000000..0a1cfd78
+index 000000000..0a1cfd785
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/food/FoodImage.kt
 @@ -0,0 +1,126 @@
@@ -346,7 +346,7 @@ index 00000000..0a1cfd78
 +}
 diff --git a/android/app/src/main/java/com/noop/food/FoodModels.kt b/android/app/src/main/java/com/noop/food/FoodModels.kt
 new file mode 100644
-index 00000000..160dbeef
+index 000000000..160dbeef7
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/food/FoodModels.kt
 @@ -0,0 +1,104 @@
@@ -456,7 +456,7 @@ index 00000000..160dbeef
 +    if (!v.isFinite() || v <= 0.0) 0.0 else (v * 10.0).roundToLong() / 10.0
 diff --git a/android/app/src/main/java/com/noop/food/FoodNutritionSync.kt b/android/app/src/main/java/com/noop/food/FoodNutritionSync.kt
 new file mode 100644
-index 00000000..6a1b02b4
+index 000000000..6a1b02b4c
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/food/FoodNutritionSync.kt
 @@ -0,0 +1,86 @@
@@ -548,7 +548,7 @@ index 00000000..6a1b02b4
 +}
 diff --git a/android/app/src/main/java/com/noop/food/FoodStore.kt b/android/app/src/main/java/com/noop/food/FoodStore.kt
 new file mode 100644
-index 00000000..52ade9e6
+index 000000000..52ade9e60
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/food/FoodStore.kt
 @@ -0,0 +1,253 @@
@@ -807,7 +807,7 @@ index 00000000..52ade9e6
 +}
 diff --git a/android/app/src/main/java/com/noop/food/FoodVision.kt b/android/app/src/main/java/com/noop/food/FoodVision.kt
 new file mode 100644
-index 00000000..adcefae0
+index 000000000..adcefae0a
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/food/FoodVision.kt
 @@ -0,0 +1,332 @@
@@ -1145,7 +1145,7 @@ index 00000000..adcefae0
 +}
 diff --git a/android/app/src/test/java/com/noop/food/FoodLogTest.kt b/android/app/src/test/java/com/noop/food/FoodLogTest.kt
 new file mode 100644
-index 00000000..b48d0d07
+index 000000000..b48d0d078
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/food/FoodLogTest.kt
 @@ -0,0 +1,171 @@
@@ -1322,7 +1322,7 @@ index 00000000..b48d0d07
 +}
 diff --git a/android/app/src/test/java/com/noop/food/FoodStoreCodecTest.kt b/android/app/src/test/java/com/noop/food/FoodStoreCodecTest.kt
 new file mode 100644
-index 00000000..8369ae42
+index 000000000..8369ae42d
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/food/FoodStoreCodecTest.kt
 @@ -0,0 +1,62 @@
@@ -1390,7 +1390,7 @@ index 00000000..8369ae42
 +}
 diff --git a/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt b/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
 new file mode 100644
-index 00000000..d05e6ef9
+index 000000000..d05e6ef97
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
 @@ -0,0 +1,134 @@
@@ -1530,7 +1530,7 @@ index 00000000..d05e6ef9
 +}
 diff --git a/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt b/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
 new file mode 100644
-index 00000000..d7802def
+index 000000000..d7802def3
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
 @@ -0,0 +1,90 @@

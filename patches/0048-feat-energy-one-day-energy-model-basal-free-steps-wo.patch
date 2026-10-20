@@ -68,7 +68,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 
 diff --git a/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt b/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
 new file mode 100644
-index 00000000..4a545c14
+index 000000000..4a545c142
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
 @@ -0,0 +1,379 @@
@@ -453,7 +453,7 @@ index 00000000..4a545c14
 +}
 diff --git a/android/app/src/main/java/com/noop/energy/EnergyCache.kt b/android/app/src/main/java/com/noop/energy/EnergyCache.kt
 new file mode 100644
-index 00000000..8c93440c
+index 000000000..8c93440c9
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/energy/EnergyCache.kt
 @@ -0,0 +1,155 @@
@@ -614,7 +614,7 @@ index 00000000..8c93440c
 +}
 diff --git a/android/app/src/main/java/com/noop/energy/EnergyDays.kt b/android/app/src/main/java/com/noop/energy/EnergyDays.kt
 new file mode 100644
-index 00000000..0180467c
+index 000000000..0180467c2
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/energy/EnergyDays.kt
 @@ -0,0 +1,60 @@
@@ -680,7 +680,7 @@ index 00000000..0180467c
 +}
 diff --git a/android/app/src/main/java/com/noop/energy/EnergyEquations.kt b/android/app/src/main/java/com/noop/energy/EnergyEquations.kt
 new file mode 100644
-index 00000000..66f2a4ad
+index 000000000..66f2a4ad7
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/energy/EnergyEquations.kt
 @@ -0,0 +1,103 @@
@@ -789,7 +789,7 @@ index 00000000..66f2a4ad
 +}
 diff --git a/android/app/src/main/java/com/noop/energy/EnergyModel.kt b/android/app/src/main/java/com/noop/energy/EnergyModel.kt
 new file mode 100644
-index 00000000..1e2ce0e4
+index 000000000..1e2ce0e42
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/energy/EnergyModel.kt
 @@ -0,0 +1,384 @@
@@ -1179,7 +1179,7 @@ index 00000000..1e2ce0e4
 +}
 diff --git a/android/app/src/main/java/com/noop/energy/HrIntegral.kt b/android/app/src/main/java/com/noop/energy/HrIntegral.kt
 new file mode 100644
-index 00000000..f4883e5f
+index 000000000..f4883e5f9
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/energy/HrIntegral.kt
 @@ -0,0 +1,114 @@
@@ -1299,7 +1299,7 @@ index 00000000..f4883e5f
 +}
 diff --git a/android/app/src/main/java/com/noop/energy/SportCategory.kt b/android/app/src/main/java/com/noop/energy/SportCategory.kt
 new file mode 100644
-index 00000000..f6ed2629
+index 000000000..f6ed2629c
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/energy/SportCategory.kt
 @@ -0,0 +1,77 @@
@@ -1382,7 +1382,7 @@ index 00000000..f6ed2629
 +}
 diff --git a/android/app/src/test/java/com/noop/energy/DayEnergyModelTest.kt b/android/app/src/test/java/com/noop/energy/DayEnergyModelTest.kt
 new file mode 100644
-index 00000000..5ffd0938
+index 000000000..5ffd0938c
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/energy/DayEnergyModelTest.kt
 @@ -0,0 +1,173 @@
@@ -1561,7 +1561,7 @@ index 00000000..5ffd0938
 +}
 diff --git a/android/app/src/test/java/com/noop/energy/EnergyCacheTest.kt b/android/app/src/test/java/com/noop/energy/EnergyCacheTest.kt
 new file mode 100644
-index 00000000..76612b46
+index 000000000..76612b468
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/energy/EnergyCacheTest.kt
 @@ -0,0 +1,42 @@
@@ -1609,7 +1609,7 @@ index 00000000..76612b46
 +}
 diff --git a/android/app/src/test/java/com/noop/energy/EnergyDaysTest.kt b/android/app/src/test/java/com/noop/energy/EnergyDaysTest.kt
 new file mode 100644
-index 00000000..b49e3af8
+index 000000000..b49e3af82
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/energy/EnergyDaysTest.kt
 @@ -0,0 +1,58 @@
@@ -1673,7 +1673,7 @@ index 00000000..b49e3af8
 +}
 diff --git a/android/app/src/test/java/com/noop/energy/EnergyEquationsTest.kt b/android/app/src/test/java/com/noop/energy/EnergyEquationsTest.kt
 new file mode 100644
-index 00000000..1f0901d9
+index 000000000..1f0901d91
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/energy/EnergyEquationsTest.kt
 @@ -0,0 +1,88 @@
@@ -1767,7 +1767,7 @@ index 00000000..1f0901d9
 +}
 diff --git a/android/app/src/test/java/com/noop/energy/EnergyModelTest.kt b/android/app/src/test/java/com/noop/energy/EnergyModelTest.kt
 new file mode 100644
-index 00000000..1e6f6d0f
+index 000000000..1e6f6d0f8
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/energy/EnergyModelTest.kt
 @@ -0,0 +1,297 @@
@@ -2070,7 +2070,7 @@ index 00000000..1e6f6d0f
 +}
 diff --git a/android/app/src/test/java/com/noop/energy/HrIntegralTest.kt b/android/app/src/test/java/com/noop/energy/HrIntegralTest.kt
 new file mode 100644
-index 00000000..edc6edc5
+index 000000000..edc6edc5f
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/energy/HrIntegralTest.kt
 @@ -0,0 +1,78 @@

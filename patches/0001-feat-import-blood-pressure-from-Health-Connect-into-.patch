@@ -16,7 +16,7 @@ HealthConnectImporter.bloodPressureRows().
  create mode 100644 android/app/src/test/java/com/noop/ingest/BloodPressureImportTest.kt
 
 diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
-index c3f1222a..274ae96a 100644
+index c3f1222aa..274ae96ac 100644
 --- a/android/app/src/main/AndroidManifest.xml
 +++ b/android/app/src/main/AndroidManifest.xml
 @@ -136,6 +136,7 @@
@@ -28,7 +28,7 @@ index c3f1222a..274ae96a 100644
      <!-- Resolve the Health Connect provider on Android 14+ (platform) and earlier (app). -->
      <queries>
 diff --git a/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt b/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt
-index 5893bd8c..b620aa73 100644
+index 5893bd8c4..b620aa731 100644
 --- a/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt
 +++ b/android/app/src/main/java/com/noop/ingest/HealthConnectImporter.kt
 @@ -4,6 +4,7 @@ import android.content.Context
@@ -163,7 +163,7 @@ index 5893bd8c..b620aa73 100644
       * Takes the already de-overlapped per-day totals (#589 max-across-sources), not the raw [DayAcc],
 diff --git a/android/app/src/test/java/com/noop/ingest/BloodPressureImportTest.kt b/android/app/src/test/java/com/noop/ingest/BloodPressureImportTest.kt
 new file mode 100644
-index 00000000..2ca9d082
+index 000000000..2ca9d0827
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/ingest/BloodPressureImportTest.kt
 @@ -0,0 +1,56 @@

@@ -1,0 +1,380 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 19:20:03 +0200
+Subject: [PATCH] =?UTF-8?q?feat(food):=20size=20the=20plate,=20add=20the?=
+ =?UTF-8?q?=20hidden=20fat=20and=20compute=20kcal=20from=20grams=20=C3=97?=
+ =?UTF-8?q?=20per=20100=20g?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Photo-based calorie estimates were the largest error in the energy balance: published
+evaluations of vision LLMs on meal photos sit around 36 % MAPE per meal in energy, with large
+portions underestimated and hidden fat as the main miss (Fridolfsson et al. 2025; Cinar et al.
+2026; Nutrients 2025 ChatGPT-5 context study). The levers those studies found are now in the
+request:
+
+- The item schema is grams plus composition per 100 g; parseItem multiplies them, so the
+  amount (the uncertain half) is separated from the composition (table data the model knows).
+  A reply in the older per-portion shape still reads.
+- The prompt walks the dietitian's steps: every food including hidden layers, amounts judged
+  against known objects (plate 26 cm, cutlery 19 cm, hand 18 cm) and never a typical serving,
+  cooking fat and sauces listed as their own item with default amounts (olive oil in Spain),
+  then the composition. The notes end with the one thing the photo cannot show and its rough
+  effect in kcal, so the wearer can correct it.
+- output_config.effort "high": Opus 5.5 defaults to medium and portion sizing is the hard part.
+  A model that rejects output_config still falls back to the plain request as before.
+
+The stored food log is unchanged: FoodItem keeps its per-portion numbers.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../src/main/java/com/noop/food/FoodVision.kt | 108 +++++++++++++-----
+ .../java/com/noop/food/FoodVisionReplyTest.kt |  46 +++++++-
+ .../com/noop/food/FoodVisionRequestTest.kt    |  40 ++++++-
+ 3 files changed, 160 insertions(+), 34 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/food/FoodVision.kt b/android/app/src/main/java/com/noop/food/FoodVision.kt
+index 7e297c387..65a66f55e 100644
+--- a/android/app/src/main/java/com/noop/food/FoodVision.kt
++++ b/android/app/src/main/java/com/noop/food/FoodVision.kt
+@@ -64,6 +64,15 @@ object FoodVision {
+     private const val API_VERSION = "2023-06-01"
+     private val JSON = "application/json; charset=utf-8".toMediaType()
+ 
++    /**
++     * Thinking depth for a photo. Opus 5.5 defaults to `medium`; sizing the portions is the part the
++     * published evaluations find hardest, so the request asks for `high`.
++     */
++    internal const val EFFORT = "high"
++
++    /** One item of the reply, in the order the model writes them: what it is, how much, then what it is made of. */
++    internal val ITEM_FIELDS = listOf("name", "portion", "grams", "kcal_per_100g", "protein_per_100g", "carbs_per_100g", "fat_per_100g")
++
+     // Thinking models can take a while on a photo: generous read/call budgets.
+     private val http: OkHttpClient = OkHttpClient.Builder()
+         .connectTimeout(20, TimeUnit.SECONDS)
+@@ -123,7 +132,15 @@ object FoodVision {
+ 
+     // MARK: - Request (pure)
+ 
+-    /** The JSON schema the reply must follow. All fields required, no extras (structured output rules). */
++    /**
++     * The JSON schema the reply must follow. All fields required, no extras (structured output rules).
++     *
++     * An item is grams plus the composition PER 100 g: the per-portion numbers are computed by
++     * [parseEstimate], never guessed as a whole. That is the decomposition the 2025 evaluations found
++     * more accurate than one direct kcal guess (the amount is the uncertain half; the composition of a
++     * named food is table data the model knows well). `items` stays first: with a text field ahead of
++     * the array, Opus has answered with empty lists.
++     */
+     internal fun outputSchema(): JSONObject {
+         fun num() = JSONObject().put("type", "number")
+         fun str() = JSONObject().put("type", "string")
+@@ -134,12 +151,13 @@ object FoodVision {
+                 JSONObject()
+                     .put("name", str())
+                     .put("portion", str())
+-                    .put("kcal", num())
+-                    .put("protein_g", num())
+-                    .put("carbs_g", num())
+-                    .put("fat_g", num()),
++                    .put("grams", num())
++                    .put("kcal_per_100g", num())
++                    .put("protein_per_100g", num())
++                    .put("carbs_per_100g", num())
++                    .put("fat_per_100g", num()),
+             )
+-            .put("required", JSONArray(listOf("name", "portion", "kcal", "protein_g", "carbs_g", "fat_g")))
++            .put("required", JSONArray(ITEM_FIELDS))
+             .put("additionalProperties", false)
+         return JSONObject()
+             .put("type", "object")
+@@ -166,26 +184,47 @@ object FoodVision {
+             .put("additionalProperties", false)
+     }
+ 
++    /**
++     * The instructions, one step per lever the 2024-2026 evaluations found to cut the error: name every
++     * food including the hidden layers, size each one against known objects instead of a typical
++     * serving (large portions are the ones underestimated), add the cooking fat and sauces that do not
++     * show as items of their own, and give grams plus composition per 100 g rather than a kcal guess.
++     * The notes end with the one thing the photo cannot show, so the wearer can correct it.
++     */
+     internal fun prompt(note: String, structured: Boolean, photos: Int = 1): String = buildString {
+         if (photos > 1) {
+             append("Estimate the nutrition of the meal in these $photos photos. They are all one meal: they may ")
+-            append("show different dishes or the same dish from another angle, so count each food only once.\n")
++            append("show different dishes or the same dish from another angle, so count each food only once; ")
++            append("a side view tells you how high the food is piled.\n")
+         } else {
+             append("Estimate the nutrition of the meal in this photo.\n")
+         }
+-        append("- List each distinct food or drink you can see as one item.\n")
+-        append("- Estimate a realistic portion for each from visual cues (plate and cutlery size, hands, packaging) ")
+-        append("and write it in plain units (g, ml, units).\n")
+-        append("- Give kcal, protein_g, carbs_g and fat_g for that portion from standard food composition data. ")
+-        append("Include oil, butter, sauces and dressings you can reasonably infer.\n")
++        append("Work like a dietitian weighing the plate, in this order:\n")
++        append("1. Foods: list each distinct food or drink as one item, including what is partly hidden (the rice ")
++        append("under a stew, the filling of a sandwich, the sauce under the meat). The meal is from Spain unless ")
++        append("the note says otherwise.\n")
++        append("2. Amounts: judge each amount from the scene, never from a typical serving. Size references: a dinner ")
++        append("plate is about 26 cm across, a dessert plate 20 cm, a fork or spoon 19 cm, a glass 250 ml, a hand ")
++        append("18 cm. Estimate the area each food covers and how high it is piled, then its weight in grams ")
++        append("(ml for drinks). Large or heaped portions are the ones most often underestimated.\n")
++        append("3. Hidden fat: decide how each food was cooked and list the cooking fat, dressing or sauce that does ")
++        append("not show as its own item (olive oil is the default fat in Spain): about 10 g of oil for a sautéed ")
++        append("or grilled portion, 15-20 g for fried or breaded food, 10-15 g for a dressed salad, unless the ")
++        append("note says otherwise.\n")
++        append("4. Composition: for each item give grams and the kcal, protein, carbs and fat PER 100 g from ")
++        append("standard food composition tables (BEDCA, USDA). The totals are computed from grams × per 100 g, ")
++        append("so never bend the per-100 g values to fit a guessed total.\n")
++        append("- portion: the amount in plain words with the grams, for example \"1 plato hondo (350 g)\" or ")
++        append("\"2 rebanadas (60 g)\".\n")
+         append("- The user's note describes what was actually eaten; when it conflicts with the photo, follow the note.\n")
+-        append("- When the note says only part of something was eaten (for example half the steak), give the portion ")
+-        append("and the numbers for the part actually eaten.\n")
++        append("- When the note says only part of something was eaten (for example half the steak), give the grams ")
++        append("and the portion for the part actually eaten.\n")
+         append("- total_* must equal the sum of the items.\n")
+         append("- confidence: high when foods and amounts are clear, medium when portions are uncertain, ")
+         append("low when the photo is unclear or the food is hard to identify.\n")
+-        append("- Write name, portion and notes in Spanish (Spain). notes: one or two short sentences with ")
+-        append("the main assumptions.\n")
++        append("- Write name, portion and notes in Spanish (Spain). notes: one or two short sentences: the main ")
++        append("assumption, then the one thing the photo cannot show that would change the total most, with its ")
++        append("rough effect in kcal (for example \"Si iba frito y no a la plancha, unas 120 kcal más\").\n")
+         append("- If the photos show no food or drink, return no items, zero totals, confidence low, ")
+         append("and say so in notes.\n")
+         val trimmed = note.trim()
+@@ -199,8 +238,8 @@ object FoodVision {
+ 
+     /**
+      * The Messages API body: model, reply cap, one user turn of [image…, text], and (when
+-     * [structured]) `output_config.format` with [outputSchema]. Never temperature/top_p/thinking/
+-     * tool_choice: Claude 5.x answers those with HTTP 400.
++     * [structured]) `output_config` with [outputSchema] as the format and [EFFORT]. Never
++     * temperature/top_p/thinking/tool_choice: Claude 5.x answers those with HTTP 400.
+      */
+     internal fun buildRequestBody(model: String, imagesBase64: List<String>, note: String, structured: Boolean): JSONObject {
+         val content = JSONArray()
+@@ -228,7 +267,9 @@ object FoodVision {
+         if (structured) {
+             body.put(
+                 "output_config",
+-                JSONObject().put("format", JSONObject().put("type", "json_schema").put("schema", outputSchema())),
++                JSONObject()
++                    .put("format", JSONObject().put("type", "json_schema").put("schema", outputSchema()))
++                    .put("effort", EFFORT),
+             )
+         }
+         return body
+@@ -274,14 +315,7 @@ object FoodVision {
+         val arr = obj.optJSONArray("items") ?: return null
+         val items = (0 until arr.length()).mapNotNull { i ->
+             val o = arr.optJSONObject(i) ?: return@mapNotNull null
+-            FoodItem(
+-                name = o.optString("name").trim(),
+-                portion = o.optString("portion").trim(),
+-                kcal = round1(o.optDouble("kcal", 0.0)),
+-                proteinG = round1(o.optDouble("protein_g", 0.0)),
+-                carbsG = round1(o.optDouble("carbs_g", 0.0)),
+-                fatG = round1(o.optDouble("fat_g", 0.0)),
+-            )
++            parseItem(o)
+         }.filter { it.name.isNotEmpty() || it.kcal > 0.0 }
+         val reported = FoodTotals(
+             round1(obj.optDouble("total_kcal", 0.0)),
+@@ -293,6 +327,26 @@ object FoodVision {
+         return FoodEstimate(items, reported, confidence, obj.optString("notes").trim())
+     }
+ 
++    /**
++     * One item of the reply. With grams and a composition per 100 g (the schema), the per-portion
++     * numbers are grams × per-100 g; a reply in the older per-portion shape (`kcal`, `protein_g`…)
++     * still reads, so a model answering from the text fallback in that shape is not lost.
++     */
++    internal fun parseItem(o: JSONObject): FoodItem {
++        val grams = o.optDouble("grams", 0.0)
++        val per100 = grams.isFinite() && grams > 0.0 && ITEM_FIELDS.drop(3).any { o.has(it) }
++        fun of(per100Key: String, portionKey: String): Double =
++            if (per100) round1(grams * o.optDouble(per100Key, 0.0) / 100.0) else round1(o.optDouble(portionKey, 0.0))
++        return FoodItem(
++            name = o.optString("name").trim(),
++            portion = o.optString("portion").trim(),
++            kcal = of("kcal_per_100g", "kcal"),
++            proteinG = of("protein_per_100g", "protein_g"),
++            carbsG = of("carbs_per_100g", "carbs_g"),
++            fatG = of("fat_per_100g", "fat_g"),
++        )
++    }
++
+     /** The first balanced `{...}` in [text] (strings and escapes respected), or null. Tolerates ```json fences. */
+     internal fun extractFirstJsonObject(text: String): String? {
+         var start = text.indexOf('{')
+diff --git a/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt b/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
+index c0e2291cc..4166937b0 100644
+--- a/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
++++ b/android/app/src/test/java/com/noop/food/FoodVisionReplyTest.kt
+@@ -13,7 +13,17 @@ import java.net.UnknownHostException
+ /** victor:food — reading replies (structured and fallback) and the retry/error flow, without a network. */
+ class FoodVisionReplyTest {
+ 
++    /** The schema's shape: grams and composition per 100 g; the per-portion numbers are the app's product. */
+     private val estimateJson = """
++        {"items":[
++           {"name":"Tortilla de patatas","portion":"1 porción (150 g)","grams":150,"kcal_per_100g":190,"protein_per_100g":7,"carbs_per_100g":13.4,"fat_per_100g":11.5},
++           {"name":"Pan","portion":"40 g","grams":"40","kcal_per_100g":250,"protein_per_100g":8.5,"carbs_per_100g":50.3,"fat_per_100g":1.3}],
++         "total_kcal":385,"total_protein_g":13.9,"total_carbs_g":40.2,"total_fat_g":17.8,
++         "confidence":"MEDIUM","notes":"Supongo aceite de oliva en la tortilla."}
++    """.trimIndent()
++
++    /** Before the decomposition the model gave the per-portion numbers itself. */
++    private val legacyJson = """
+         {"items":[
+            {"name":"Tortilla de patatas","portion":"1 porción (150 g)","kcal":280,"protein_g":10.5,"carbs_g":20,"fat_g":17.2},
+            {"name":"Pan","portion":"40 g","kcal":"100","protein_g":3.4,"carbs_g":20.1,"fat_g":0.5}],
+@@ -39,14 +49,44 @@ class FoodVisionReplyTest {
+         val e = (result as FoodResult.Ok).estimate
+         assertEquals(2, e.items.size)
+         assertEquals("Tortilla de patatas", e.items[0].name)
+-        assertEquals(280.0, e.items[0].kcal, 0.0)
+-        assertEquals(100.0, e.items[1].kcal, 0.0) // a number sent as a string still reads
++        // 150 g × 190 kcal/100 g, 7 g, 13.4 g and 11.5 g per 100 g (17.25 → one decimal).
++        assertEquals(FoodItem("Tortilla de patatas", "1 porción (150 g)", 285.0, 10.5, 20.1, 17.3), e.items[0])
++        assertEquals(100.0, e.items[1].kcal, 0.0) // grams sent as a string still read
++        assertEquals(0.5, e.items[1].fatG, 0.0)   // 40 × 1.3 / 100 = 0.52
+         assertEquals("medium", e.confidence)
+         assertEquals("Supongo aceite de oliva en la tortilla.", e.notes)
+-        assertEquals(FoodTotals(380.0, 13.9, 40.1, 17.7), e.reportedTotals)
++        assertEquals(FoodTotals(385.0, 13.9, 40.2, 17.8), e.reportedTotals)
++        assertEquals(FoodTotals(385.0, 13.9, 40.2, 17.8), FoodTotals.ofItems(e.items))
++    }
++
++    @Test
++    fun perPortionShapeStillReads() {
++        val e = (FoodVision.parseReply(reply(legacyJson)) as FoodResult.Ok).estimate
++        assertEquals(2, e.items.size)
++        assertEquals(280.0, e.items[0].kcal, 0.0)
++        assertEquals(100.0, e.items[1].kcal, 0.0)
+         assertEquals(FoodTotals(380.0, 13.9, 40.1, 17.7), FoodTotals.ofItems(e.items))
+     }
+ 
++    /** Grams decide which shape an item is in; junk in either shape clamps to zero, never to NaN. */
++    @Test
++    fun gramsPickTheShapeAndJunkClampsToZero() {
++        // Cooking fat as its own item: 10 g of olive oil.
++        val oil = FoodVision.parseItem(JSONObject("""{"name":"Aceite de oliva","portion":"1 cucharada (10 g)","grams":10,"kcal_per_100g":884,"protein_per_100g":0,"carbs_per_100g":0,"fat_per_100g":100}"""))
++        assertEquals(FoodItem("Aceite de oliva", "1 cucharada (10 g)", 88.4, 0.0, 0.0, 10.0), oil)
++        // Per-100 g values with no grams are not a portion: nothing to multiply, nothing counted.
++        val noGrams = FoodVision.parseItem(JSONObject("""{"name":"Arroz","portion":"","grams":0,"kcal_per_100g":130,"protein_per_100g":2.7,"carbs_per_100g":28,"fat_per_100g":0.3}"""))
++        assertEquals(0.0, noGrams.kcal, 0.0)
++        // Grams beside per-portion numbers (no per-100 g field): the per-portion numbers are what they are.
++        val mixed = FoodVision.parseItem(JSONObject("""{"name":"Pan","portion":"40 g","grams":40,"kcal":100,"protein_g":3.4,"carbs_g":20.1,"fat_g":0.5}"""))
++        assertEquals(100.0, mixed.kcal, 0.0)
++        // Negative grams or a non-number composition read as zero.
++        val junk = FoodVision.parseItem(JSONObject("""{"name":"X","portion":"","grams":-5,"kcal_per_100g":100,"protein_per_100g":"abc","carbs_per_100g":0,"fat_per_100g":0}"""))
++        assertEquals(FoodItem("X", "", 0.0, 0.0, 0.0, 0.0), junk)
++        val junkComposition = FoodVision.parseItem(JSONObject("""{"name":"X","portion":"","grams":100,"kcal_per_100g":"abc","protein_per_100g":-1,"carbs_per_100g":1e400,"fat_per_100g":2}"""))
++        assertEquals(FoodItem("X", "", 0.0, 0.0, 0.0, 2.0), junkComposition)
++    }
++
+     @Test
+     fun fallbackTextWithProseAndFenceParses() {
+         val text = "Claro, aquí va la estimación:\n```json\n$estimateJson\n```\nEspero que sirva {de ayuda}."
+diff --git a/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt b/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
+index 9c56bd76c..9d1670614 100644
+--- a/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
++++ b/android/app/src/test/java/com/noop/food/FoodVisionRequestTest.kt
+@@ -38,17 +38,39 @@ class FoodVisionRequestTest {
+         assertTrue(text.getString("text").contains("\"media ración\""))
+         assertTrue(text.getString("text").contains("Spanish"))
+ 
+-        val format = body.getJSONObject("output_config").getJSONObject("format")
++        val outputConfig = body.getJSONObject("output_config")
++        assertEquals(setOf("format", "effort"), outputConfig.keySet())
++        assertEquals("high", outputConfig.getString("effort"))
++        val format = outputConfig.getJSONObject("format")
+         assertEquals("json_schema", format.getString("type"))
+         assertEquals(FoodVision.outputSchema().toString(), format.getJSONObject("schema").toString())
+     }
+ 
++    /** Each lever the 2024-2026 evaluations found to cut the error has its line in the prompt. */
++    @Test
++    fun promptWalksTheDietitianSteps() {
++        val prompt = FoodVision.prompt("", structured = true)
++        val steps = listOf("1. Foods:", "2. Amounts:", "3. Hidden fat:", "4. Composition:")
++        val at = steps.map { prompt.indexOf(it) }
++        assertTrue(at.all { it >= 0 })
++        assertEquals(at, at.sorted())
++        assertTrue(prompt.contains("partly hidden"))                      // hidden layers under other food
++        assertTrue(prompt.contains("never from a typical serving"))       // no regression to a standard serving
++        assertTrue(prompt.contains("26 cm") && prompt.contains("19 cm"))  // plate and cutlery as size references
++        assertTrue(prompt.contains("most often underestimated"))          // the published bias
++        assertTrue(prompt.contains("olive oil") && prompt.contains("as its own item")) // cooking fat listed, visible, editable
++        assertTrue(prompt.contains("PER 100 g") && prompt.contains("grams × per 100 g"))
++        assertTrue(prompt.contains("the photo cannot show"))              // the correction the wearer can make
++        assertTrue(prompt.contains("from Spain"))
++    }
++
+     @Test
+     fun neverSendsParamsClaude5Rejects() {
+         for (structured in listOf(true, false)) {
+             val body = FoodVision.buildRequestBody("m", listOf("x"), "", structured)
+             for (k in banned) assertFalse("$k must not be sent", body.has(k))
+             assertFalse(body.toString().contains("\"temperature\""))
++            assertFalse("effort lives inside output_config", body.has("effort"))
+         }
+     }
+ 
+@@ -61,6 +83,7 @@ class FoodVisionRequestTest {
+         assertTrue(prompt.contains("(none)"))
+         assertTrue(prompt.contains("ONLY one JSON object"))
+         assertTrue(prompt.contains("\"total_kcal\""))
++        assertTrue(prompt.contains("\"kcal_per_100g\""))
+     }
+ 
+     @Test
+@@ -75,6 +98,7 @@ class FoodVisionRequestTest {
+         val prompt = content.getJSONObject(3).getString("text")
+         assertTrue(prompt.contains("these 3 photos"))
+         assertTrue(prompt.contains("count each food only once"))
++        assertTrue(prompt.contains("side view"))
+         assertTrue(prompt.contains("half the steak"))
+         val single = FoodVision.buildRequestBody("m", listOf("AAA"), "", structured = true)
+             .getJSONArray("messages").getJSONObject(0).getJSONArray("content").getJSONObject(1).getString("text")
+@@ -90,10 +114,16 @@ class FoodVisionRequestTest {
+         val item = schema.getJSONObject("properties").getJSONObject("items").getJSONObject("items")
+         assertFalse(item.getBoolean("additionalProperties"))
+         assertEquals(
+-            setOf("name", "portion", "kcal", "protein_g", "carbs_g", "fat_g"),
++            setOf("name", "portion", "grams", "kcal_per_100g", "protein_per_100g", "carbs_per_100g", "fat_per_100g"),
+             requiredOf(item),
+         )
+         assertEquals(keysOf(item.getJSONObject("properties")), requiredOf(item))
++        // The model writes an item in this order: what, how much, then its composition.
++        assertEquals(listOf("name", "portion", "grams"), requiredList(item).take(3))
++        assertEquals(requiredList(item), FoodVision.ITEM_FIELDS)
++        // The array first, the free text last: Opus has answered an empty list when text came first.
++        assertEquals("items", requiredList(schema).first())
++        assertEquals("notes", requiredList(schema).last())
+ 
+         val confidence = schema.getJSONObject("properties").getJSONObject("confidence").getJSONArray("enum")
+         assertEquals(listOf("low", "medium", "high"), (0 until confidence.length()).map { confidence.getString(it) })
+@@ -101,8 +131,10 @@ class FoodVisionRequestTest {
+ 
+     private fun keysOf(o: JSONObject): Set<String> = o.keySet().toSet()
+ 
+-    private fun requiredOf(o: JSONObject): Set<String> {
++    private fun requiredOf(o: JSONObject): Set<String> = requiredList(o).toSet()
++
++    private fun requiredList(o: JSONObject): List<String> {
+         val arr = o.getJSONArray("required")
+-        return (0 until arr.length()).map { arr.getString(it) }.toSet()
++        return (0 until arr.length()).map { arr.getString(it) }
+     }
+ }
+-- 
+2.54.0
+

@@ -16,7 +16,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/android/app/src/main/res/values-es/strings_victor_l10n_screens.xml b/android/app/src/main/res/values-es/strings_victor_l10n_screens.xml
-index c13eedee..e7042a63 100644
+index c13eedee3..e7042a636 100644
 --- a/android/app/src/main/res/values-es/strings_victor_l10n_screens.xml
 +++ b/android/app/src/main/res/values-es/strings_victor_l10n_screens.xml
 @@ -881,7 +881,7 @@

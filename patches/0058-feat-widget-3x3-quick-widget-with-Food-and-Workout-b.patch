@@ -1,0 +1,500 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 19:31:08 +0200
+Subject: [PATCH] feat(widget): 3x3 quick widget with Food and Workout buttons
+
+Rest, Charge and Effort, live heart rate and strap battery from the same
+snapshot as the 2x2, plus two buttons: Food opens the camera for a meal
+photo and Workout opens the training sheet (or the running workout).
+A separate picker entry; the 2x2 widget is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ android/app/src/main/AndroidManifest.xml      |  13 ++
+ .../src/main/java/com/noop/food/FoodScreen.kt |   5 +
+ .../app/src/main/java/com/noop/ui/AppRoot.kt  |   9 +
+ .../src/main/java/com/noop/ui/MainActivity.kt |   8 +
+ .../src/main/java/com/noop/ui/WorkoutStart.kt |   9 +-
+ .../main/java/com/noop/ui/WorkoutsScreen.kt   |   2 +-
+ .../noop/widget/VictorQuickGlanceWidget.kt    | 190 ++++++++++++++++++
+ .../noop/widget/VictorQuickWidgetReceiver.kt  |   9 +
+ .../com/noop/widget/VictorWidgetAction.kt     |  39 ++++
+ .../java/com/noop/widget/WidgetSnapshot.kt    |   6 +-
+ .../res/values-es/strings_victor_widget.xml   |  10 +
+ .../main/res/values/strings_victor_widget.xml |  10 +
+ .../main/res/xml/victor_quick_widget_info.xml |  13 ++
+ 13 files changed, 320 insertions(+), 3 deletions(-)
+ create mode 100644 android/app/src/main/java/com/noop/widget/VictorQuickGlanceWidget.kt
+ create mode 100644 android/app/src/main/java/com/noop/widget/VictorQuickWidgetReceiver.kt
+ create mode 100644 android/app/src/main/java/com/noop/widget/VictorWidgetAction.kt
+ create mode 100644 android/app/src/main/res/values-es/strings_victor_widget.xml
+ create mode 100644 android/app/src/main/res/values/strings_victor_widget.xml
+ create mode 100644 android/app/src/main/res/xml/victor_quick_widget_info.xml
+
+diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
+index 588639d68..1b886a675 100644
+--- a/android/app/src/main/AndroidManifest.xml
++++ b/android/app/src/main/AndroidManifest.xml
+@@ -298,6 +298,19 @@
+                 android:resource="@xml/noop_compact_widget_info" />
+         </receiver>
+ 
++        <!-- victor:widget — 3x3 quick widget with Food and Workout buttons; the 2x2 stays as it is. -->
++        <receiver
++            android:name="com.noop.widget.VictorQuickWidgetReceiver"
++            android:exported="true"
++            android:label="@string/victor_widget_quick_name">
++            <intent-filter>
++                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
++            </intent-filter>
++            <meta-data
++                android:name="android.appwidget.provider"
++                android:resource="@xml/victor_quick_widget_info" />
++        </receiver>
++
+         <!-- Heart-rate widget (#1957): live bpm with the last three hours as a trace. Same snapshot
+              source as the score widgets; the trace is a Bitmap because Glance cannot draw one. -->
+         <receiver
+diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+index a9d0582ca..400c2f24e 100644
+--- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
++++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+@@ -170,6 +170,11 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+         if (FoodImage.cameraPermissionNeeded(ctx)) cameraPermission.launch(Manifest.permission.CAMERA) else launchCamera()
+     }
+     fun startGallery() = pickPhotos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
++    // victor:widget — the widget's Food button lands here and goes straight to the camera.
++    val widgetAction by com.noop.widget.VictorWidgetAction.pending.collectAsStateWithLifecycle()
++    LaunchedEffect(widgetAction) {
++        if (com.noop.widget.VictorWidgetAction.consume(com.noop.widget.VictorWidgetAction.FOOD_PHOTO)) startCamera()
++    }
+ 
+     var confirmDelete by remember { mutableStateOf<FoodEntry?>(null) }
+     var confirmUnfavorite by remember { mutableStateOf<FoodFavorite?>(null) }
+diff --git a/android/app/src/main/java/com/noop/ui/AppRoot.kt b/android/app/src/main/java/com/noop/ui/AppRoot.kt
+index af0006ab1..352662984 100644
+--- a/android/app/src/main/java/com/noop/ui/AppRoot.kt
++++ b/android/app/src/main/java/com/noop/ui/AppRoot.kt
+@@ -72,6 +72,7 @@ import androidx.compose.ui.window.DialogProperties
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.collectAsState
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
+@@ -515,6 +516,14 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
+     val currentRoute = backStack?.destination?.route
+     val current = Destination.forRoute(currentRoute)
+     var showQuickActions by remember { mutableStateOf(false) }
++    // victor:widget — a widget button opens its screen; the screen itself takes the action (once).
++    val widgetAction by com.noop.widget.VictorWidgetAction.pending.collectAsState()
++    LaunchedEffect(widgetAction) {
++        when (widgetAction) {
++            com.noop.widget.VictorWidgetAction.FOOD_PHOTO -> nav.navigateTopLevel(Destination.Food.route)
++            com.noop.widget.VictorWidgetAction.TRAINING -> nav.navigateTopLevel(Destination.Workouts.route)
++        }
++    }
+     // The Updates inbox sheet (opened by the Today header bell). The store is a process singleton so
+     // the Today cards and the import path post to the same inbox this sheet renders.
+     val context = androidx.compose.ui.platform.LocalContext.current
+diff --git a/android/app/src/main/java/com/noop/ui/MainActivity.kt b/android/app/src/main/java/com/noop/ui/MainActivity.kt
+index f1f032e21..ca9474437 100644
+--- a/android/app/src/main/java/com/noop/ui/MainActivity.kt
++++ b/android/app/src/main/java/com/noop/ui/MainActivity.kt
+@@ -62,6 +62,13 @@ class MainActivity : ComponentActivity() {
+         super.attachBaseContext(AppLanguagePrefs.wrap(newBase))
+     }
+ 
++    // victor:widget — a widget button while the app is already open arrives here (single-top launch).
++    override fun onNewIntent(intent: Intent) {
++        super.onNewIntent(intent)
++        setIntent(intent)
++        com.noop.widget.VictorWidgetAction.accept(intent)
++    }
++
+     private val permissionLauncher =
+         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+             // Permission results flow back into the BLE client's own runtime checks;
+@@ -70,6 +77,7 @@ class MainActivity : ComponentActivity() {
+ 
+     override fun onCreate(savedInstanceState: Bundle?) {
+         super.onCreate(savedInstanceState)
++        if (savedInstanceState == null) com.noop.widget.VictorWidgetAction.accept(intent)   // victor:widget
+         WindowCompat.setDecorFitsSystemWindows(window, false)
+         // NOTE: `crash` stays RAW here on purpose. acknowledge() fingerprints what it is given, and
+         // pendingCrash() fingerprints the stored file — hand it redacted text and the two hashes never
+diff --git a/android/app/src/main/java/com/noop/ui/WorkoutStart.kt b/android/app/src/main/java/com/noop/ui/WorkoutStart.kt
+index 042f1fe5e..1d1ed5ab6 100644
+--- a/android/app/src/main/java/com/noop/ui/WorkoutStart.kt
++++ b/android/app/src/main/java/com/noop/ui/WorkoutStart.kt
+@@ -187,7 +187,7 @@ private fun StartSportRow(sp: Sport, isSelected: Boolean, onPick: () -> Unit) {
+  * a live session needs the strap to stream). Workouts supplies Add; Today omits manual entry.
+  */
+ @Composable
+-fun WorkoutStartSection(vm: AppViewModel, onAdd: (() -> Unit)? = null) {
++fun WorkoutStartSection(vm: AppViewModel, onAdd: (() -> Unit)? = null, takesWidgetAction: Boolean = false) {
+     val live by vm.live.collectAsStateWithLifecycle()
+     val activeWorkout by vm.activeWorkout.collectAsStateWithLifecycle()
+     var showSportPicker by remember { mutableStateOf(false) }
+@@ -197,6 +197,13 @@ fun WorkoutStartSection(vm: AppViewModel, onAdd: (() -> Unit)? = null) {
+     // moment a workout begins; this re-entry lets the user re-open it from the compact banner after
+     // dismissing. Closing just hides the overlay — the workout keeps recording in the background.
+     var showLiveWorkout by remember { mutableStateOf(false) }
++    // victor:widget — the widget's Workout button: the running workout if there is one, else the sheet.
++    val widgetAction by com.noop.widget.VictorWidgetAction.pending.collectAsStateWithLifecycle()
++    LaunchedEffect(widgetAction) {
++        if (takesWidgetAction && com.noop.widget.VictorWidgetAction.consume(com.noop.widget.VictorWidgetAction.TRAINING)) {
++            if (activeWorkout != null) showLiveWorkout = true else showTraining = true
++        }
++    }
+ 
+     val w = activeWorkout
+     if (w != null) {
+diff --git a/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt b/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt
+index 8a1b02419..f6d5adca9 100644
+--- a/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt
+@@ -277,7 +277,7 @@ fun WorkoutsScreen(vm: AppViewModel) {
+         // Start (or stop) a workout right here, not only on Live — mirrors the Live control (#115).
+         // Start + Add sit side-by-side as an action row when a strap is bonded (EXP-018 parity).
+         item {
+-        WorkoutStartSection(vm, onAdd = { training = true })
++        WorkoutStartSection(vm, onAdd = { training = true }, takesWidgetAction = true)
+         }
+ 
+         if (allRows.isEmpty()) {
+diff --git a/android/app/src/main/java/com/noop/widget/VictorQuickGlanceWidget.kt b/android/app/src/main/java/com/noop/widget/VictorQuickGlanceWidget.kt
+new file mode 100644
+index 000000000..8fe35f8b4
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/widget/VictorQuickGlanceWidget.kt
+@@ -0,0 +1,190 @@
++package com.noop.widget
++
++import android.content.Context
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.unit.TextUnit
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import androidx.glance.GlanceId
++import androidx.glance.GlanceModifier
++import androidx.glance.LocalContext
++import androidx.glance.action.actionStartActivity
++import androidx.glance.action.clickable
++import androidx.glance.appwidget.GlanceAppWidget
++import androidx.glance.appwidget.cornerRadius
++import androidx.glance.appwidget.provideContent
++import androidx.glance.background
++import androidx.glance.layout.Alignment
++import androidx.glance.layout.Box
++import androidx.glance.layout.Column
++import androidx.glance.layout.Row
++import androidx.glance.layout.Spacer
++import androidx.glance.layout.fillMaxSize
++import androidx.glance.layout.fillMaxWidth
++import androidx.glance.layout.height
++import androidx.glance.layout.padding
++import androidx.glance.layout.width
++import androidx.glance.semantics.contentDescription
++import androidx.glance.semantics.semantics
++import androidx.glance.text.FontWeight
++import androidx.glance.text.Text
++import androidx.glance.text.TextAlign
++import androidx.glance.text.TextStyle
++import androidx.glance.unit.ColorProvider
++import com.noop.R
++import com.noop.analytics.ClockFormat
++import com.noop.ui.ClockPrefs
++import com.noop.ui.MainActivity
++import com.noop.ui.uiString
++import java.util.Date
++
++/**
++ * victor:widget — the 3x3 quick widget: Rest · Charge · Effort, live heart rate and strap battery (the
++ * same snapshot as the 2x2 [NoopGlanceWidget], so the same honest "—" before a score exists), plus two
++ * buttons: Food opens the camera for a meal photo, Workout opens the training sheet (or the running
++ * workout). Tapping anywhere else opens the app. Offered as its own picker entry; the 2x2 stays as it is.
++ */
++class VictorQuickGlanceWidget : GlanceAppWidget() {
++
++    override suspend fun provideGlance(context: Context, id: GlanceId) {
++        val snap = runCatching { WidgetSnapshotStore.load(context) }.getOrDefault(WidgetSnapshot())
++        val dark = WidgetTheme.isDark(context)
++        provideContent { QuickContent(snap, dark) }
++    }
++
++    /** Same friendlier fallback as [NoopGlanceWidget.onCompositionError]; heals on the next push. */
++    override fun onCompositionError(context: Context, glanceId: GlanceId, appWidgetId: Int, throwable: Throwable) {
++        runCatching {
++            val rv = android.widget.RemoteViews(context.packageName, R.layout.noop_widget_error)
++            android.appwidget.AppWidgetManager.getInstance(context).updateAppWidget(appWidgetId, rv)
++        }
++    }
++}
++
++// The 2x2 widget's colours (kept local there too: Glance composes outside the app theme).
++private fun surface(dark: Boolean) = ColorProvider(if (dark) Color(0xFF0A1322) else Color(0xFFF4F1EA))
++private fun buttonFill(dark: Boolean) = ColorProvider(if (dark) Color(0xFF1A2940) else Color(0xFFE6DFD1))
++private fun textPrimary(dark: Boolean) = ColorProvider(if (dark) Color(0xFFF4F6F8) else Color(0xFF1A2230))
++private fun textSecondary(dark: Boolean) = ColorProvider(if (dark) Color(0xFF8A94A4) else Color(0xFF7C8696))
++
++private fun bandColor(recovery: Int, dark: Boolean): ColorProvider = ColorProvider(
++    when {
++        recovery >= 67 -> if (dark) Color(0xFFE8B84B) else Color(0xFFB07D17)
++        recovery >= 34 -> if (dark) Color(0xFFD98A3D) else Color(0xFFC2792E)
++        else -> if (dark) Color(0xFFE0662F) else Color(0xFFC84E1E)
++    },
++)
++
++private fun effortColor(dark: Boolean) = ColorProvider(if (dark) Color(0xFF4FB6A8) else Color(0xFF2E7D74))
++
++@Composable
++private fun QuickContent(snap: WidgetSnapshot, dark: Boolean) {
++    val context = LocalContext.current
++    val secondary = textSecondary(dark)
++    val primary = textPrimary(dark)
++    Column(
++        modifier = GlanceModifier
++            .fillMaxSize()
++            .background(surface(dark))
++            .cornerRadius(20.dp)
++            .clickable(actionStartActivity<MainActivity>())
++            .padding(horizontal = 12.dp, vertical = 12.dp),
++        horizontalAlignment = Alignment.CenterHorizontally,
++    ) {
++        Spacer(GlanceModifier.defaultWeight())
++        Row(modifier = GlanceModifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
++            Score(
++                uiString(R.string.l10n_noop_glance_widget_rest_cbaaa181), snap.restPct,
++                snap.restPct?.let { bandColor(it, dark) } ?: secondary, 30.sp, secondary,
++                GlanceModifier.defaultWeight(),
++            )
++            Score(
++                uiString(R.string.l10n_noop_glance_widget_charge_49a8cb83), snap.recoveryPct,
++                snap.recoveryPct?.let { bandColor(it, dark) } ?: secondary, 40.sp, secondary,
++                GlanceModifier.defaultWeight(),
++            )
++            Score(
++                uiString(R.string.l10n_noop_glance_widget_effort_660752e7), snap.effortPct,
++                snap.effortPct?.let { effortColor(dark) } ?: secondary, 30.sp, secondary,
++                GlanceModifier.defaultWeight(),
++            )
++        }
++        Spacer(GlanceModifier.height(14.dp))
++        val hrLabel = uiString(R.string.l10n_noop_glance_widget_heart_rate_410aa15c)
++        val batteryLabel = uiString(R.string.l10n_noop_glance_widget_strap_battery_a6c7f09c)
++        val hrDescription = snap.heartRate
++            ?.let { "$hrLabel ${uiString(R.string.l10n_today_screen_value_bpm_8f3a90c3, it)}" } ?: hrLabel
++        val batteryDescription = snap.batteryPct
++            ?.let { "$batteryLabel ${uiString(R.string.l10n_today_screen_pct_ee63e247, it)}" } ?: batteryLabel
++        Row(verticalAlignment = Alignment.CenterVertically) {
++            Text(
++                text = snap.heartRate?.let { "♥ $it" } ?: "♥ —",
++                // A carried-over reading is dimmed so it can't pass for a live one (as on the 2x2).
++                style = TextStyle(color = if (snap.heartRateStale) secondary else primary, fontSize = 20.sp, fontWeight = FontWeight.Medium),
++                modifier = GlanceModifier.semantics { contentDescription = hrDescription },
++            )
++            Spacer(GlanceModifier.width(20.dp))
++            Text(
++                text = snap.batteryPct?.let { "⚡ $it%" } ?: "⚡ —",
++                style = TextStyle(color = primary, fontSize = 20.sp, fontWeight = FontWeight.Medium),
++                modifier = GlanceModifier.semantics { contentDescription = batteryDescription },
++            )
++        }
++        Spacer(GlanceModifier.defaultWeight())
++        Row(modifier = GlanceModifier.fillMaxWidth()) {
++            ActionButton(
++                uiString(R.string.victor_widget_food), dark,
++                VictorWidgetAction.intent(context, VictorWidgetAction.FOOD_PHOTO), GlanceModifier.defaultWeight(),
++            )
++            Spacer(GlanceModifier.width(8.dp))
++            ActionButton(
++                uiString(R.string.victor_widget_training), dark,
++                VictorWidgetAction.intent(context, VictorWidgetAction.TRAINING), GlanceModifier.defaultWeight(),
++            )
++        }
++        Spacer(GlanceModifier.height(6.dp))
++        Text(
++            text = when {
++                snap.connected -> uiString(R.string.victor_widget_connected)
++                snap.updatedAtMs > 0L -> java.text.SimpleDateFormat(
++                    ClockFormat.hourMinutePattern(ClockPrefs.uses24Hour(context)), java.util.Locale.getDefault(),
++                ).format(Date(snap.updatedAtMs))
++                else -> uiString(R.string.victor_widget_open_app)
++            },
++            style = TextStyle(color = secondary, fontSize = 11.sp),
++        )
++    }
++}
++
++@Composable
++private fun Score(
++    label: String,
++    pct: Int?,
++    color: ColorProvider,
++    valueSize: TextUnit,
++    secondary: ColorProvider,
++    modifier: GlanceModifier,
++) {
++    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
++        Text(text = label, style = TextStyle(color = secondary, fontSize = 12.sp, fontWeight = FontWeight.Medium))
++        Text(text = pct?.let { "$it%" } ?: "—", style = TextStyle(color = color, fontSize = valueSize, fontWeight = FontWeight.Bold))
++    }
++}
++
++@Composable
++private fun ActionButton(label: String, dark: Boolean, intent: android.content.Intent, modifier: GlanceModifier) {
++    Box(
++        modifier = modifier
++            .height(56.dp)
++            .background(buttonFill(dark))
++            .cornerRadius(14.dp)
++            .clickable(androidx.glance.appwidget.action.actionStartActivity(intent)),
++        contentAlignment = Alignment.Center,
++    ) {
++        Text(
++            text = label,
++            style = TextStyle(color = textPrimary(dark), fontSize = 17.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center),
++        )
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/widget/VictorQuickWidgetReceiver.kt b/android/app/src/main/java/com/noop/widget/VictorQuickWidgetReceiver.kt
+new file mode 100644
+index 000000000..9a97b88cf
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/widget/VictorQuickWidgetReceiver.kt
+@@ -0,0 +1,9 @@
++package com.noop.widget
++
++import androidx.glance.appwidget.GlanceAppWidget
++import androidx.glance.appwidget.GlanceAppWidgetReceiver
++
++/** victor:widget — manifest entry point for the quick widget; rendering lives in [VictorQuickGlanceWidget]. */
++class VictorQuickWidgetReceiver : GlanceAppWidgetReceiver() {
++    override val glanceAppWidget: GlanceAppWidget = VictorQuickGlanceWidget()
++}
+diff --git a/android/app/src/main/java/com/noop/widget/VictorWidgetAction.kt b/android/app/src/main/java/com/noop/widget/VictorWidgetAction.kt
+new file mode 100644
+index 000000000..4701e98fe
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/widget/VictorWidgetAction.kt
+@@ -0,0 +1,39 @@
++package com.noop.widget
++
++import android.content.Context
++import android.content.Intent
++import android.net.Uri
++import com.noop.ui.appLaunchIntent
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++
++/**
++ * victor:widget — what a button on the quick widget asked the app to open: the food camera or the
++ * training sheet. MainActivity hands the launch intent here, AppRoot navigates to the screen, and that
++ * screen takes the action exactly once ([consume]), so a recomposition or a rotation never re-opens it.
++ */
++object VictorWidgetAction {
++    const val FOOD_PHOTO = "food_photo"
++    const val TRAINING = "training"
++    private const val EXTRA = "com.noop.widget.VICTOR_ACTION"
++
++    private val _pending = MutableStateFlow<String?>(null)
++    val pending: StateFlow<String?> = _pending
++
++    /** The intent a widget button fires: the launcher entry (reuses the running app) plus the action. A
++     *  distinct data URI per action keeps the two buttons' PendingIntents apart. */
++    fun intent(context: Context, action: String): Intent =
++        appLaunchIntent(context).apply {
++            data = Uri.parse("noop-widget://$action")
++            putExtra(EXTRA, action)
++        }
++
++    fun accept(intent: Intent?) {
++        val action = intent?.getStringExtra(EXTRA) ?: return
++        if (action == FOOD_PHOTO || action == TRAINING) _pending.value = action
++        intent.removeExtra(EXTRA)
++    }
++
++    /** True once, for the screen that acts on [action]. */
++    fun consume(action: String): Boolean = _pending.compareAndSet(action, null)
++}
+diff --git a/android/app/src/main/java/com/noop/widget/WidgetSnapshot.kt b/android/app/src/main/java/com/noop/widget/WidgetSnapshot.kt
+index 543f313bc..2d3211a75 100644
+--- a/android/app/src/main/java/com/noop/widget/WidgetSnapshot.kt
++++ b/android/app/src/main/java/com/noop/widget/WidgetSnapshot.kt
+@@ -105,7 +105,10 @@ object WidgetSnapshotStore {
+         val stressIds = runCatching {
+             GlanceAppWidgetManager(app).getGlanceIds(StressGlanceWidget::class.java)
+         }.getOrDefault(emptyList())
+-        if (standardIds.isEmpty() && compactIds.isEmpty() && hrIds.isEmpty() && stressIds.isEmpty()) {
++        val quickIds = runCatching {   // victor:widget
++            GlanceAppWidgetManager(app).getGlanceIds(VictorQuickGlanceWidget::class.java)
++        }.getOrDefault(emptyList())
++        if (standardIds.isEmpty() && compactIds.isEmpty() && hrIds.isEmpty() && stressIds.isEmpty() && quickIds.isEmpty()) {
+             // Admitted, but there is nowhere for it to go. Recorded rather than returned silently: an
+             // export taken with the widget removed is half of the comparison that answers whether it
+             // costs anything, and counting this as a send would have made both halves look alike.
+@@ -140,6 +143,7 @@ object WidgetSnapshotStore {
+         if (compactIds.isNotEmpty()) runCatching { NoopCompactGlanceWidget().updateAll(app) }
+         if (hrIds.isNotEmpty()) runCatching { HrGlanceWidget().updateAll(app) }
+         if (stressIds.isNotEmpty()) runCatching { StressGlanceWidget().updateAll(app) }
++        if (quickIds.isNotEmpty()) runCatching { VictorQuickGlanceWidget().updateAll(app) }   // victor:widget
+     }
+ 
+     /**
+diff --git a/android/app/src/main/res/values-es/strings_victor_widget.xml b/android/app/src/main/res/values-es/strings_victor_widget.xml
+new file mode 100644
+index 000000000..0b7a43329
+--- /dev/null
++++ b/android/app/src/main/res/values-es/strings_victor_widget.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- victor:widget — the 3x3 quick widget with Food and Workout buttons (fork-owned strings). -->
++<resources>
++    <string name="victor_widget_quick_name">NOOP con botones</string>
++    <string name="victor_widget_quick_description">Descanso, carga, esfuerzo, pulso y batería, con botones para foto de comida y entreno</string>
++    <string name="victor_widget_food">📷 Comida</string>
++    <string name="victor_widget_training">🏋️ Entreno</string>
++    <string name="victor_widget_connected">Conectada</string>
++    <string name="victor_widget_open_app">Abre NOOP para conectar</string>
++</resources>
+diff --git a/android/app/src/main/res/values/strings_victor_widget.xml b/android/app/src/main/res/values/strings_victor_widget.xml
+new file mode 100644
+index 000000000..bbf14e6bf
+--- /dev/null
++++ b/android/app/src/main/res/values/strings_victor_widget.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- victor:widget — the 3x3 quick widget with Food and Workout buttons (fork-owned strings). -->
++<resources>
++    <string name="victor_widget_quick_name">NOOP + buttons</string>
++    <string name="victor_widget_quick_description">Rest, charge, effort, heart rate and battery, with buttons for a meal photo and a workout</string>
++    <string name="victor_widget_food">📷 Food</string>
++    <string name="victor_widget_training">🏋️ Workout</string>
++    <string name="victor_widget_connected">Connected</string>
++    <string name="victor_widget_open_app">Open NOOP to connect</string>
++</resources>
+diff --git a/android/app/src/main/res/xml/victor_quick_widget_info.xml b/android/app/src/main/res/xml/victor_quick_widget_info.xml
+new file mode 100644
+index 000000000..9035c8a73
+--- /dev/null
++++ b/android/app/src/main/res/xml/victor_quick_widget_info.xml
+@@ -0,0 +1,13 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- victor:widget — 3x3 quick widget. updatePeriodMillis=0: the app pushes updates through
++     WidgetSnapshotStore, exactly as for the 2x2 (#516). -->
++<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
++    android:description="@string/victor_widget_quick_description"
++    android:minWidth="180dp"
++    android:minHeight="180dp"
++    android:targetCellWidth="3"
++    android:targetCellHeight="3"
++    android:resizeMode="horizontal|vertical"
++    android:widgetCategory="home_screen"
++    android:updatePeriodMillis="0"
++    android:initialLayout="@layout/glance_default_loading_layout" />
+-- 
+2.54.0
+

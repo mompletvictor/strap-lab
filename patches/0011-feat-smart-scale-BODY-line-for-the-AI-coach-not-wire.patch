@@ -20,7 +20,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 
 diff --git a/android/app/src/main/java/com/noop/ai/ScaleCoachContext.kt b/android/app/src/main/java/com/noop/ai/ScaleCoachContext.kt
 new file mode 100644
-index 00000000..e1198114
+index 000000000..e1198114c
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/ai/ScaleCoachContext.kt
 @@ -0,0 +1,56 @@
@@ -82,7 +82,7 @@ index 00000000..e1198114
 +}
 diff --git a/android/app/src/test/java/com/noop/ai/ScaleCoachContextTest.kt b/android/app/src/test/java/com/noop/ai/ScaleCoachContextTest.kt
 new file mode 100644
-index 00000000..0c7b5b4a
+index 000000000..0c7b5b4a1
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/ai/ScaleCoachContextTest.kt
 @@ -0,0 +1,88 @@

@@ -12,7 +12,7 @@ update path.
  1 file changed, 2 insertions(+), 1 deletion(-)
 
 diff --git a/android/app/src/main/java/com/noop/update/UpdateCheck.kt b/android/app/src/main/java/com/noop/update/UpdateCheck.kt
-index 66948fc2..136516b5 100644
+index 66948fc25..136516b5c 100644
 --- a/android/app/src/main/java/com/noop/update/UpdateCheck.kt
 +++ b/android/app/src/main/java/com/noop/update/UpdateCheck.kt
 @@ -24,7 +24,8 @@ import java.net.URL

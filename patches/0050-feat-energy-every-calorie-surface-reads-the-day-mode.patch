@@ -37,7 +37,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
  11 files changed, 115 insertions(+), 32 deletions(-)
 
 diff --git a/android/app/src/main/java/com/noop/NoopApplication.kt b/android/app/src/main/java/com/noop/NoopApplication.kt
-index 0ca9158e..fb53a9ed 100644
+index 0ca9158ea..fb53a9ed0 100644
 --- a/android/app/src/main/java/com/noop/NoopApplication.kt
 +++ b/android/app/src/main/java/com/noop/NoopApplication.kt
 @@ -46,6 +46,7 @@ class NoopApplication : Application() {
@@ -49,7 +49,7 @@ index 0ca9158e..fb53a9ed 100644
          // recovery screen on the next launch.
          CrashCapture.install(this)
 diff --git a/android/app/src/main/java/com/noop/ai/AiCoach.kt b/android/app/src/main/java/com/noop/ai/AiCoach.kt
-index 33d4888f..82a089d7 100644
+index 33d4888f9..82a089d78 100644
 --- a/android/app/src/main/java/com/noop/ai/AiCoach.kt
 +++ b/android/app/src/main/java/com/noop/ai/AiCoach.kt
 @@ -131,7 +131,7 @@ class AiCoach(
@@ -120,7 +120,7 @@ index 33d4888f..82a089d7 100644
      }
  
 diff --git a/android/app/src/main/java/com/noop/data/WhoopRepository.kt b/android/app/src/main/java/com/noop/data/WhoopRepository.kt
-index 8c7bdd3e..2add7b61 100644
+index 8c7bdd3e2..2add7b61d 100644
 --- a/android/app/src/main/java/com/noop/data/WhoopRepository.kt
 +++ b/android/app/src/main/java/com/noop/data/WhoopRepository.kt
 @@ -2239,6 +2239,10 @@ class WhoopRepository(
@@ -135,7 +135,7 @@ index 8c7bdd3e..2add7b61 100644
          val points = resolveFirstWins(perCandidate).let { p ->   // victor:training — the gym extra, as the merged readers carry it
              if (key != "strain") p else p.map { it.copy(value = com.noop.training.VictorDayEffort.onDay(it.day, it.value, com.noop.training.VictorDayEffort.boosts.value)) }
 diff --git a/android/app/src/main/java/com/noop/training/TrainingSuggestContext.kt b/android/app/src/main/java/com/noop/training/TrainingSuggestContext.kt
-index a2379f39..59bc378b 100644
+index a2379f39e..59bc378b0 100644
 --- a/android/app/src/main/java/com/noop/training/TrainingSuggestContext.kt
 +++ b/android/app/src/main/java/com/noop/training/TrainingSuggestContext.kt
 @@ -22,7 +22,7 @@ internal object TrainingSuggestContext {
@@ -148,7 +148,7 @@ index a2379f39..59bc378b 100644
              runCatching { VictorCoachExtras.block(ctx, repo, strapId) }.getOrNull()?.let { append("\n\n").append(it) }
          }
 diff --git a/android/app/src/main/java/com/noop/ui/AppViewModel.kt b/android/app/src/main/java/com/noop/ui/AppViewModel.kt
-index 76784f9f..b87246ea 100644
+index 76784f9f6..b87246ea9 100644
 --- a/android/app/src/main/java/com/noop/ui/AppViewModel.kt
 +++ b/android/app/src/main/java/com/noop/ui/AppViewModel.kt
 @@ -2120,7 +2120,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -162,7 +162,7 @@ index 76784f9f..b87246ea 100644
              // Post-workout summary (#517) — opt-in, default OFF. The newest session (by start) drives a
              // one-shot Effort + duration + avg-HR notification when it's strictly newer than the last one
 diff --git a/android/app/src/main/java/com/noop/ui/CoupledScreen.kt b/android/app/src/main/java/com/noop/ui/CoupledScreen.kt
-index b85e871f..c92b180d 100644
+index b85e871ff..c92b180db 100644
 --- a/android/app/src/main/java/com/noop/ui/CoupledScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/CoupledScreen.kt
 @@ -143,6 +143,12 @@ fun CoupledScreen(
@@ -188,7 +188,7 @@ index b85e871f..c92b180d 100644
          )
          SleepCard(
 diff --git a/android/app/src/main/java/com/noop/ui/HealthScreen.kt b/android/app/src/main/java/com/noop/ui/HealthScreen.kt
-index 74792a32..5ebb7d84 100644
+index 74792a32a..5ebb7d841 100644
 --- a/android/app/src/main/java/com/noop/ui/HealthScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/HealthScreen.kt
 @@ -2644,21 +2644,17 @@ internal suspend fun buildSeriesVitalDetail(vm: AppViewModel, key: String): Vita
@@ -217,7 +217,7 @@ index 74792a32..5ebb7d84 100644
          )
      }
 diff --git a/android/app/src/main/java/com/noop/ui/SettingsScreen.kt b/android/app/src/main/java/com/noop/ui/SettingsScreen.kt
-index 2938993d..e1132200 100644
+index 2938993d0..e1132200b 100644
 --- a/android/app/src/main/java/com/noop/ui/SettingsScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/SettingsScreen.kt
 @@ -226,6 +226,12 @@ class ProfileStore(private val prefs: SharedPreferences) {
@@ -234,7 +234,7 @@ index 2938993d..e1132200 100644
       * Opt-in "Use weight from Health Connect", OFF by default. When ON, every Health Connect import
       * copies the newest Health Connect weight into [weightKg] ([HealthConnectWeightSync]) and Settings
 diff --git a/android/app/src/main/java/com/noop/ui/TodayScreen.kt b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
-index 1cbe0528..525e8bd1 100644
+index 1cbe05284..525e8bd10 100644
 --- a/android/app/src/main/java/com/noop/ui/TodayScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
 @@ -687,17 +687,14 @@ fun TodayScreen(
@@ -262,7 +262,7 @@ index 1cbe0528..525e8bd1 100644
      }
  
 diff --git a/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt b/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt
-index 659c9b4b..8a1b0241 100644
+index 659c9b4b4..8a1b02419 100644
 --- a/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt
 @@ -315,7 +315,7 @@ fun WorkoutsScreen(vm: AppViewModel) {
@@ -307,7 +307,7 @@ index 659c9b4b..8a1b0241 100644
      }
  }
 diff --git a/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt b/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
-index 75f4f6a4..da5a22ae 100644
+index 75f4f6a44..da5a22ae6 100644
 --- a/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
 +++ b/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
 @@ -23,6 +23,9 @@ class VictorWiringAuditTest {

@@ -35,7 +35,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 android/app/src/test/java/com/noop/tasker/TaskerBridgeTest.kt
 
 diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
-index 274ae96a..7d91c7ba 100644
+index 274ae96ac..7d91c7ba8 100644
 --- a/android/app/src/main/AndroidManifest.xml
 +++ b/android/app/src/main/AndroidManifest.xml
 @@ -345,6 +345,16 @@
@@ -56,7 +56,7 @@ index 274ae96a..7d91c7ba 100644
               edge of the window (or earlier if the light-sleep watcher advanced it); it raises a
               full-screen alarm notification with sound + vibration. Not exported — only our own
 diff --git a/android/app/src/main/java/com/noop/NoopApplication.kt b/android/app/src/main/java/com/noop/NoopApplication.kt
-index 11706b06..9f1ee809 100644
+index 11706b062..9f1ee8098 100644
 --- a/android/app/src/main/java/com/noop/NoopApplication.kt
 +++ b/android/app/src/main/java/com/noop/NoopApplication.kt
 @@ -133,6 +133,7 @@ class NoopApplication : Application() {
@@ -69,7 +69,7 @@ index 11706b06..9f1ee809 100644
              // #1881: the same fact seeds the connect gate, closing the launch race where the radio can
 diff --git a/android/app/src/main/java/com/noop/tasker/TaskerBridge.kt b/android/app/src/main/java/com/noop/tasker/TaskerBridge.kt
 new file mode 100644
-index 00000000..e768d058
+index 000000000..e768d058f
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/tasker/TaskerBridge.kt
 @@ -0,0 +1,119 @@
@@ -194,7 +194,7 @@ index 00000000..e768d058
 +}
 diff --git a/android/app/src/main/java/com/noop/tasker/TaskerBuzzReceiver.kt b/android/app/src/main/java/com/noop/tasker/TaskerBuzzReceiver.kt
 new file mode 100644
-index 00000000..5fbf1276
+index 000000000..5fbf12763
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/tasker/TaskerBuzzReceiver.kt
 @@ -0,0 +1,20 @@
@@ -219,7 +219,7 @@ index 00000000..5fbf1276
 +    }
 +}
 diff --git a/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt b/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt
-index 729f90e8..d77d799e 100644
+index 729f90e89..d77d799ed 100644
 --- a/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt
 +++ b/android/app/src/main/java/com/noop/ui/AutomationsScreen.kt
 @@ -369,6 +369,9 @@ fun AutomationsScreen(viewModel: AppViewModel) {
@@ -234,7 +234,7 @@ index 729f90e8..d77d799e 100644
  
 diff --git a/android/app/src/main/java/com/noop/ui/TaskerSection.kt b/android/app/src/main/java/com/noop/ui/TaskerSection.kt
 new file mode 100644
-index 00000000..fce8de12
+index 000000000..fce8de127
 --- /dev/null
 +++ b/android/app/src/main/java/com/noop/ui/TaskerSection.kt
 @@ -0,0 +1,99 @@
@@ -339,7 +339,7 @@ index 00000000..fce8de12
 +}
 diff --git a/android/app/src/main/res/values-es/strings_victor.xml b/android/app/src/main/res/values-es/strings_victor.xml
 new file mode 100644
-index 00000000..c9386c2a
+index 000000000..c9386c2a3
 --- /dev/null
 +++ b/android/app/src/main/res/values-es/strings_victor.xml
 @@ -0,0 +1,15 @@
@@ -360,7 +360,7 @@ index 00000000..c9386c2a
 +</resources>
 diff --git a/android/app/src/main/res/values/strings_victor.xml b/android/app/src/main/res/values/strings_victor.xml
 new file mode 100644
-index 00000000..600d168f
+index 000000000..600d168f7
 --- /dev/null
 +++ b/android/app/src/main/res/values/strings_victor.xml
 @@ -0,0 +1,15 @@
@@ -381,7 +381,7 @@ index 00000000..600d168f
 +</resources>
 diff --git a/android/app/src/test/java/com/noop/tasker/TaskerBridgeTest.kt b/android/app/src/test/java/com/noop/tasker/TaskerBridgeTest.kt
 new file mode 100644
-index 00000000..0adc8813
+index 000000000..0adc88136
 --- /dev/null
 +++ b/android/app/src/test/java/com/noop/tasker/TaskerBridgeTest.kt
 @@ -0,0 +1,56 @@

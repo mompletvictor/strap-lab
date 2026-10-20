@@ -27,7 +27,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  4 files changed, 321 insertions(+), 150 deletions(-)
 
 diff --git a/android/app/src/main/java/com/noop/day/DayAgenda.kt b/android/app/src/main/java/com/noop/day/DayAgenda.kt
-index 7f5114c2..6d824e61 100644
+index 7f5114c22..6d824e614 100644
 --- a/android/app/src/main/java/com/noop/day/DayAgenda.kt
 +++ b/android/app/src/main/java/com/noop/day/DayAgenda.kt
 @@ -12,8 +12,11 @@ import java.time.LocalDate
@@ -108,7 +108,7 @@ index 7f5114c2..6d824e61 100644
      internal fun inDayOrder(events: List<AgendaEvent>): List<AgendaEvent> =
          events.sortedWith(compareBy<AgendaEvent> { !it.allDay }.thenBy { it.begin }.thenBy { it.title })
 diff --git a/android/app/src/main/java/com/noop/day/DayCalendarViews.kt b/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
-index 852e20da..39f3b1e9 100644
+index 852e20da0..39f3b1e99 100644
 --- a/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
 +++ b/android/app/src/main/java/com/noop/day/DayCalendarViews.kt
 @@ -1,7 +1,30 @@
@@ -411,7 +411,7 @@ index 852e20da..39f3b1e9 100644
  /** victor:day — the Google Tasks block when there is no list to show: connect, reconnect, loading, failed. */
  @Composable
 diff --git a/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
-index 503a12da..68eb73ac 100644
+index 503a12da4..68eb73ac4 100644
 --- a/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
 +++ b/android/app/src/main/java/com/noop/day/TodayMyDaySection.kt
 @@ -15,6 +15,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
@@ -629,7 +629,7 @@ index 503a12da..68eb73ac 100644
  @Composable
  private fun Block(icon: ImageVector, onClick: () -> Unit, onLongClick: (() -> Unit)? = null, content: @Composable () -> Unit) {
 diff --git a/android/app/src/test/java/com/noop/day/DayCalendarTest.kt b/android/app/src/test/java/com/noop/day/DayCalendarTest.kt
-index e2bfa35a..cb70162d 100644
+index e2bfa35a1..cb70162d4 100644
 --- a/android/app/src/test/java/com/noop/day/DayCalendarTest.kt
 +++ b/android/app/src/test/java/com/noop/day/DayCalendarTest.kt
 @@ -58,4 +58,31 @@ class DayCalendarTest {

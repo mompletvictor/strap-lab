@@ -1,0 +1,1325 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 19:55:51 +0200
+Subject: [PATCH] fix(rest): Rest's regularity is the bedtime regularity the
+ Consistency card shows
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The regularity in each night's stored Rest (and so its Charge) is now the bedtime
+regularity of the «Consistencia» card, from one resolver both read
+(VictorSleepNeed.bedtimeRegularity), not the duration variability.
+
+Night D: 1 - SD(bedtime) / 120 min, clamped to 0..1, over the main-night bedtimes of
+the last 14 nights within the 28 days up to D (3 at least); WHOOP's imported
+sleep_consistency still wins its night. Fixed in that one place, from the card's own
+per-session score:
+- one bedtime per night, the day's main night (bridged), so naps no longer count as
+  bedtimes (a 40-minute nap every third afternoon took a regular sleeper's card to 0);
+- a 28-day bound, so a gap in wear never reaches a stale month;
+- circular SD, so bedtimes either side of midnight or noon read minutes apart (the old
+  fold put an 11:30 day-sleep bedtime on the next day);
+- each night on its own clock (DST), with no learned habitual time in the main-night
+  pick, so the pass and the screens cannot pick differently;
+- the card speaks for the latest night only; no other night's value stands in.
+
+The pass resolves it from the sessions as they will read once it has banked its own
+(WhoopRepository.sleepsMergedWith, the same upsert policy) and publishes it; the app
+warms it from the store at start. The card, its detail graph, Rest on every screen,
+Coupled, the weekly digest and Today's drivers read the published figure; Sleep,
+Coupled, Trends and the digest recompose when it changes. Nothing is stored and no
+schema changes. The duration regularity stays only in pass 1's unread DayResult.rest
+and the Vitality age; the old per-session consistencySeries is no longer read.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/main/java/com/noop/NoopApplication.kt |   4 +-
+ .../com/noop/analytics/IntelligenceEngine.kt  |  27 +-
+ .../com/noop/analytics/VictorSleepNeed.kt     | 245 +++++++++++++++---
+ .../java/com/noop/data/WhoopRepository.kt     |  25 ++
+ .../main/java/com/noop/ui/CoupledScreen.kt    |   3 +-
+ .../com/noop/ui/SleepMetricDetailLogic.kt     |  11 +-
+ .../com/noop/ui/SleepMetricDetailSheet.kt     |   5 +-
+ .../main/java/com/noop/ui/SleepModelLogic.kt  |  26 +-
+ .../src/main/java/com/noop/ui/SleepScreen.kt  |   9 +-
+ .../src/main/java/com/noop/ui/TrendsScreen.kt |   5 +-
+ .../main/java/com/noop/ui/WeeklyDigestCard.kt |  12 +-
+ .../noop/analytics/VictorRestImpactTest.kt    | 108 +++++---
+ .../analytics/VictorRestSingleResolverTest.kt |  25 +-
+ .../com/noop/analytics/VictorSleepNeedTest.kt | 183 ++++++++++---
+ .../com/noop/ui/VictorRestAgreementTest.kt    |  68 ++++-
+ 15 files changed, 590 insertions(+), 166 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/NoopApplication.kt b/android/app/src/main/java/com/noop/NoopApplication.kt
+index cb7f0a57f..7cad9f1b9 100644
+--- a/android/app/src/main/java/com/noop/NoopApplication.kt
++++ b/android/app/src/main/java/com/noop/NoopApplication.kt
+@@ -47,7 +47,9 @@ class NoopApplication : Application() {
+         com.noop.day.VictorTodayQuiet.applyOnce(this)   // victor:day
+         com.noop.training.TrainingStore.preload(this)   // victor:training — the day's Effort right from the start
+         com.noop.energy.DayEnergyModel.install(this)   // victor:energy — one energy-out figure for every screen
+-        com.noop.ui.ProfileStore.from(this).let { p -> com.noop.analytics.VictorSleepNeed.ageSource = { p.age } }   // victor:rest
++        com.noop.ui.ProfileStore.from(this).let { p ->   // victor:rest — the sleep need's age, each night's bedtime regularity
++            com.noop.analytics.VictorSleepNeed.install({ p.age }, { repository }, { activeDeviceId })
++        }
+         // Install before any app-owned startup work so even an early failure is preserved for the
+         // recovery screen on the next launch.
+         CrashCapture.install(this)
+diff --git a/android/app/src/main/java/com/noop/analytics/IntelligenceEngine.kt b/android/app/src/main/java/com/noop/analytics/IntelligenceEngine.kt
+index b203fbe2c..b1d7d287d 100644
+--- a/android/app/src/main/java/com/noop/analytics/IntelligenceEngine.kt
++++ b/android/app/src/main/java/com/noop/analytics/IntelligenceEngine.kt
+@@ -1848,7 +1848,7 @@ object IntelligenceEngine {
+         }
+         val restNights = applyPersonalRest(   // victor:rest
+             repo, importedDeviceId, computedId, profile, baselines2, dailies, restRows, out, oldestDay,
+-            sleepTraceSink, recoveryTraceSink,
++            sleepRows, editedRows, sleepTraceSink, recoveryTraceSink,
+         )
+ 
+         // #277 migration: the loop now keys days by the LOCAL calendar day. A prior run (before this
+@@ -2349,13 +2349,15 @@ object IntelligenceEngine {
+     }
+ 
+     /**
+-     * victor:rest — each night this pass scored gets the Rest (Descanso) of ITS personal need and regularity
+-     * ([VictorSleepNeed]) and the Charge (Carga) recomputed with that Rest, both resolved from the merged daily
+-     * history as it will read once the pass is persisted ([WhoopRepository.daysMergedWith]): the Sleep screen
+-     * reads the same history, so it shows the same need and regularity for that night. A stored Rest of an
+-     * older day that no longer matches its night is rewritten too; an older Charge keeps the baselines it was
+-     * scored against, as for any re-score. The Charge trace is emitted here, after the rescoring, plus one
+-     * `rest personal` line per night to the Sleep trace. Returns the nights for the import-only fold.
++     * victor:rest — each night this pass scored gets the Rest (Descanso) of ITS personal need and bedtime
++     * regularity ([VictorSleepNeed]) and the Charge (Carga) recomputed with that Rest. Both are resolved from
++     * the store as it will read once the pass is persisted: the merged daily rows
++     * ([WhoopRepository.daysMergedWith]) for the need, the merged sessions with this pass's [sleepRows]
++     * banked ([VictorSleepNeed.sleepsAfterPass]) for the regularity, which is published for every reader
++     * (the «Consistencia» card among them). A stored Rest of an older day that no longer matches its night
++     * is rewritten too; an older Charge keeps the baselines it was scored against, as for any re-score. The
++     * Charge trace is emitted here, after the rescoring, plus one `rest personal` line per night to the
++     * Sleep trace. Returns the nights for the import-only fold.
+      */
+     internal suspend fun applyPersonalRest(
+         repo: WhoopRepository,
+@@ -2367,11 +2369,18 @@ object IntelligenceEngine {
+         restRows: MutableList<MetricSeriesRow>,
+         out: MutableList<Computed>,
+         oldestDay: String,
++        sleepRows: List<SleepSession>,
++        editedRows: List<SleepSession>,
+         sleepTraceSink: ((String) -> Unit)?,
+         recoveryTraceSink: ((String) -> Unit)?,
+     ): Map<String, VictorSleepNeed.Night> {
++        val regularity = VictorSleepNeed.bedtimeRegularity(
++            VictorSleepNeed.sleepsAfterPass(repo, importedDeviceId, computedId, sleepRows, editedRows),
++            VictorSleepNeed.importedConsistency(repo),
++        )
++        VictorSleepNeed.publishRegularity(regularity)
+         val nights = VictorSleepNeed.resolve(
+-            repo.daysMergedWith(importedDeviceId, computedId, dailies), profile.age.toInt(),
++            repo.daysMergedWith(importedDeviceId, computedId, dailies), regularity, profile.age.toInt(),
+         )
+         val scored = VictorSleepNeed.rescore(nights, computedId, dailies, restRows) { row, rest ->
+             recomputeRecovery(row, baselines, rest)
+diff --git a/android/app/src/main/java/com/noop/analytics/VictorSleepNeed.kt b/android/app/src/main/java/com/noop/analytics/VictorSleepNeed.kt
+index 275890816..4b96cc5be 100644
+--- a/android/app/src/main/java/com/noop/analytics/VictorSleepNeed.kt
++++ b/android/app/src/main/java/com/noop/analytics/VictorSleepNeed.kt
+@@ -2,42 +2,73 @@ package com.noop.analytics
+ 
+ import com.noop.data.DailyMetric
+ import com.noop.data.MetricSeriesRow
++import com.noop.data.SleepSession
++import com.noop.data.WhoopRepository
++import java.time.Instant
++import java.time.LocalDate
++import java.time.ZoneId
+ import java.util.Locale
++import java.util.SortedMap
++import kotlin.math.PI
++import kotlin.math.cos
++import kotlin.math.hypot
++import kotlin.math.ln
++import kotlin.math.sin
++import kotlin.math.sqrt
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import kotlinx.coroutines.launch
+ 
+ /**
+- * victor:rest — ONE personal sleep need and ONE sleep regularity per night, resolved from the nights of the
+- * merged daily history, so the stored Rest (Descanso), the sleep term of Charge (Carga) and the Sleep
+- * screen's need, % of need, debt and per-night regularity all read the same figures for the same night.
++ * victor:rest — ONE personal sleep need and ONE bedtime regularity per night, so the stored Rest (Descanso),
++ * the sleep term of Charge (Carga) and the Sleep screen (Rest, need, % of need, debt, the «Consistencia»
++ * card and its detail graph) all read the same figures for the same night.
+  *
+  * Upstream computed the need four ways (the engine's upper quartile with the age floor, run once per pass
+  * over the scan window; the Sleep screen's upper quartile over all days with no age; the "Hours vs Needed"
+- * tile's mean floored at 7.5 h; the stored Rest's fixed 8 h) and the duration regularity two ways (the
+- * engine's 1 - CV, which only reached `DayResult.rest`, read by nobody, and the detail graph's SD / 90 min),
+- * while every stored Rest and Charge ran on 8 h and a neutral 0.5. The Consistency tile and the schedule
+- * card keep their BEDTIME regularity, a different measure that needs the sessions' onsets, not the rows.
++ * tile's mean floored at 7.5 h; the stored Rest's fixed 8 h) and the regularity three ways (the engine's
++ * 1 - CV of durations, which only reached `DayResult.rest`, read by nobody; the detail graph's duration
++ * SD / 90 min; the card's bedtime spread), while every stored Rest and Charge ran on 8 h and a neutral 0.5.
+  *
+- * Night D (a DailyMetric day, the wake day of its main night):
++ * Night D (a DailyMetric day, the local wake day of its main night):
+  *  - need = [RestScorer.personalizedNeedHours] (upper quartile, age floor, 9.5 h cap, population default
+- *    under 7 nights) over the [NEED_WINDOW_NIGHTS] nights with sleep BEFORE D. D itself is left out: a
+- *    need is what the night is measured against, so a long night must not raise its own bar.
+- *  - regularity = [VitalityEngine.sleepConsistency] (1 - coefficient of variation, null under 3 nights)
+- *    over the [REGULARITY_WINDOW_NIGHTS] nights with sleep up to and INCLUDING D: how well this night
+- *    fits the pattern, the reading upstream's Wave 0 (SL1/T1, `RestWiringImpactTest`) intended.
+- * A night is `totalSleepMin` > 0, the main-night asleep total Rest scores; naps only repay debt
+- * ([SleepDebt.creditedSleepMin]). Deterministic from the nights before D, so no column is stored: the
+- * analysis pass resolves it from [com.noop.data.WhoopRepository.daysMergedWith] (the merged history as it
+- * will read after the pass) and every screen from the merged rows it already holds (`recentDays`).
++ *    under 7 nights) over the [NEED_WINDOW_NIGHTS] nights with sleep BEFORE D, from the merged daily rows.
++ *    D itself is left out: a need is what the night is measured against, so a long night must not raise
++ *    its own bar.
++ *  - regularity = the «Consistencia» card's bedtime regularity, `1 - SD(bedtime) / 120 min` clamped to
++ *    0..1, over the main-night bedtimes of the last [REGULARITY_WINDOW_NIGHTS] nights up to and including
++ *    D that fall within [REGULARITY_WINDOW_DAYS] days ([bedtimeRegularity]); WHOOP's own imported
++ *    `sleep_consistency` wins its night, as it did on the card. It comes from the sleep sessions, which the
++ *    analysis pass resolves as they will read after it ([WhoopRepository.sleepsMergedWith]) and publishes
++ *    ([regularity]); every reader takes it from there, so the card and Descanso cannot disagree.
++ * Nothing new is stored and no schema changes.
+  */
+ object VictorSleepNeed {
+ 
+     /** The series key the Rest composite is stored under. */
+     const val REST_KEY: String = "sleep_performance"
+ 
++    /** The series key WHOOP's own per-night consistency (0..100) is imported under, on the strap source. */
++    const val IMPORTED_CONSISTENCY_KEY: String = "sleep_consistency"
++
+     /** Nights with sleep before D whose upper quartile sets D's need (a season of nights). */
+     const val NEED_WINDOW_NIGHTS: Int = 90
+ 
+-    /** Nights with sleep up to D whose spread sets D's regularity (upstream's 28). */
+-    const val REGULARITY_WINDOW_NIGHTS: Int = 28
++    /** Main-night bedtimes up to D whose spread sets D's regularity (the card's 14). */
++    const val REGULARITY_WINDOW_NIGHTS: Int = 14
++
++    /** Only bedtimes this many calendar days back from D count, so a gap in wear never reaches a stale month. */
++    const val REGULARITY_WINDOW_DAYS: Int = 28
++
++    /** Fewest bedtimes a regularity is scored from (the card's 3). */
++    const val REGULARITY_MIN_NIGHTS: Int = 3
++
++    /** Bedtime spread (minutes, SD) that scores 0; tighter routines climb linearly to 1 (the card's 120). */
++    const val BEDTIME_SD_ZERO_MIN: Double = 120.0
+ 
+     /** One night's inputs to Rest: the need in hours and the regularity in 0..1 (null: too few nights). */
+     data class Night(val needHours: Double, val regularity: Double?)
+@@ -49,30 +80,41 @@ object VictorSleepNeed {
+      */
+     @Volatile var ageSource: () -> Int? = { null }
+ 
+-    /** Pure: every day of [days] (any order) to its [Night]. */
+-    fun resolve(days: List<DailyMetric>, age: Int?): Map<String, Night> {
++    private val _regularity = MutableStateFlow<Map<String, Double>>(emptyMap())
++
++    /**
++     * Each night's regularity (0..1) as the last analysis pass resolved it ([publishRegularity]), warmed from
++     * the store when the app starts ([warm]). A StateFlow so a screen can recompose when it lands.
++     */
++    val regularity: StateFlow<Map<String, Double>> = _regularity.asStateFlow()
++
++    /** Replace the published regularity (the analysis pass, the start-up warm-up, tests). */
++    fun publishRegularity(byDay: Map<String, Double>) {
++        _regularity.value = byDay
++    }
++
++    /** Pure: every day of [days] (any order) to its [Night], with the regularity of [regularityByDay]. */
++    fun resolve(days: List<DailyMetric>, regularityByDay: Map<String, Double>, age: Int?): Map<String, Night> {
+         val out = LinkedHashMap<String, Night>(days.size * 2)
+         val prior = ArrayList<Double>()
+         for (d in days.sortedBy { it.day }) {
+             if (d.day in out) continue
+-            val own = d.totalSleepMin?.takeIf { it > 0.0 }?.let { it / 60.0 }
+             val need = RestScorer.personalizedNeedHours(prior.takeLast(NEED_WINDOW_NIGHTS), age)
+-            val upTo = if (own != null) prior.takeLast(REGULARITY_WINDOW_NIGHTS - 1) + own
+-            else prior.takeLast(REGULARITY_WINDOW_NIGHTS)
+-            val regularity = VitalityEngine.sleepConsistency(upTo)
+-            out[d.day] = Night(need, regularity)
+-            if (own != null) prior.add(own)
++            out[d.day] = Night(need, regularityByDay[d.day])
++            d.totalSleepMin?.takeIf { it > 0.0 }?.let { prior.add(it / 60.0) }
+         }
+         return out
+     }
+ 
+-    @Volatile private var memo: Triple<List<DailyMetric>, Int?, Map<String, Night>>? = null
++    private class Memo(val days: List<DailyMetric>, val age: Int?, val reg: Map<String, Double>, val nights: Map<String, Night>)
++
++    @Volatile private var memo: Memo? = null
+ 
+-    /** [resolve] for a screen's merged rows with the installed age, kept for the last list instance. */
+-    fun nights(days: List<DailyMetric>): Map<String, Night> {
++    /** [resolve] for a screen's merged rows with the installed age and the published regularity. */
++    fun nights(days: List<DailyMetric>, regularityByDay: Map<String, Double> = regularity.value): Map<String, Night> {
+         val age = ageSource()
+-        memo?.let { (list, a, map) -> if (list === days && a == age) return map }
+-        return resolve(days, age).also { memo = Triple(days, age, it) }
++        memo?.let { m -> if (m.days === days && m.age == age && m.reg === regularityByDay) return m.nights }
++        return resolve(days, regularityByDay, age).also { memo = Memo(days, age, regularityByDay, it) }
+     }
+ 
+     /** The need (hours) [nights] holds for [day], or the population default when it has none. */
+@@ -86,21 +128,146 @@ object VictorSleepNeed {
+     /** Rest of [daily] resolved against [days], the merged history the caller already reads. */
+     fun rest(daily: DailyMetric, days: List<DailyMetric>): Double? = rest(daily, nights(days)[daily.day])
+ 
+-    @Volatile private var published: Map<String, Night> = emptyMap()
++    @Volatile private var publishedDays: List<DailyMetric> = emptyList()
+ 
+     /** The app's merged history changed: kept for the readers handed one row and no history. */
+     fun publish(days: List<DailyMetric>) {
+-        published = nights(days)
++        publishedDays = days
+     }
+ 
+     /** Rest of a lone [daily] (the resolver's daily-column fallback, Today's Charge drivers). */
+-    fun restPublished(daily: DailyMetric): Double? = rest(daily, published[daily.day])
++    fun restPublished(daily: DailyMetric): Double? = rest(daily, nights(publishedDays)[daily.day])
++
++    // ── Bedtime regularity ────────────────────────────────────────────────────────────────────────────
++
++    /**
++     * Each local wake day's main-night span (bridged onset → wake): the day's sessions grouped by the local
++     * day they END on, the main night picked and bridged by [SleepStageTotals.mainNightGroupIndices] at that
++     * night's own UTC offset (so a DST night is read on its own clock). No learned habitual time: the pick
++     * must come from the sessions alone, so the pass and the screen cannot pick differently; it differs
++     * from the hero's only on a day whose two candidate sleeps are within 90 minutes of each other.
++     */
++    fun mainNightSpans(sleeps: List<SleepSession>, zone: ZoneId = ZoneId.systemDefault()): SortedMap<String, Pair<Long, Long>> {
++        val out = java.util.TreeMap<String, Pair<Long, Long>>()
++        val byDay = sleeps.filter { it.endTs > it.effectiveStartTs }
++            .groupBy { Instant.ofEpochSecond(it.endTs).atZone(zone).toLocalDate().toString() }
++        for ((day, blocks) in byDay) {
++            val sorted = blocks.sortedBy { it.effectiveStartTs }
++            val offset = zone.rules.getOffset(Instant.ofEpochSecond(sorted.last().endTs)).totalSeconds.toLong()
++            val idx = SleepStageTotals.mainNightGroupIndices(
++                sorted.map { SleepStageTotals.NightBlock(it.effectiveStartTs, it.endTs) }, offset, null,
++            ) ?: continue
++            out[day] = idx.minOf { sorted[it].effectiveStartTs } to idx.maxOf { sorted[it].endTs }
++        }
++        return out
++    }
++
++    /** The main-night spans that score [day]: the last 14 within 28 days up to and including it. */
++    fun regularityWindow(spans: SortedMap<String, Pair<Long, Long>>, day: String): List<Pair<Long, Long>> {
++        val from = runCatching { LocalDate.parse(day).minusDays(REGULARITY_WINDOW_DAYS - 1L).toString() }
++            .getOrDefault(day)
++        return spans.subMap(from, day + "\u0000").values.toList().takeLast(REGULARITY_WINDOW_NIGHTS)
++    }
++
++    /**
++     * Circular standard deviation (minutes) of clock times given as minutes after midnight: bedtimes on a
++     * 24-hour circle, so 23:50 and 00:10 are 20 minutes apart and a day sleeper's spread reads like anyone
++     * else's (the card used to fold onsets before noon onto the next day, which broke for onsets near noon).
++     * For spreads of an hour or two it equals the ordinary SD within seconds.
++     */
++    fun circularSdMinutes(minutesOfDay: List<Double>): Double {
++        if (minutesOfDay.isEmpty()) return 0.0
++        val k = 2.0 * PI / 1440.0
++        val c = minutesOfDay.sumOf { cos(it * k) } / minutesOfDay.size
++        val s = minutesOfDay.sumOf { sin(it * k) } / minutesOfDay.size
++        val r = hypot(c, s).coerceAtMost(1.0)
++        if (r <= 0.0) return Double.POSITIVE_INFINITY
++        return sqrt(-2.0 * ln(r)) / k
++    }
++
++    /**
++     * Pure: each night's bedtime regularity (0..1), from the merged sleep sessions the Sleep screen reads.
++     * `1 - SD / 120 min` of the local bedtimes (the main night's bridged onset, [mainNightSpans]) of the
++     * nights in [regularityWindow], clamped; null under [REGULARITY_MIN_NIGHTS]. [importedPct] is WHOOP's own
++     * imported consistency (0..100) by day, which wins its night.
++     */
++    fun bedtimeRegularity(
++        sleeps: List<SleepSession>,
++        importedPct: Map<String, Double> = emptyMap(),
++        zone: ZoneId = ZoneId.systemDefault(),
++    ): Map<String, Double> {
++        val spans = mainNightSpans(sleeps, zone)
++        val out = LinkedHashMap<String, Double>(spans.size * 2)
++        for (day in spans.keys) {
++            val window = regularityWindow(spans, day)
++            if (window.size < REGULARITY_MIN_NIGHTS) continue
++            val minutes = window.map { (onset, _) ->
++                val t = Instant.ofEpochSecond(onset).atZone(zone)
++                t.hour * 60.0 + t.minute + t.second / 60.0
++            }
++            out[day] = (1.0 - circularSdMinutes(minutes) / BEDTIME_SD_ZERO_MIN).coerceIn(0.0, 1.0)
++        }
++        return withImported(out, importedPct)
++    }
++
++    /**
++     * [regularityByDay] with WHOOP's imported consistency (0..100) winning its night, the card's old
++     * precedence. The same instance back when nothing changes (the published map already carries them), so
++     * a screen's memo holds.
++     */
++    fun withImported(regularityByDay: Map<String, Double>, importedPct: Map<String, Double>): Map<String, Double> {
++        if (importedPct.all { (day, pct) -> regularityByDay[day] == (pct / 100.0).coerceIn(0.0, 1.0) }) {
++            return regularityByDay
++        }
++        val out = LinkedHashMap(regularityByDay)
++        for ((day, pct) in importedPct) out[day] = (pct / 100.0).coerceIn(0.0, 1.0)
++        return out
++    }
++
++    /**
++     * The sleeps a pass leaves behind: the detected [sleepRows] it will bank, minus those the user edited
++     * or deleted ([DismissedSleepGuard], the same rule the pass persists with), over the store's sessions.
++     */
++    suspend fun sleepsAfterPass(
++        repo: WhoopRepository,
++        importedDeviceId: String,
++        computedId: String,
++        sleepRows: List<SleepSession>,
++        editedRows: List<SleepSession>,
++    ): List<SleepSession> {
++        val skip = editedRows.map { it.effectiveStartTs to it.endTs } +
++            repo.dismissedSleeps(importedDeviceId).map { it.startTs to it.endTs }
++        val kept = DismissedSleepGuard.keeping(sleepRows, skip) { it.startTs to it.endTs }
++        return repo.sleepsMergedWith(importedDeviceId, computedId, kept)
++    }
++
++    /** WHOOP's imported per-night consistency (0..100), read where the Sleep screen reads it. */
++    suspend fun importedConsistency(repo: WhoopRepository): Map<String, Double> =
++        repo.metricSeries(WhoopRepository.WHOOP_SOURCE, IMPORTED_CONSISTENCY_KEY, "0000-00-00", "9999-99-99")
++            .associate { it.day to it.value }
++
++    /**
++     * Called once by the application: the profile's [age] for the need, and the regularity warmed from the
++     * store ([warm]) on a background thread, so the screens have it before this process's first pass.
++     */
++    fun install(age: () -> Int?, repo: () -> WhoopRepository, deviceId: () -> String) {
++        ageSource = age
++        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { runCatching { warm(repo(), deviceId()) } }
++    }
++
++    /** Start-up: publish the regularity from the store, before any pass has run in this process. */
++    suspend fun warm(repo: WhoopRepository, deviceId: String) {
++        val sleeps = repo.sleepsMergedWith(deviceId, repo.computedDeviceId(deviceId), emptyList())
++        if (_regularity.value.isEmpty()) publishRegularity(bedtimeRegularity(sleeps, importedConsistency(repo)))
++    }
++
++    // ── The analysis pass's half ─────────────────────────────────────────────────────────────────────
+ 
+     /**
+-     * The analysis pass's half: each freshly scored row of [dailies] (all under [computedId]) gets the Rest
+-     * of its night written into [metricRows] in place of the one the pass wrote, and the Charge [recovery]
+-     * recomputes with it (the row's own HRV, resting HR, breathing and skin inputs, the pass's baselines).
+-     * Rows and [metricRows] are updated in place; returns each rescored day's (rest, recovery).
++     * Each freshly scored row of [dailies] (all under [computedId]) gets the Rest of its night written into
++     * [metricRows] in place of the one the pass wrote, and the Charge [recovery] recomputes with it (the row's
++     * own HRV, resting HR, breathing and skin inputs, the pass's baselines). Rows and [metricRows] are updated
++     * in place; returns each rescored day's (rest, recovery).
+      */
+     fun rescore(
+         nights: Map<String, Night>,
+diff --git a/android/app/src/main/java/com/noop/data/WhoopRepository.kt b/android/app/src/main/java/com/noop/data/WhoopRepository.kt
+index 85dc6991d..02c662bc2 100644
+--- a/android/app/src/main/java/com/noop/data/WhoopRepository.kt
++++ b/android/app/src/main/java/com/noop/data/WhoopRepository.kt
+@@ -2141,6 +2141,31 @@ class WhoopRepository(
+         return dedupSleepBlocks(ids.flatMap { dao.sleepSessions(it, from, to, limit) })
+     }
+ 
++    /**
++     * victor:rest — the Sleep screen's session list (the imported [sleepSessionsUnion] and the computed
++     * [computedSleepSessionsUnion], [mergeSleepRichness] by local wake day, by effective onset) as it will
++     * read once [fresh] (an analysis pass's detected sessions, under [computedId]) are banked the way
++     * [upsertSleepSessions] banks them (same key, same [SleepSessionUpsertPolicy]). Empty [fresh] = the
++     * screen's list as stored. The bedtime regularity both Rest and the «Consistencia» card read is resolved
++     * from it ([com.noop.analytics.VictorSleepNeed.bedtimeRegularity]).
++     */
++    suspend fun sleepsMergedWith(deviceId: String, computedId: String, fresh: List<SleepSession>): List<SleepSession> {
++        val now = System.currentTimeMillis() / 1000L
++        val imported = sleepSessionsUnion(deviceId, 0L, now)
++        val computed = dedupSleepBlocks(rawWhoopSourceIds(deviceId).map { "$it-noop" }.flatMap { id ->
++            val rows = dao.sleepSessions(id, 0L, now, DEFAULT_LIMIT)
++            if (id != computedId || fresh.isEmpty()) return@flatMap rows
++            val byStart = LinkedHashMap<Long, SleepSession>().apply { for (r in rows) put(r.startTs, r) }
++            for (c in fresh) byStart[c.startTs] = byStart[c.startTs]?.let { SleepSessionUpsertPolicy.merge(it, c) ?: it } ?: c
++            byStart.values.sortedBy { it.startTs }
++        })
++        fun localEndDay(ts: Long): String {
++            val offsetSec = (java.util.TimeZone.getDefault().getOffset(ts * 1000) / 1000).toLong()
++            return com.noop.analytics.AnalyticsEngine.dayString(ts, offsetSec)
++        }
++        return mergeSleepRichness(imported, computed) { localEndDay(it.endTs) }.sortedBy { it.effectiveStartTs }
++    }
++
+     /**
+      * ALL sleep sessions across every registered WHOOP (active first, archived included, canonical
+      * last) over the last [days], imported [sleepSessionsUnion] merged with the computed
+diff --git a/android/app/src/main/java/com/noop/ui/CoupledScreen.kt b/android/app/src/main/java/com/noop/ui/CoupledScreen.kt
+index 9eed385e7..9629d6a46 100644
+--- a/android/app/src/main/java/com/noop/ui/CoupledScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/CoupledScreen.kt
+@@ -177,8 +177,9 @@ fun CoupledScreen(
+     // Sleep performance %: the imported figure when the export carried one, else the resolved Rest composite
+     // (RestScorer.restFromDaily, with the night's need and regularity since victor:rest), the SAME single
+     // source of truth the Today Rest score + Sleep graph read.
++    val regularity by com.noop.analytics.VictorSleepNeed.regularity.collectAsStateWithLifecycle()   // victor:rest
+     val sleepPerformance = todayRow?.let { d ->
+-        importedPerf[d.day] ?: com.noop.analytics.VictorSleepNeed.rest(d, days)   // victor:rest
++        importedPerf[d.day] ?: com.noop.analytics.VictorSleepNeed.run { rest(d, nights(days, regularity)[d.day]) }
+     }
+ 
+     // On-device readiness, computed EXACTLY as Today does, so the one-word pill matches the home screen.
+diff --git a/android/app/src/main/java/com/noop/ui/SleepMetricDetailLogic.kt b/android/app/src/main/java/com/noop/ui/SleepMetricDetailLogic.kt
+index 3e660f312..a3c49f2ba 100644
+--- a/android/app/src/main/java/com/noop/ui/SleepMetricDetailLogic.kt
++++ b/android/app/src/main/java/com/noop/ui/SleepMetricDetailLogic.kt
+@@ -36,11 +36,12 @@ internal fun buildSleepMetricPoints(
+     key: String,
+     imported: ImportedSleepSeries = ImportedSleepSeries(),
+     napSleepMinByDay: Map<String, Double> = emptyMap(),
++    regularity: Map<String, Double> = VictorSleepNeed.regularity.value,   // victor:rest
+ ): List<Pair<String, Double>> {
+-    // victor:rest — each night's own need and regularity ([VictorSleepNeed]), the ones its stored Rest and
+-    // Charge were scored with and the Sleep tiles read (upstream: a mean floored at 7.5 h here, an all-days
+-    // need for the debt, and a 14-night SD / 90 min regularity).
+-    val nights = VictorSleepNeed.nights(days)
++    // victor:rest — each night's own need and bedtime regularity ([VictorSleepNeed]), the ones its stored
++    // Rest and Charge were scored with and the Sleep tiles read (upstream: a mean floored at 7.5 h here, an
++    // all-days need for the debt, and a 14-night duration SD / 90 min the «Consistencia» card did not show).
++    val nights = VictorSleepNeed.nights(days, VictorSleepNeed.withImported(regularity, imported.consistency))
+     if (key == "sleep_debt") {
+         return SleepDebt.debtSeries(
+             series = days.map { day ->
+@@ -61,7 +62,7 @@ internal fun buildSleepMetricPoints(
+             // graph and the score in agreement. (#614 follow-up)
+             "performance" -> VictorSleepNeed.rest(d, nights[d.day])?.takeIf { it in 0.0..100.0 }
+             "efficiency"  -> d.efficiency?.let { if (it <= 1.0) it * 100.0 else it }
+-            "consistency" -> d.totalSleepMin?.takeIf { it > 0.0 }?.let { nights[d.day]?.regularity }?.let { it * 100.0 }
++            "consistency" -> nights[d.day]?.regularity?.let { it * 100.0 }
+             "hours_vs_needed" -> d.totalSleepMin?.takeIf { it > 0.0 }
+                 ?.let { minOf(100.0, it / (VictorSleepNeed.needHours(nights, d.day) * 60.0) * 100.0) }
+             "restorative" -> {
+diff --git a/android/app/src/main/java/com/noop/ui/SleepMetricDetailSheet.kt b/android/app/src/main/java/com/noop/ui/SleepMetricDetailSheet.kt
+index 893daa050..d7ee4b054 100644
+--- a/android/app/src/main/java/com/noop/ui/SleepMetricDetailSheet.kt
++++ b/android/app/src/main/java/com/noop/ui/SleepMetricDetailSheet.kt
+@@ -41,8 +41,9 @@ internal fun SleepMetricDetailSheetContent(
+     val days by vm.recentDays.collectAsStateWithLifecycle()
+     var range by remember { mutableStateOf(SleepMetricRange.MONTH) }
+     val spec = remember(key) { sleepMetricSpec(key) }
+-    val allPoints = remember(days, key, imported, napSleepMinByDay) {
+-        buildSleepMetricPoints(days, key, imported, napSleepMinByDay)
++    val regularity by com.noop.analytics.VictorSleepNeed.regularity.collectAsStateWithLifecycle()   // victor:rest
++    val allPoints = remember(days, key, imported, napSleepMinByDay, regularity) {
++        buildSleepMetricPoints(days, key, imported, napSleepMinByDay, regularity)
+     }
+     val filteredPoints = remember(allPoints, range) { filterSleepMetricPoints(allPoints, range) }
+ 
+diff --git a/android/app/src/main/java/com/noop/ui/SleepModelLogic.kt b/android/app/src/main/java/com/noop/ui/SleepModelLogic.kt
+index 4bfdadae1..9e0d5c320 100644
+--- a/android/app/src/main/java/com/noop/ui/SleepModelLogic.kt
++++ b/android/app/src/main/java/com/noop/ui/SleepModelLogic.kt
+@@ -127,7 +127,8 @@ internal fun buildSleepModel(
+     napSleepMinByDay: Map<String, Double> = emptyMap(),
+     // #sleep-consistency-parity: the full session list (onset times), used by the consistency FALLBACK
+     // (bedtime-onset spread). Defaults empty for callers/tests that only exercise the imported path.
+-    sessions: List<SleepSession> = emptyList(),
++    // victor:rest — no longer read here: the card's regularity is [regularity], resolved from these sessions.
++    @Suppress("UNUSED_PARAMETER") sessions: List<SleepSession> = emptyList(),
+     // Today's logical-day key, the anchor for each tile's staleness bound (see [metric]). Injectable so
+     // tests can pin the clock instead of depending on the day they happen to run.
+     todayKey: String = logicalDayKeyNow(),
+@@ -135,6 +136,8 @@ internal fun buildSleepModel(
+     // hardcoded to before the setting existed, so tests and any caller not yet updated keep their old
+     // output rather than silently flipping.
+     is24h: Boolean = true,
++    // victor:rest — each night's bedtime regularity as the analysis pass resolved it, the one its Rest used.
++    regularity: Map<String, Double> = VictorSleepNeed.regularity.value,
+ ): SleepModel? {
+     val effectiveDay = selectedDay ?: days.lastOrNull()?.day ?: return null
+     // The HERO night = the selected day's stage-bearing row. The TILE / debt / need / trend
+@@ -190,7 +193,7 @@ internal fun buildSleepModel(
+     // the debt tile, ledger and series, the trend's need line and the "Hours vs Needed" card. Upstream's
+     // tile used the mean floored at 7.5 h and the debt a need over all days without the age, so the tile,
+     // the card and Rest could each measure the same night against a different need.
+-    val nights = VictorSleepNeed.nights(days)
++    val nights = VictorSleepNeed.nights(days, VictorSleepNeed.withImported(regularity, imported.consistency))
+     val latestNightDay = days.lastOrNull { (it.totalSleepMin ?: 0.0) > 0.0 }?.day
+ 
+     // Per-tile metrics — each a full pass over the FULL day history (asleep totals, no in-bed
+@@ -208,16 +211,15 @@ internal fun buildSleepModel(
+     val efficiency = metric(days, todayKey) { d ->
+         d.efficiency?.let { if (it <= 1.0) it * 100.0 else it }
+     }
+-    val consistency = run {
+-        // Prefer the imported sleep_consistency series, but only when it covers the latest
+-        // night — otherwise "latest" would silently be a months-old import-era value.
+-        val lastDay = days.lastOrNull()?.day
+-        if (lastDay != null && imported.consistency[lastDay] != null) {
+-            val series = days.mapNotNull { imported.consistency[it.day] }
+-            Metric(series.lastOrNull(), null, mean(series), series)
+-        } else {
+-            consistencySeries(sessions)
+-        }
++    // victor:rest — the «Consistencia» card: each night's bedtime regularity, the SAME figure that night's Rest
++    // and Charge were scored with ([VictorSleepNeed.bedtimeRegularity]; WHOOP's imported value wins its
++    // night). Upstream read the imported series only when it covered the latest night, else a per-SESSION
++    // onset spread (`consistencySeries`) that counted naps as nights and had no per-night value to share.
++    // It speaks for the LATEST night only: when that night has none (no session, too few bedtimes), no other
++    // night's figure stands in for it, as upstream never let an import-era value do.
++    val consistency = metric(days, todayKey) { d -> nights[d.day]?.regularity?.let { it * 100.0 } }.let { m ->
++        val newest = days.lastOrNull { nights[it.day]?.regularity != null }?.day
++        if (newest == latestNightDay) m else m.copy(latest = null, latestDay = null)
+     }
+     val hoursVsNeeded = metric(days, todayKey) { d ->
+         val need = imported.needMin[d.day] ?: VictorSleepNeed.needHours(nights, d.day) * 60.0   // imported need wins per day
+diff --git a/android/app/src/main/java/com/noop/ui/SleepScreen.kt b/android/app/src/main/java/com/noop/ui/SleepScreen.kt
+index 11812f347..9d687002b 100644
+--- a/android/app/src/main/java/com/noop/ui/SleepScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/SleepScreen.kt
+@@ -535,10 +535,13 @@ fun SleepScreen(
+     // at-a-glance TILES, the debt ledger, the personal need and the trend stay full-history /
+     // latest-anchored, matching iOS SleepView. `selectedDay` re-points only the hero. Model is null
+     // when the selected day has no stage minutes. (#5)
+-    val model = remember(days, night, imported, napSleepMinByDay, sleeps, is24h) {
++    // victor:rest — each night's bedtime regularity as the analysis pass resolved it (the «Consistencia» card
++    // and Rest read the same figure); a key below so the tiles recompose when a pass publishes a new one.
++    val regularity by com.noop.analytics.VictorSleepNeed.regularity.collectAsStateWithLifecycle()
++    val model = remember(days, night, imported, napSleepMinByDay, sleeps, is24h, regularity) {
+         buildSleepModel(days, night?.session, imported, selectedDay = night?.dayKey,
+             heroStages = night?.groupStages, heroSegments = night?.groupSegments,
+-            napSleepMinByDay = napSleepMinByDay, sessions = sleeps, is24h = is24h)
++            napSleepMinByDay = napSleepMinByDay, sessions = sleeps, is24h = is24h, regularity = regularity)
+     }
+     val display = remember(model, night) { heroDisplay(model, night) }
+ 
+@@ -590,7 +593,7 @@ fun SleepScreen(
+     // newest stage-bearing day instead of vanishing. The HERO stays on `model`/`display` (an
+     // honest no-stage-data fallback for the bad day, edit pencil reachable). Null only when NO day
+     // has stage data: the true first-run empty state.
+-    val tilesModel = remember(model, days, imported, napSleepMinByDay, sleeps) {
++    val tilesModel = remember(model, days, imported, napSleepMinByDay, sleeps, regularity) {
+         model ?: fallbackSleepModel(days, imported, napSleepMinByDay, sessions = sleeps)
+     }
+ 
+diff --git a/android/app/src/main/java/com/noop/ui/TrendsScreen.kt b/android/app/src/main/java/com/noop/ui/TrendsScreen.kt
+index 885dec410..f6e814046 100644
+--- a/android/app/src/main/java/com/noop/ui/TrendsScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/TrendsScreen.kt
+@@ -379,8 +379,9 @@ private fun WeeklyDigestNav(
+     // #268/#463: past weeks quote Effort on the user's display scale too, same as the live card.
+     val context = LocalContext.current
+     val factor = effortDisplayFactor(UnitPrefs.effortScale(context))
+-    val digest = remember(days, anchorDay, factor) {
+-        buildWeeklyDigest(days, anchorDay, effortDisplayFactor = factor)
++    val regularity by com.noop.analytics.VictorSleepNeed.regularity.collectAsStateWithLifecycle()   // victor:rest
++    val digest = remember(days, anchorDay, factor, regularity) {
++        buildWeeklyDigest(days, anchorDay, effortDisplayFactor = factor, regularity = regularity)
+     }
+     // "Share recap" capture: track the card's on-screen bounds, then draw the Compose host view + crop
+     // (RecapShare.captureCropped) — the Compose-1.7 GraphicsLayer capture API isn't in this 1.6.8 build.
+diff --git a/android/app/src/main/java/com/noop/ui/WeeklyDigestCard.kt b/android/app/src/main/java/com/noop/ui/WeeklyDigestCard.kt
+index e3b4d0b5d..94e324d6c 100644
+--- a/android/app/src/main/java/com/noop/ui/WeeklyDigestCard.kt
++++ b/android/app/src/main/java/com/noop/ui/WeeklyDigestCard.kt
+@@ -74,6 +74,7 @@ fun buildWeeklyDigest(
+     days: List<DailyMetric>,
+     anchorDay: String = logicalDayKeyNow(),
+     effortDisplayFactor: Double = 1.0,
++    regularity: Map<String, Double> = com.noop.analytics.VictorSleepNeed.regularity.value,   // victor:rest
+ ): WeeklyDigest {
+     val charge = HashMap<String, Double>()
+     val effort = HashMap<String, Double>()
+@@ -84,8 +85,11 @@ fun buildWeeklyDigest(
+     for (d in days) {
+         d.recovery?.let { charge[d.day] = it }
+         d.strain?.takeIf { d.day < today }?.let { effort[d.day] = it }   // victor:effort — today's half-day out of the week's mean
++    }
++    val nights = com.noop.analytics.VictorSleepNeed.nights(days, regularity)   // victor:rest — each night's need and regularity
++    for (d in days) {
+         // Rest = the sleep-performance composite recomputed on the persisted day.
+-        com.noop.analytics.VictorSleepNeed.rest(d, days)?.let { rest[d.day] = it }   // victor:rest — with its night's need
++        com.noop.analytics.VictorSleepNeed.rest(d, nights[d.day])?.let { rest[d.day] = it }
+         d.restingHr?.let { rhr[d.day] = it.toDouble() }
+         d.avgHrv?.let { hrv[d.day] = it }
+     }
+@@ -111,8 +115,9 @@ fun buildWeeklyDigest(
+ @Composable
+ fun WeeklyDigestCard(vm: AppViewModel, modifier: Modifier = Modifier) {
+     val days by vm.recentDays.collectAsStateWithLifecycle()
++    val regularity by com.noop.analytics.VictorSleepNeed.regularity.collectAsStateWithLifecycle()   // victor:rest
+     val factor = effortDisplayFactor(UnitPrefs.effortScale(LocalContext.current))
+-    val digest = buildWeeklyDigest(days, effortDisplayFactor = factor)
++    val digest = buildWeeklyDigest(days, effortDisplayFactor = factor, regularity = regularity)
+     if (digest.isEmpty) return
+     NoopCard(modifier = modifier) {
+         WeeklyDigestContent(digest = digest, compact = true)
+@@ -125,9 +130,10 @@ fun WeeklyDigestCard(vm: AppViewModel, modifier: Modifier = Modifier) {
+ @Composable
+ fun WeeklyDigestScreen(vm: AppViewModel) {
+     val days by vm.recentDays.collectAsStateWithLifecycle()
++    val regularity by com.noop.analytics.VictorSleepNeed.regularity.collectAsStateWithLifecycle()   // victor:rest
+     val factor = effortDisplayFactor(UnitPrefs.effortScale(LocalContext.current))
+     ScreenScaffold(title = uiString(R.string.l10n_weekly_digest_card_week_in_review_66d95a07), subtitle = "Your Monday-to-Sunday, read in one glance.") {
+-        val digest = buildWeeklyDigest(days, effortDisplayFactor = factor)
++        val digest = buildWeeklyDigest(days, effortDisplayFactor = factor, regularity = regularity)
+         if (digest.isEmpty) {
+             DataPendingNote(
+                 title = uiString(R.string.l10n_weekly_digest_card_no_readings_this_week_yet_0745a2df),
+diff --git a/android/app/src/test/java/com/noop/analytics/VictorRestImpactTest.kt b/android/app/src/test/java/com/noop/analytics/VictorRestImpactTest.kt
+index 284fea9db..7aff4affc 100644
+--- a/android/app/src/test/java/com/noop/analytics/VictorRestImpactTest.kt
++++ b/android/app/src/test/java/com/noop/analytics/VictorRestImpactTest.kt
+@@ -1,7 +1,10 @@
+ package com.noop.analytics
+ 
+ import com.noop.data.DailyMetric
++import com.noop.data.SleepSession
+ import java.time.LocalDate
++import java.time.ZoneId
++import java.time.ZonedDateTime
+ import java.util.Locale
+ import java.util.Random
+ import kotlin.math.abs
+@@ -9,48 +12,69 @@ import org.junit.Assert.assertTrue
+ import org.junit.Test
+ 
+ /**
+- * victor:rest — how much the stored Rest (Descanso) and Charge (Carga) move once each night is scored with
+- * its personal need and regularity ([VictorSleepNeed]) instead of upstream's 8 h and neutral 0.5. A person
+- * sleeping 7.85 ± 0.7 h (upper quartile ~8.3 h, regularity ~0.9) with three months of history; the last 30
+- * nights are compared, as the recompute window would rewrite them. Prints the table (read it in the test
+- * report) and pins the size of the change, so a later edit that moves it shows up here.
++ * victor:rest — how much the stored Rest (Descanso) and Charge (Carga) move once each night is scored with its
++ * personal need and its bedtime regularity ([VictorSleepNeed]) instead of upstream's 8 h and neutral 0.5,
++ * and how the «Consistencia» card moves (upstream's per-session spread vs the per-night one). Fixtures: three
++ * months of nights; the last 30 are compared, as the recompute window rewrites them. Prints the tables (read
++ * them in the test report) and pins the size of the change.
+  */
+ class VictorRestImpactTest {
+ 
++    private val zone: ZoneId = ZoneId.systemDefault()
++
+     private data class Row(val day: String, val hours: Double, val oldRest: Double, val newRest: Double,
+                            val oldCharge: Double, val newCharge: Double, val need: Double, val reg: Double?,
+                            val needOnlyRest: Double)
+ 
+-    private fun rows(seed: Long, nights: Int, compared: Int, meanH: Double, sdH: Double): List<Row> {
++    private data class Fixture(val rows: List<Row>, val cardBefore: Double?, val cardAfter: Double?)
++
++    /** [nights] nights of [meanH] ± [sdH] h, to bed at [bedMin] ± [bedSdMin] minutes after midnight-ish. */
++    private fun fixture(seed: Long, meanH: Double, sdH: Double, bedMin: Double, bedSdMin: Double,
++                        napsEvery: Int = 0, nights: Int = 120, compared: Int = 30): Fixture {
+         val rnd = Random(seed)
+-        val days = (0 until nights).map { i ->
++        val days = ArrayList<DailyMetric>()
++        val sleeps = ArrayList<SleepSession>()
++        for (i in 0 until nights) {
++            val wake = LocalDate.parse("2026-07-01").plusDays(i.toLong())
+             val h = (meanH + sdH * rnd.nextGaussian()).coerceIn(5.0, 10.0)
+-            DailyMetric(
+-                deviceId = "my-whoop-noop", day = LocalDate.parse("2026-07-01").plusDays(i.toLong()).toString(),
+-                totalSleepMin = h * 60.0, efficiency = 0.88 + 0.05 * rnd.nextDouble(),
++            val eff = 0.88 + 0.05 * rnd.nextDouble()
++            days += DailyMetric(
++                deviceId = "my-whoop-noop", day = wake.toString(),
++                totalSleepMin = h * 60.0, efficiency = eff,
+                 deepMin = h * 60.0 * (0.13 + 0.05 * rnd.nextDouble()), remMin = h * 60.0 * (0.20 + 0.04 * rnd.nextDouble()),
+                 avgHrv = 60.0 + 7.0 * rnd.nextGaussian(), restingHr = (53.0 + 2.0 * rnd.nextGaussian()).toInt(),
+             )
++            val evening = ZonedDateTime.of(wake.minusDays(1).atStartOfDay(), zone)
++            val onset = evening.toEpochSecond() + ((bedMin + bedSdMin * rnd.nextGaussian()) * 60).toLong()
++            sleeps += SleepSession(deviceId = "my-whoop-noop", startTs = onset, endTs = onset + (h / eff * 3600).toLong())
++            if (napsEvery > 0 && i % napsEvery == 0) {
++                val nap = ZonedDateTime.of(wake.atStartOfDay(), zone).toEpochSecond() + 15 * 3600L
++                sleeps += SleepSession(deviceId = "my-whoop-noop", startTs = nap, endTs = nap + 40 * 60)
++            }
+         }
+-        val resolved = VictorSleepNeed.resolve(days, age = 26)
++        val regularity = VictorSleepNeed.bedtimeRegularity(sleeps, zone = zone)
++        val resolved = VictorSleepNeed.resolve(days, regularity, age = 26)
+         val hrvB = RecoveryScorer.DriverBaseline(mean = 60.0, spread = 6.0)
+         val rhrB = RecoveryScorer.DriverBaseline(mean = 53.0, spread = 2.0)
+         fun charge(d: DailyMetric, rest: Double) = RecoveryScorer.recovery(
+             hrv = d.avgHrv!!, rhr = d.restingHr!!.toDouble(), resp = null, hrvBaseline = hrvB,
+             rhrBaseline = rhrB, respBaseline = null, sleepPerf = rest / 100.0,
+         )!!
+-        return days.takeLast(compared).map { d ->
++        val rows = days.takeLast(compared).map { d ->
+             val n = resolved.getValue(d.day)
+             val old = RestScorer.restFromDaily(d)!!
+             val new = VictorSleepNeed.rest(d, n)!!
+             val needOnly = VictorSleepNeed.rest(d, VictorSleepNeed.Night(n.needHours, null))!!
+             Row(d.day, d.totalSleepMin!! / 60.0, old, new, charge(d, old), charge(d, new), n.needHours, n.regularity, needOnly)
+         }
++        val sorted = sleeps.sortedBy { it.effectiveStartTs }
++        return Fixture(rows, com.noop.ui.consistencySeries(sorted).latest, regularity[days.last().day]?.times(100.0))
+     }
+ 
+     private fun median(xs: List<Double>) = xs.sorted().let { s -> (s[(s.size - 1) / 2] + s[s.size / 2]) / 2.0 }
+ 
+-    private fun report(label: String, rs: List<Row>): Map<String, Double> {
++    private fun report(label: String, f: Fixture): Map<String, Double> {
++        val rs = f.rows
+         println("── $label")
+         for (r in rs) println(String.format(Locale.US,
+             "%s  %.2f h  need %.2f reg %s  Rest %5.1f → %5.1f (%+5.1f)  Charge %5.1f → %5.1f (%+5.1f)",
+@@ -58,44 +82,46 @@ class VictorRestImpactTest {
+             r.oldRest, r.newRest, r.newRest - r.oldRest, r.oldCharge, r.newCharge, r.newCharge - r.oldCharge))
+         val dRest = rs.map { it.newRest - it.oldRest }
+         val dCharge = rs.map { it.newCharge - it.oldCharge }
++        val dNeed = rs.map { it.needOnlyRest - it.oldRest }
+         val stats = mapOf(
+             "restMedianAbs" to median(dRest.map(::abs)), "restMaxAbs" to dRest.maxOf(::abs),
+             "restMean" to dRest.average(), "restUp" to dRest.count { it > 0 }.toDouble(),
+             "chargeMedianAbs" to median(dCharge.map(::abs)), "chargeMaxAbs" to dCharge.maxOf(::abs),
+-            "chargeMean" to dCharge.average(),
++            "chargeMean" to dCharge.average(), "regMean" to rs.mapNotNull { it.reg }.average(),
++            "needMean" to rs.map { it.need }.average(),
+         )
+         println(String.format(Locale.US,
+-            "Rest Δ: median |Δ| %.1f, max |Δ| %.1f, mean %+.1f, %d of %d up · Charge Δ: median |Δ| %.1f, max |Δ| %.1f, mean %+.1f",
+-            stats["restMedianAbs"], stats["restMaxAbs"], stats["restMean"], stats["restUp"]!!.toInt(), rs.size,
+-            stats["chargeMedianAbs"], stats["chargeMaxAbs"], stats["chargeMean"]))
+-        val dNeed = rs.map { it.needOnlyRest - it.oldRest }
+-        println(String.format(Locale.US,
+-            "of which the need alone: Rest Δ mean %+.1f, min %+.1f, max %+.1f; the regularity alone: mean %+.1f",
+-            dNeed.average(), dNeed.min(), dNeed.max(), rs.map { it.newRest - it.needOnlyRest }.average()))
++            "SUMMARY need %.2f h, regularity %.2f · Rest Δ median |Δ| %.1f, max |Δ| %.1f, mean %+.1f, %d of %d up · " +
++                "Charge Δ median |Δ| %.1f, max |Δ| %.1f, mean %+.1f · need alone mean %+.1f (worst %+.1f), " +
++                "regularity alone mean %+.1f · card %s → %s",
++            stats["needMean"], stats["regMean"], stats["restMedianAbs"], stats["restMaxAbs"], stats["restMean"],
++            stats["restUp"]!!.toInt(), rs.size, stats["chargeMedianAbs"], stats["chargeMaxAbs"], stats["chargeMean"],
++            dNeed.average(), dNeed.min(), rs.map { it.newRest - it.needOnlyRest }.average(),
++            f.cardBefore?.let { String.format(Locale.US, "%.0f", it) } ?: "nil",
++            f.cardAfter?.let { String.format(Locale.US, "%.0f", it) } ?: "nil"))
+         return stats
+     }
+ 
+     @Test
+-    fun aRegularSleeperWithAnEightPointThreeHourNeed() {
+-        val rs = rows(seed = 20261020L, nights = 120, compared = 30, meanH = 7.85, sdH = 0.7)
+-        val need = rs.map { it.need }.average()
+-        val reg = rs.mapNotNull { it.reg }.average()
+-        println(String.format(Locale.US, "need %.2f h, regularity %.2f", need, reg))
+-        assertTrue("fixture need ~8.3 h: $need", need in 8.15..8.45)
+-        assertTrue("fixture regularity ~0.9: $reg", reg in 0.86..0.94)
+-        val s = report("30 nights, need ~8.3 h, regularity ~0.9", rs)
+-        // Regularity 0.9 vs neutral 0.5 adds 4 points; the 8.3 h bar takes up to ~1.8 back on short nights.
+-        assertTrue(s.getValue("restMedianAbs") in 1.5..4.5)
+-        assertTrue(s.getValue("restMaxAbs") <= 5.0)
+-        assertTrue(s.getValue("chargeMaxAbs") <= 3.0)
+-    }
++    fun aRegularAndAnIrregularSleeperAreNowTold() {
++        // To bed at 23:00 ± 20 min, 7.85 ± 0.7 h: the personal need ~8.2-8.3 h.
++        val regular = report("regular: 23:00 ± 20 min, 7.85 ± 0.7 h",
++            fixture(seed = 20261020L, meanH = 7.85, sdH = 0.7, bedMin = 23 * 60.0, bedSdMin = 20.0))
++        // To bed at 23:30 ± 90 min, 6.6 ± 1.3 h: the need stays at the 8 h floor.
++        val irregular = report("irregular: 23:30 ± 90 min, 6.6 ± 1.3 h",
++            fixture(seed = 7L, meanH = 6.6, sdH = 1.3, bedMin = 23.5 * 60.0, bedSdMin = 90.0))
++        // The regular sleeper with a 40-minute nap every third afternoon: the card's per-session spread
++        // counted the naps as bedtimes; the per-night one does not.
++        report("regular with naps", fixture(seed = 20261020L, meanH = 7.85, sdH = 0.7,
++            bedMin = 23 * 60.0, bedSdMin = 20.0, napsEvery = 3))
+ 
+-    @Test
+-    fun anIrregularShortSleeper() {
+-        // 6.6 ± 1.3 h: the need stays at the 8 h floor, the regularity (~0.8) still lifts Rest a little.
+-        val rs = rows(seed = 7L, nights = 120, compared = 30, meanH = 6.6, sdH = 1.3)
+-        val s = report("30 nights, 6.6 ± 1.3 h", rs)
+-        assertTrue(rs.all { it.need >= 8.0 })
+-        assertTrue(s.getValue("restMaxAbs") <= 5.0)
++        assertTrue(regular.getValue("needMean") in 8.1..8.45)
++        assertTrue("regular bedtimes score high: ${regular["regMean"]}", regular.getValue("regMean") in 0.75..0.92)
++        assertTrue("irregular bedtimes score low: ${irregular["regMean"]}", irregular.getValue("regMean") < 0.5)
++        // Rest now separates them: up for the regular sleeper, down for the irregular one.
++        assertTrue(regular.getValue("restMean") > 0.0)
++        assertTrue(irregular.getValue("restMean") < 0.0)
++        assertTrue(regular.getValue("restMaxAbs") <= 5.0 && irregular.getValue("restMaxAbs") <= 5.0)
++        assertTrue(regular.getValue("chargeMaxAbs") <= 3.0 && irregular.getValue("chargeMaxAbs") <= 3.0)
+     }
+ }
+diff --git a/android/app/src/test/java/com/noop/analytics/VictorRestSingleResolverTest.kt b/android/app/src/test/java/com/noop/analytics/VictorRestSingleResolverTest.kt
+index ca118326d..87767728e 100644
+--- a/android/app/src/test/java/com/noop/analytics/VictorRestSingleResolverTest.kt
++++ b/android/app/src/test/java/com/noop/analytics/VictorRestSingleResolverTest.kt
+@@ -7,9 +7,9 @@ import org.junit.Test
+ 
+ /**
+  * victor:rest — "assert the single resolver" (AGENTS.md, two readouts of one fact): every Rest reader goes
+- * through [VictorSleepNeed], so a reader that scores Rest on upstream's 8 h and neutral 0.5 (or a fresh
+- * need of its own) cannot slip back in — including one an upstream release adds. Counted over the app's
+- * main sources with comments stripped.
++ * through [VictorSleepNeed], so a reader that scores Rest on upstream's 8 h and neutral 0.5, a fresh need of
++ * its own or another regularity cannot slip back in — including one an upstream release adds. Counted over
++ * the app's main sources with comments stripped.
+  */
+ class VictorRestSingleResolverTest {
+ 
+@@ -56,4 +56,23 @@ class VictorRestSingleResolverTest {
+             callSites("personalizedNeedHours("),
+         )
+     }
++
++    /**
++     * The «Consistencia» card and Rest read ONE bedtime regularity: [VictorSleepNeed.bedtimeRegularity] runs
++     * in the pass (published) and the start-up warm-up only; the card's old per-session spread is no longer
++     * read; the duration regularity stays where it is not a Sleep readout (pass 1's unread `DayResult.rest`
++     * and the Vitality age).
++     */
++    @Test
++    fun theRegularityIsResolvedOnlyByTheResolver() {
++        assertEquals(
++            mapOf("VictorSleepNeed.kt" to 2, "IntelligenceEngine.kt" to 1),
++            callSites("bedtimeRegularity("),
++        )
++        assertEquals(mapOf("SleepModelLogic.kt" to 1), callSites("consistencySeries("))   // its declaration
++        assertEquals(
++            mapOf("IntelligenceEngine.kt" to 2, "HealthScreen.kt" to 1),
++            callSites("VitalityEngine.sleepConsistency("),
++        )
++    }
+ }
+diff --git a/android/app/src/test/java/com/noop/analytics/VictorSleepNeedTest.kt b/android/app/src/test/java/com/noop/analytics/VictorSleepNeedTest.kt
+index 2b02b947b..070343224 100644
+--- a/android/app/src/test/java/com/noop/analytics/VictorSleepNeedTest.kt
++++ b/android/app/src/test/java/com/noop/analytics/VictorSleepNeedTest.kt
+@@ -2,7 +2,10 @@ package com.noop.analytics
+ 
+ import com.noop.data.DailyMetric
+ import com.noop.data.MetricSeriesRow
++import com.noop.data.SleepSession
+ import java.time.LocalDate
++import java.time.ZoneId
++import java.time.ZonedDateTime
+ import org.junit.After
+ import org.junit.Assert.assertEquals
+ import org.junit.Assert.assertNotEquals
+@@ -11,15 +14,19 @@ import org.junit.Assert.assertTrue
+ import org.junit.Test
+ 
+ /**
+- * victor:rest — [VictorSleepNeed]: one need and one regularity per night, from the nights before it (need)
+- * and up to it (regularity), and the analysis pass's rescoring of the stored Rest and Charge with them.
++ * victor:rest — [VictorSleepNeed]: one need per night from the nights before it, one bedtime regularity per
++ * night from the main-night bedtimes up to it (the «Consistencia» card's figure), and the analysis pass's
++ * rescoring of the stored Rest and Charge with them.
+  */
+ class VictorSleepNeedTest {
+ 
+     @After fun tearDown() {
+         VictorSleepNeed.ageSource = { null }
++        VictorSleepNeed.publishRegularity(emptyMap())
+     }
+ 
++    private val utc: ZoneId = ZoneId.of("UTC")
++
+     private fun day(i: Int) = LocalDate.parse("2026-07-01").plusDays(i.toLong()).toString()
+ 
+     private fun night(i: Int, hours: Double?, deviceId: String = "my-whoop-noop") = DailyMetric(
+@@ -29,55 +36,152 @@ class VictorSleepNeedTest {
+         avgHrv = 60.0, restingHr = 52, respRateBpm = 15.0,
+     )
+ 
++    /** A sleep session going to bed on the evening before wake day [i] at [hh]:[mm] in [zone], [hours] long. */
++    private fun bed(i: Int, hh: Int, mm: Int, hours: Double = 8.0, zone: ZoneId = utc, wakeDayOffset: Long = -1): SleepSession {
++        val date = LocalDate.parse("2026-07-01").plusDays(i.toLong() + wakeDayOffset)
++        val start = ZonedDateTime.of(date.year, date.monthValue, date.dayOfMonth, hh, mm, 0, 0, zone).toEpochSecond()
++        return SleepSession(deviceId = "my-whoop-noop", startTs = start, endTs = start + (hours * 3600).toLong())
++    }
++
++    // ── Need ─────────────────────────────────────────────────────────────────────────────────────────
++
+     @Test
+     fun theNeedIsTheUpperQuartileOfTheNightsBeforeAndLeavesTheNightItselfOut() {
+         val hours = listOf(7.0, 7.5, 8.0, 8.5, 9.0, 7.2, 7.8, 8.1, 7.4, 8.8)
+         val rows = hours.mapIndexed { i, h -> night(i, h) } + night(10, 12.0) + night(11, 7.5)
+-        val nights = VictorSleepNeed.resolve(rows, age = 26)
+-
++        val nights = VictorSleepNeed.resolve(rows, emptyMap(), age = 26)
+         assertEquals(RestScorer.personalizedNeedHours(hours, 26), nights.getValue(day(10)).needHours, 1e-12)
+-        // The 12 h night does not raise its own bar, but it is history for the night after.
+         assertEquals(RestScorer.personalizedNeedHours(hours + 12.0, 26), nights.getValue(day(11)).needHours, 1e-12)
+         assertNotEquals(nights.getValue(day(10)).needHours, nights.getValue(day(11)).needHours)
+     }
+ 
+     @Test
+-    fun theRegularityIncludesTheNightAndTheTwentyEightBeforeAtMost() {
+-        val hours = (0 until 40).map { if (it % 2 == 0) 6.5 else 8.5 }
+-        val nights = VictorSleepNeed.resolve(hours.mapIndexed { i, h -> night(i, h) }, age = 26)
+-        val expected = VitalityEngine.sleepConsistency(hours.subList(12, 40))
+-        assertEquals(expected!!, nights.getValue(day(39)).regularity!!, 1e-12)
+-        assertEquals(VitalityEngine.sleepConsistency(hours.subList(0, 3))!!, nights.getValue(day(2)).regularity!!, 1e-12)
+-    }
+-
+-    @Test
+-    fun coldStartReadsThePopulationDefaultsAndNoRegularity() {
+-        val nights = VictorSleepNeed.resolve(listOf(night(0, 9.0), night(1, 9.2), night(2, 9.1)), age = 26)
+-        assertEquals(8.0, nights.getValue(day(2)).needHours, 0.0)   // fewer than 7 nights before it
+-        assertNull(nights.getValue(day(1)).regularity)               // fewer than 3 nights
+-        assertTrue(nights.getValue(day(2)).regularity != null)
++    fun coldStartReadsThePopulationDefault() {
++        val nights = VictorSleepNeed.resolve(listOf(night(0, 9.0), night(1, 9.2), night(2, 9.1)), emptyMap(), age = 26)
++        assertEquals(8.0, nights.getValue(day(2)).needHours, 0.0)
++        assertNull(nights.getValue(day(2)).regularity)
+     }
+ 
+     @Test
+     fun onlyTheLastNinetyNightsSetTheNeedAndNoDataDaysAreSkipped() {
+-        // Ten long nights long ago, then 90 nights of 7.5 h with a gap day: the long ones have aged out.
+         val rows = (0 until 10).map { night(it, 10.0) } + (10 until 100).map { night(it, 7.5) } +
+             night(100, null) + night(101, 7.5)
+-        val nights = VictorSleepNeed.resolve(rows.shuffled(java.util.Random(7)), age = 26)
+-        assertEquals(8.0, nights.getValue(day(101)).needHours, 0.0)   // 7.5 h upper quartile, floored at 8
+-        assertEquals(10.0.coerceAtMost(RestScorer.maxNeedHours), nights.getValue(day(15)).needHours, 0.0)
++        val nights = VictorSleepNeed.resolve(rows.shuffled(java.util.Random(7)), emptyMap(), age = 26)
++        assertEquals(8.0, nights.getValue(day(101)).needHours, 0.0)
++        assertEquals(RestScorer.maxNeedHours, nights.getValue(day(15)).needHours, 0.0)
+     }
+ 
+     @Test
+     fun aTeenagersNeedKeepsTheNineHourFloor() {
+         val rows = (0 until 20).map { night(it, 8.0) }
+-        assertEquals(9.0, VictorSleepNeed.resolve(rows, age = 15).getValue(day(19)).needHours, 0.0)
+-        assertEquals(8.0, VictorSleepNeed.resolve(rows, age = 40).getValue(day(19)).needHours, 0.0)
++        assertEquals(9.0, VictorSleepNeed.resolve(rows, emptyMap(), age = 15).getValue(day(19)).needHours, 0.0)
++        assertEquals(8.0, VictorSleepNeed.resolve(rows, emptyMap(), age = 40).getValue(day(19)).needHours, 0.0)
+         VictorSleepNeed.ageSource = { 15 }
+         assertEquals(9.0, VictorSleepNeed.nights(rows).getValue(day(19)).needHours, 0.0)
+         assertEquals(9.0, VictorSleepNeed.needHours(emptyMap(), null), 0.0)
+     }
+ 
++    // ── Bedtime regularity (the «Consistencia» card) ─────────────────────────────────────────────────
++
++    /** The card's hand-computed iOS-parity value (23:00 / 23:30 / 22:30 → SD 24.49 min → 79.59 %). */
++    @Test
++    fun threeBedtimesScoreTheCardsHandComputedValue() {
++        val reg = VictorSleepNeed.bedtimeRegularity(listOf(bed(1, 23, 0), bed(2, 23, 30), bed(3, 22, 30)), zone = utc)
++        assertEquals(setOf(day(3)), reg.keys)   // the first two nights have fewer than three bedtimes
++        // Circular SD (24.51 min) against the card's linear 24.49: the same score to a fiftieth of a point.
++        assertEquals(0.7958758, reg.getValue(day(3)), 5e-4)
++    }
++
++    /** Bedtimes either side of midnight are minutes apart, not a day; a day sleeper's spread reads normally. */
++    @Test
++    fun midnightAndNoonDoNotBreakTheSpread() {
++        val night = VictorSleepNeed.bedtimeRegularity(
++            listOf(bed(1, 23, 50), bed(2, 0, 10, wakeDayOffset = 0), bed(3, 23, 40), bed(4, 0, 20, wakeDayOffset = 0)),
++            zone = utc,
++        )
++        assertEquals(1.0 - 15.8 / 120.0, night.getValue(day(4)), 0.01)
++        // A day sleeper going to bed at 11:30 / 12:30 / 11:45: the card's old fold put 11:30 on the next day.
++        val day = VictorSleepNeed.bedtimeRegularity(
++            listOf(bed(1, 11, 30, wakeDayOffset = 0), bed(2, 12, 30, wakeDayOffset = 0), bed(3, 11, 45, wakeDayOffset = 0)),
++            zone = utc,
++        )
++        assertTrue(day.getValue(day(3)) in 0.7..0.85)
++    }
++
++    /** Naps are not bedtimes: only each day's main night counts (the card's per-session spread counted them). */
++    @Test
++    fun napsDoNotCountAsNights() {
++        val mains = (1..6).map { bed(it, 23, 0) }
++        val naps = (1..6).map { bed(it, 15, 0, hours = 1.0, wakeDayOffset = 0) }
++        val reg = VictorSleepNeed.bedtimeRegularity(mains + naps, zone = utc)
++        assertEquals(1.0, reg.getValue(day(6)), 1e-6)
++        assertEquals(1.0, VictorSleepNeed.mainNightSpans(mains + naps, utc).size / 6.0, 0.0)
++    }
++
++    /** Only the last 14 bedtimes within 28 days score a night: a stray bedtime 40 days back is out. */
++    @Test
++    fun theWindowIsFourteenNightsWithinTwentyEightDays() {
++        val stray = bed(0, 4, 0)
++        val recent = (40..43).map { bed(it, 23, 0) }
++        assertEquals(1.0, VictorSleepNeed.bedtimeRegularity(listOf(stray) + recent, zone = utc).getValue(day(43)), 1e-6)
++        val many = (1..30).map { i -> bed(i, if (i <= 16) 21 else 23, 0) }
++        // Nights 17..30 (the last 14) all went to bed at 23:00.
++        assertEquals(1.0, VictorSleepNeed.bedtimeRegularity(many, zone = utc).getValue(day(30)), 1e-6)
++        assertEquals(14, VictorSleepNeed.regularityWindow(VictorSleepNeed.mainNightSpans(many, utc), day(30)).size)
++    }
++
++    /** Bedtimes are read on each night's own clock: 23:00 every night across the October DST change is 100 %. */
++    @Test
++    fun aDaylightSavingNightKeepsItsLocalBedtime() {
++        val madrid = ZoneId.of("Europe/Madrid")
++        val sleeps = (110..120).map { bed(it, 23, 0, zone = madrid) }   // wake days 2026-10-19 .. 10-29 (DST ends 10-25)
++        val reg = VictorSleepNeed.bedtimeRegularity(sleeps, zone = madrid)
++        assertEquals(day(120), reg.keys.max())
++        assertEquals(1.0, reg.getValue(day(120)), 1e-6)
++    }
++
++    @Test
++    fun whoopsImportedConsistencyWinsItsNight() {
++        val sleeps = (1..5).map { bed(it, 23, 0) }
++        val reg = VictorSleepNeed.bedtimeRegularity(sleeps, importedPct = mapOf(day(5) to 64.0, day(9) to 70.0), zone = utc)
++        assertEquals(0.64, reg.getValue(day(5)), 1e-12)
++        assertEquals(0.70, reg.getValue(day(9)), 1e-12)
++        assertEquals(1.0, reg.getValue(day(4)), 1e-6)
++        // Already applied: the same map back, so a screen's memo holds.
++        assertTrue(VictorSleepNeed.withImported(reg, mapOf(day(5) to 64.0)) === reg)
++    }
++
++    /** A regular bedtime raises Rest over upstream's neutral 0.5, an irregular one lowers it. */
++    @Test
++    fun aRegularBedtimeRaisesRestAndAnIrregularOneLowersIt() {
++        val rows = (0 until 20).map { night(it, 7.6) }
++        val regular = VictorSleepNeed.bedtimeRegularity((1..19).map { bed(it, 23, 0) }, zone = utc)
++        val irregular = VictorSleepNeed.bedtimeRegularity(
++            (1..19).map { bed(it, if (it % 2 == 0) 21 else 1, 30, wakeDayOffset = if (it % 2 == 0) -1 else 0) }, zone = utc,
++        )
++        val upstream = RestScorer.restFromDaily(rows[19])!!
++        val reg = VictorSleepNeed.rest(rows[19], VictorSleepNeed.resolve(rows, regular, 26)[day(19)])!!
++        val irr = VictorSleepNeed.rest(rows[19], VictorSleepNeed.resolve(rows, irregular, 26)[day(19)])!!
++        assertTrue("regular $reg > upstream $upstream", reg > upstream)
++        assertTrue("irregular $irr < upstream $upstream", irr < upstream)
++        assertEquals(0.0, irregular.getValue(day(19)), 1e-9)   // a 4-hour swing scores 0
++    }
++
++    @Test
++    fun theScreensReadThePublishedRegularity() {
++        val rows = (0 until 20).map { night(it, 7.6) }
++        val reg = VictorSleepNeed.bedtimeRegularity((1..19).map { bed(it, 23, it % 3 * 10) }, zone = utc)
++        VictorSleepNeed.publishRegularity(reg)
++        assertEquals(reg.getValue(day(19)), VictorSleepNeed.nights(rows).getValue(day(19)).regularity!!, 0.0)
++        VictorSleepNeed.publish(rows)
++        assertEquals(
++            VictorSleepNeed.rest(rows[19], VictorSleepNeed.resolve(rows, reg, null)[day(19)])!!,
++            VictorSleepNeed.restPublished(rows[19])!!, 0.0,
++        )
++    }
++
++    // ── Rest, the pass's rescoring and the heal ─────────────────────────────────────────────────────
++
+     @Test
+     fun restIsTheUpstreamCompositeWithTheNightsInputs() {
+         val row = night(30, 7.6)
+@@ -87,14 +191,10 @@ class VictorSleepNeedTest {
+             remSeconds = 7.6 * 3600 * 0.22, sleepNeedHours = 8.3, consistency = 0.9,
+         )
+         assertEquals(expected!!, VictorSleepNeed.rest(row, n)!!, 1e-9)
+-        // No night resolved: exactly upstream's 8 h and neutral 0.5.
+         assertEquals(RestScorer.restFromDaily(row)!!, VictorSleepNeed.rest(row, null)!!, 0.0)
+     }
+ 
+-    /**
+-     * Each input moves only its own term: the need only the duration term (weight 0.50), the regularity only
+-     * the consistency term (0.10). Rounding of the composite is to 1/100, hence the 0.01 tolerance.
+-     */
++    /** Each input moves only its own term: the need the duration term (0.50), the regularity the consistency term (0.10). */
+     @Test
+     fun theNeedAndTheRegularityEachMoveOnlyTheirOwnTerm() {
+         val row = night(30, 7.6)
+@@ -103,7 +203,6 @@ class VictorSleepNeedTest {
+         val regOnly = VictorSleepNeed.rest(row, VictorSleepNeed.Night(8.0, 0.9))!!
+         assertEquals(0.5 * (7.6 / 8.3 - 7.6 / 8.0) * 100.0, needOnly - base, 0.01)
+         assertEquals(0.1 * (0.9 - 0.5) * 100.0, regOnly - base, 0.01)
+-        // A night past the need: the need no longer bites (duration is clamped at 100).
+         val long = night(31, 9.0)
+         assertEquals(
+             VictorSleepNeed.rest(long, VictorSleepNeed.Night(8.0, 0.9))!!,
+@@ -114,19 +213,19 @@ class VictorSleepNeedTest {
+     @Test
+     fun rescoreReplacesTheStoredRestAndChargesWithIt() {
+         val history = (0 until 30).map { night(it, if (it % 3 == 0) 8.6 else 7.6) }
+-        val nights = VictorSleepNeed.resolve(history, age = 26)
++        val reg = VictorSleepNeed.bedtimeRegularity((1..29).map { bed(it, 23, it % 4 * 15) }, zone = utc)
++        val nights = VictorSleepNeed.resolve(history, reg, age = 26)
+         val dailies = history.takeLast(2).map { it.copy(recovery = 50.0) }.toMutableList()
+         val rows = mutableListOf(
+-            MetricSeriesRow("my-whoop-noop", day(28), "sleep_performance", 1.0),   // the pass's old value
++            MetricSeriesRow("my-whoop-noop", day(28), "sleep_performance", 1.0),
+             MetricSeriesRow("my-whoop-noop", day(28), "spo2_candidate", 95.0),
+-            MetricSeriesRow("my-whoop", day(28), "sleep_performance", 77.0),       // an import: not ours
++            MetricSeriesRow("my-whoop", day(28), "sleep_performance", 77.0),
+         )
+         val seen = ArrayList<Pair<String, Double?>>()
+         val result = VictorSleepNeed.rescore(nights, "my-whoop-noop", dailies, rows) { row, rest ->
+             seen.add(row.day to rest)
+             (rest ?: 0.0) / 2.0
+         }
+-
+         val r28 = VictorSleepNeed.rest(history[28], nights[day(28)])!!
+         val r29 = VictorSleepNeed.rest(history[29], nights[day(29)])!!
+         assertEquals(listOf(day(28) to r28, day(29) to r29), seen)
+@@ -142,22 +241,20 @@ class VictorSleepNeedTest {
+     @Test
+     fun staleRestRewritesOnlyStoredPointsThatNoLongerMatch() {
+         val history = (0 until 20).map { night(it, if (it % 2 == 0) 8.4 else 7.4) }
+-        val nights = VictorSleepNeed.resolve(history, age = 26)
++        val nights = VictorSleepNeed.resolve(history, emptyMap(), age = 26)
+         val fresh = VictorSleepNeed.rest(history[10], nights[day(10)])!!
+         val stored = listOf(
+-            MetricSeriesRow("my-whoop-noop", day(10), "sleep_performance", fresh),          // already right
+-            MetricSeriesRow("my-whoop-noop", day(11), "sleep_performance", 80.0),           // upstream 8 h
++            MetricSeriesRow("my-whoop-noop", day(10), "sleep_performance", fresh),
++            MetricSeriesRow("my-whoop-noop", day(11), "sleep_performance", 80.0),
+         )
+         val out = VictorSleepNeed.staleRest(nights, history, stored)
+         assertEquals(listOf(day(11)), out.map { it.day })
+         assertEquals(VictorSleepNeed.rest(history[11], nights[day(11)])!!, out.single().value, 0.0)
+-        // No point stored for a day: nothing is created.
+         assertTrue(VictorSleepNeed.staleRest(nights, history, emptyList()).isEmpty())
+     }
+ 
+     @Test
+-    fun theChargeTakesTheNeedOnlyThroughRest() {
+-        // Charge has no need input of its own: with the same Rest it is the same Charge whatever the need.
++    fun theChargeTakesTheNeedAndRegularityOnlyThroughRest() {
+         val hrv = RecoveryScorer.DriverBaseline(mean = 60.0, spread = 8.0)
+         val rhr = RecoveryScorer.DriverBaseline(mean = 52.0, spread = 2.5)
+         fun charge(rest: Double) = RecoveryScorer.recovery(
+@@ -168,6 +265,8 @@ class VictorSleepNeedTest {
+         val a = VictorSleepNeed.rest(row, VictorSleepNeed.Night(8.3, 0.9))!!
+         val b = VictorSleepNeed.rest(row, VictorSleepNeed.Night(8.0, 0.5))!!
+         assertNotEquals(charge(a), charge(b), 0.0)
+-        assertEquals(charge(a), charge(VictorSleepNeed.rest(row, VictorSleepNeed.Night(8.3, 0.9))!!), 0.0)
++        // Two different (need, regularity) pairs giving the same Rest give the same Charge: no second path.
++        val same = VictorSleepNeed.rest(row, VictorSleepNeed.Night(8.3, 0.9))!!
++        assertEquals(charge(a), charge(same), 0.0)
+     }
+ }
+diff --git a/android/app/src/test/java/com/noop/ui/VictorRestAgreementTest.kt b/android/app/src/test/java/com/noop/ui/VictorRestAgreementTest.kt
+index 528f5b9e0..d7f5153c4 100644
+--- a/android/app/src/test/java/com/noop/ui/VictorRestAgreementTest.kt
++++ b/android/app/src/test/java/com/noop/ui/VictorRestAgreementTest.kt
+@@ -2,6 +2,7 @@ package com.noop.ui
+ 
+ import android.content.Context
+ import androidx.room.Room
++import com.noop.analytics.AnalyticsEngine
+ import com.noop.analytics.Baselines
+ import com.noop.analytics.ChargeBaselines
+ import com.noop.analytics.ChargeDriverLabel
+@@ -17,6 +18,8 @@ import com.noop.data.SleepSession
+ import com.noop.data.WhoopDatabase
+ import com.noop.data.WhoopRepository
+ import java.time.LocalDate
++import java.time.ZoneId
++import java.time.ZonedDateTime
+ import kotlinx.coroutines.runBlocking
+ import org.junit.After
+ import org.junit.Assert.assertEquals
+@@ -60,6 +63,7 @@ class VictorRestAgreementTest {
+     fun tearDown() {
+         VictorSleepNeed.ageSource = { null }
+         VictorSleepNeed.publish(emptyList())
++        VictorSleepNeed.publishRegularity(emptyMap())
+         db.close()
+     }
+ 
+@@ -88,14 +92,30 @@ class VictorRestAgreementTest {
+         sleepPerf = rest?.let { it / 100.0 } ?: row.efficiency, skinTempDev = row.skinTempDevC,
+     )
+ 
++    private val zone: ZoneId = ZoneId.systemDefault()
++
++    /** Night [i]'s main sleep: to bed around 23:00 local the evening before, a little jitter, [hours] long. */
++    private fun bedOf(i: Int, hours: Double = hoursOf(i)): SleepSession {
++        val evening = LocalDate.parse(day(i)).minusDays(1)
++        val start = ZonedDateTime.of(evening.year, evening.monthValue, evening.dayOfMonth, 22, 40, 0, 0, zone)
++            .toEpochSecond() + ((i * 37) % 41) * 60L
++        return SleepSession(deviceId = computed, startTs = start, endTs = start + (hours / 0.9 * 3600).toLong(), efficiency = 0.9)
++    }
++
++    /** Night 50 was hand-corrected: its bedtime moved 40 minutes earlier. */
++    private fun editedNight50() = bedOf(50).let { it.copy(userEdited = true, startTsAdjusted = it.startTs - 40 * 60) }
++
+     /**
+-     * The store as earlier passes left it (upstream's Rest and Charge), then one pass over the last 21 days
+-     * through the engine's own [IntelligenceEngine.applyPersonalRest], persisted as the pass persists.
++     * The store as earlier passes left it (upstream's Rest and Charge, the sessions of nights 0..58, night 50
++     * hand-edited), then one pass over the last 21 days through the engine's own
++     * [IntelligenceEngine.applyPersonalRest] with its detected sessions (night 59 is new, night 50's detected
++     * twin is dropped for the edit), persisted as the pass persists.
+      */
+     private suspend fun storeThenPass(): Pair<List<DailyMetric>, List<IntelligenceEngine.Computed>> {
+         val old = (0 until 60).map { night(it, hoursOf(it)) }
+         repo.upsertDailyMetrics(old.map { it.copy(recovery = charge(it, RestScorer.restFromDaily(it))) })
+         repo.upsertMetricSeries(old.map { MetricSeriesRow(computed, it.day, "sleep_performance", RestScorer.restFromDaily(it)!!) })
++        repo.upsertSleepSessions((0 until 59).filter { it != 50 }.map { bedOf(it) } + editedNight50())
+         // A WHOOP export night wins its day in the merge; a Health Connect bare total does not.
+         repo.upsertDailyMetrics(
+             listOf(
+@@ -115,18 +135,60 @@ class VictorRestAgreementTest {
+         val out = fresh.mapTo(ArrayList()) {
+             IntelligenceEngine.Computed(it.day, it.recovery, it.strain, it.totalSleepMin, it.avgHrv, it.restingHr)
+         }
++        val detected = (39 until 60).map { bedOf(it, hoursOf(it) + 0.1) }
+         val traced = ArrayList<String>()
+         IntelligenceEngine.applyPersonalRest(
+             repo, strap, computed, UserProfile(age = age.toDouble()), baselines, fresh, restRows, out, day(39),
++            detected, listOf(editedNight50()),
+             sleepTraceSink = { traced.add(it) }, recoveryTraceSink = { traced.add(it) },
+         )
+         assertTrue(traced.any { it.startsWith("rest personal day=${day(59)} need=") })
+         assertTrue(traced.any { it.startsWith("charge day=${day(59)} ") })
+         repo.upsertDailyMetrics(fresh)
+         repo.upsertMetricSeries(restRows)
++        repo.upsertSleepSessions(detected.filter { it.startTs != bedOf(50).startTs })   // the edit keeps its night
+         return fresh to out
+     }
+ 
++    /** The Sleep screen's session list, exactly as SleepScreen loads it. */
++    private suspend fun screenSleeps(): List<SleepSession> {
++        val now = System.currentTimeMillis() / 1000L
++        fun localEndDay(ts: Long): String {
++            val offsetSec = (java.util.TimeZone.getDefault().getOffset(ts * 1000) / 1000).toLong()
++            return AnalyticsEngine.dayString(ts, offsetSec)
++        }
++        return WhoopRepository.mergeSleepRichness(
++            repo.sleepSessionsUnion(strap, 0L, now), repo.computedSleepSessionsUnion(strap, 0L, now),
++        ) { localEndDay(it.endTs) }.sortedBy { it.effectiveStartTs }
++    }
++
++    @Test
++    fun theConsistencyCardAndRestReadTheSameBedtimeRegularity() = runBlocking {
++        storeThenPass()
++        val published = VictorSleepNeed.regularity.value
++        // The screen's own sessions give back exactly what the pass published (the edit and the new night in).
++        val sleeps = screenSleeps()
++        assertEquals(sleeps, repo.sleepsMergedWith(strap, computed, emptyList()))
++        assertEquals(VictorSleepNeed.bedtimeRegularity(sleeps), published)
++        assertTrue(published.getValue(day(59)) in 0.7..0.99)
++
++        val merged = repo.daysMerged(strap)
++        val last = day(59)
++        val model = buildSleepModel(merged, null, todayKey = last, sessions = sleeps)!!
++        val stored = repo.metricSeries(computed, "sleep_performance", last, last).single().value
++        val n = VictorSleepNeed.resolve(merged, published, age).getValue(last)
++        // «Consistencia» = the regularity the stored Rest of that night was scored with.
++        assertEquals(published.getValue(last) * 100.0, model.consistency.latest!!, 1e-9)
++        assertEquals(n.regularity!!, model.consistency.latest!! / 100.0, 1e-12)
++        assertEquals(RestScorer.restFromDaily(merged.last(), consistency = n.regularity, sleepNeedHours = n.needHours)!!, stored, 0.0)
++        // The detail graph reads the same per-night figure.
++        val graph = buildSleepMetricPoints(merged, "consistency").toMap()
++        assertEquals(published.getValue(last) * 100.0, graph.getValue(last), 1e-9)
++        // The edited bedtime is the one that counts: 40 minutes earlier changes night 50's regularity.
++        val unedited = VictorSleepNeed.bedtimeRegularity(sleeps.map { if (it.userEdited) it.copy(startTsAdjusted = null) else it })
++        assertNotEquals(unedited.getValue(day(50)), published.getValue(day(50)), 1e-6)
++    }
++
+     @Test
+     fun thePassResolvesFromTheHistoryTheScreensReadAfterIt() = runBlocking {
+         val (fresh, _) = storeThenPass()
+@@ -142,7 +204,7 @@ class VictorRestAgreementTest {
+     fun theSleepScreenShowsTheNeedAndRestTheStoredRestAndChargeUsed() = runBlocking {
+         val (fresh, out) = storeThenPass()
+         val merged = repo.daysMerged(strap)
+-        val nights = VictorSleepNeed.resolve(merged, age)
++        val nights = VictorSleepNeed.resolve(merged, VictorSleepNeed.regularity.value, age)
+         val last = day(59)
+         val lastRow = merged.single { it.day == last }
+         val stored = repo.metricSeries(computed, "sleep_performance", "0000-00-00", "9999-99-99").associate { it.day to it.value }
+-- 
+2.54.0
+
