@@ -1,0 +1,1612 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 15:56:24 +0200
+Subject: [PATCH] =?UTF-8?q?fix:=20audit=202026-10-20=20=E2=80=94=20one=20"?=
+ =?UTF-8?q?today",=20coach=20meals,=20weekly=20timing?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Findings of the 2026-10-20 audit (A gasto, B ingesta/tiempo, C indicadores), fixed in the fork's own code:
+
+- One "today": FoodDays.today() is the meal day (04:00 roll, upstream's logical day) everywhere the fork
+  says today: the Today and Food cards, the history, the day chips, the coach's TODAY/FOOD LOG/balance,
+  the meal marks and the week. A dinner logged at 00:45 is on the day Today still shows.
+- Week: last week is reviewed (and shown, also to the coach) from 10:00 on the new week's first day, so the
+  late Sunday dinner, its mark and the strap's morning hand-over are in; the review sees every workout the
+  coach and the Workouts list see (Health Connect, files, lifting apps, detected); weeks start on the
+  locale's first day like the Food history and «Mi día».
+- Coach: what was eaten today (foods per meal, cut at 120 chars) and the previous days' P/C/F averages;
+  steps in the Today card's order (strap first); NIGHTS takes the day's main sleep, never a nap.
+- Food card: no "if you eat nothing more, a deficit of…" with nothing logged; the burn reloads when the
+  strap syncs, a Health Connect import ends or a workout is analysed (Today, Food, history, «Tu gasto real»).
+- Meal marks: the prompt says how much of the served portion was eaten; a corrected food name or macros
+  asks for a new mark (marks stored before keep showing); one English name per meal type in every prompt.
+- Moving a meal to another day keeps a 01:30 dinner in the small hours of its new day.
+- Health Connect refresh: a failed active-calories read no longer leaves the activity inside the basal
+  (phone total counted the activity twice).
+- Workouts analysed on under 20 heart-rate samples are re-checked for 14 days (a strap that synced late).
+- Repair pass: a logged day whose calories_in in the nutrition lane was lost or replaced is rewritten;
+  CSV days without photos are never touched.
+- Profile, scale and goals lines for the meal marks, the week and the workout estimate come from one
+  helper (VictorPersonLines), with the coach's consent inside.
+
+No data model changes: no new JSON fields, no Room changes, nothing deleted.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../java/com/noop/ai/VictorCoachExtras.kt     | 30 +++++--
+ .../java/com/noop/ai/VictorCoachVitals.kt     |  7 +-
+ .../java/com/noop/ai/VictorPersonLines.kt     | 32 ++++++++
+ .../java/com/noop/food/FoodCoachContext.kt    | 49 +++++++-----
+ .../main/java/com/noop/food/FoodDayCard.kt    | 65 +++++++++++----
+ .../main/java/com/noop/food/FoodHistory.kt    |  7 +-
+ .../src/main/java/com/noop/food/FoodModels.kt | 35 +++++---
+ .../java/com/noop/food/FoodNutritionSync.kt   | 22 ++++-
+ .../src/main/java/com/noop/food/FoodScorer.kt | 23 +-----
+ .../src/main/java/com/noop/food/FoodScreen.kt | 16 ++--
+ .../src/main/java/com/noop/food/FoodSheet.kt  |  2 +-
+ .../src/main/java/com/noop/food/FoodStore.kt  | 11 ++-
+ .../main/java/com/noop/food/MealScoring.kt    | 49 +++++++++---
+ .../java/com/noop/food/TodayFoodSection.kt    |  8 +-
+ .../java/com/noop/ingest/VictorHcRefresh.kt   |  7 +-
+ .../com/noop/training/TrainingAnalyzer.kt     | 32 +++++---
+ .../main/java/com/noop/weekly/WeeklyCard.kt   |  8 +-
+ .../main/java/com/noop/weekly/WeeklyReview.kt | 48 ++++++-----
+ .../java/com/noop/weekly/WeeklyReviewer.kt    | 35 ++++----
+ .../java/com/noop/ai/VictorCoachExtrasTest.kt | 21 +++++
+ .../java/com/noop/ai/VictorCoachVitalsTest.kt | 15 ++++
+ .../test/java/com/noop/food/FoodLogTest.kt    | 80 ++++++++++++++++++-
+ .../java/com/noop/food/MealScoringTest.kt     | 46 +++++++++++
+ .../com/noop/food/VictorWiringAuditTest.kt    | 70 ++++++++++++++++
+ .../com/noop/ingest/VictorHcRefreshTest.kt    | 14 ++++
+ .../java/com/noop/training/TrainingTest.kt    | 17 ++++
+ .../java/com/noop/weekly/WeeklyReviewTest.kt  | 71 +++++++++++++++-
+ 27 files changed, 648 insertions(+), 172 deletions(-)
+ create mode 100644 android/app/src/main/java/com/noop/ai/VictorPersonLines.kt
+ create mode 100644 android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+index abf138a3..f2a2791d 100644
+--- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
++++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+@@ -1,6 +1,8 @@
+ package com.noop.ai
+ 
+ import android.content.Context
++import com.noop.data.AppleDaily
++import com.noop.data.DailyMetric
+ import com.noop.data.WhoopRepository
+ import com.noop.day.DayCoachContext
+ import com.noop.food.AdaptiveState
+@@ -50,21 +52,22 @@ internal object VictorCoachExtras {
+ 
+     suspend fun block(ctx: Context, repo: WhoopRepository, strapId: String): String? {
+         val now = LocalDateTime.now()
+-        val today = now.toLocalDate().toString()
++        // The day Today shows: before 04:00 it is still the evening's day (FoodDays.today, ui/LogicalDay.kt).
++        val today = FoodDays.today()
+         val scale = runCatching { ScaleImport.snapshot(repo, ScaleImport.newestReading(ctx)) }.getOrNull()
+         val strapAt = runCatching { newestStrapSample(repo, strapId) }.getOrNull()
+         return listOfNotNull(
+             freshnessLine(now, strapAt, ZoneId.systemDefault()),
+             VictorCoachVitals.profileLine(ctx, scaleHasWeight = scale?.weight != null),
+             runCatching { todayLine(ctx, repo, strapId, today) }.getOrNull(),
+-            runCatching { weekBalanceLine(ctx, repo, strapId, LocalDate.now()) }.getOrNull(),
++            runCatching { weekBalanceLine(ctx, repo, strapId, LocalDate.parse(today)) }.getOrNull(),
+             runCatching { adaptiveLine(FoodAdaptive.load(ctx, repo, strapId)) }.getOrNull(),
+             runCatching { VictorCoachVitals.nightsBlock(repo, strapId) }.getOrNull(),
+             runCatching { VictorCoachStress.line(ctx, repo, strapId) }.getOrNull(),
+             runCatching { VictorCoachVitals.bloodPressureLine(repo, strapId) }.getOrNull(),
+             runCatching { VictorCoachVitals.fitnessLine(repo, strapId) }.getOrNull(),
+             ScaleCoachContext.line(scale),
+-            runCatching { FoodCoachContext.line(ctx) }.getOrNull(),
++            runCatching { FoodCoachContext.line(ctx, LocalDate.parse(today)) }.getOrNull(),
+             runCatching { TrainingCoachContext.line(ctx, repo, strapId) }.getOrNull(),
+             runCatching { weeklyLine(ctx) }.getOrNull(),
+             runCatching { VictorCoachVitals.waterLine(repo) }.getOrNull(),
+@@ -75,7 +78,7 @@ internal object VictorCoachExtras {
+ 
+     /** victor:weekly — last week's review, when there is one for the week that just ended. */
+     private suspend fun weeklyLine(ctx: Context): String? {
+-        val start = com.noop.weekly.WeeklyReviews.lastWeekStart(LocalDate.now()).toString()
++        val start = com.noop.weekly.WeeklyReviews.dueWeekStart(LocalDateTime.now()).toString()
+         return com.noop.weekly.WeeklyReviewer.load(ctx).lastOrNull { it.weekStart == start }?.let { com.noop.weekly.WeeklyReviews.coachLine(it) }
+     }
+ 
+@@ -104,15 +107,24 @@ internal object VictorCoachExtras {
+     }
+ 
+     private suspend fun todayLine(ctx: Context, repo: WhoopRepository, strapId: String, today: String): String? {
+-        // Steps resolved like the Today Steps card: the phone's imported count first, else the strap day.
+         val steps = runCatching {
+-            stepsForDay(repo.appleDaily("apple-health", today, today), repo.appleDaily("health-connect", today, today), today)
+-        }.getOrNull() ?: runCatching { repo.daysMerged(strapId).lastOrNull { it.day == today }?.steps }.getOrNull()
++            todaySteps(
++                repo.daysMerged(strapId), repo.appleDaily("apple-health", today, today),
++                repo.appleDaily("health-connect", today, today), today,
++            )
++        }.getOrNull()
+         val energy = FoodEnergy.load(ctx, repo, strapId, today)
+         val eaten = runCatching { FoodDays.totalsFor(FoodStore.load(ctx), today)?.kcal }.getOrNull()
+         return todayLine(today, LocalTime.now(), steps, energy, eaten)
+     }
+ 
++    /**
++     * Pure: today's steps resolved like the Today Steps card (`day?.steps ?: importedStepsForDay`): the strap
++     * day first, else the phone's imported count.
++     */
++    internal fun todaySteps(days: List<DailyMetric>, apple: List<AppleDaily>, healthConnect: List<AppleDaily>, today: String): Int? =
++        days.lastOrNull { it.day == today }?.steps ?: stepsForDay(apple, healthConnect, today)
++
+     /** Pure: the TODAY line, or null when nothing about today is known yet. */
+     internal fun todayLine(day: String, time: LocalTime, steps: Int?, energy: FoodEnergy?, eatenKcal: Double?): String? {
+         val parts = buildList {
+@@ -132,7 +144,9 @@ internal object VictorCoachExtras {
+             }
+         }
+         if (parts.isEmpty()) return null
+-        return "TODAY so far ($day, ${time.format(HHMM)}): " + parts.joinToString("; ")
++        // [day] is the logical day: before 04:00 the clock is already past its midnight.
++        val clock = time.format(HHMM) + if (time < LocalTime.of(4, 0)) " past midnight" else ""
++        return "TODAY so far ($day, $clock): " + parts.joinToString("; ")
+     }
+ 
+     private suspend fun weekBalanceLine(ctx: Context, repo: WhoopRepository, strapId: String, today: LocalDate): String? {
+diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt b/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
+index 65677edd..a216904b 100644
+--- a/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
++++ b/android/app/src/main/java/com/noop/ai/VictorCoachVitals.kt
+@@ -63,9 +63,12 @@ internal object VictorCoachVitals {
+         return nightsBlock(days, sessions, ZoneId.systemDefault())
+     }
+ 
+-    /** Pure: newest first, one line per day that has any of the figures; null when none has. */
++    /**
++     * Pure: newest first, one line per day that has any of the figures; null when none has. Bed/up are the
++     * day's main sleep (the longest session ending that day), never a nap or a fragment that ended later.
++     */
+     internal fun nightsBlock(days: List<DailyMetric>, sessions: List<SleepSession>, zone: ZoneId): String? {
+-        val byWakeDay = sessions.associateBy { localDay(it.endTs, zone) }
++        val byWakeDay = sessions.groupBy { localDay(it.endTs, zone) }.mapValues { (_, s) -> s.maxBy { it.endTs - it.effectiveStartTs } }
+         val lines = days.sortedByDescending { it.day }.mapNotNull { d ->
+             val s = byWakeDay[d.day]
+             val parts = buildList {
+diff --git a/android/app/src/main/java/com/noop/ai/VictorPersonLines.kt b/android/app/src/main/java/com/noop/ai/VictorPersonLines.kt
+new file mode 100644
+index 00000000..0034471b
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/ai/VictorPersonLines.kt
+@@ -0,0 +1,32 @@
++package com.noop.ai
++
++import android.content.Context
++import com.noop.data.WhoopRepository
++import com.noop.goals.VictorGoals
++import com.noop.goals.VictorGoalsStore
++import com.noop.ingest.ScaleImport
++
++/**
++ * victor:person — who the wearer is, for the prompts beside the coach (a meal's mark, the week's review, a
++ * workout's estimate): the PROFILE, the smart-scale BODY and the GOALS lines, read as the coach reads them,
++ * and only with the coach's data consent (all null without it). One place, so the three prompts cannot drift.
++ */
++internal data class VictorPersonLines(val profile: String?, val body: String?, val goals: String?) {
++
++    /** The lines present, in the coach's order. */
++    val lines: List<String> get() = listOfNotNull(profile, body, goals)
++
++    companion object {
++        val NONE = VictorPersonLines(null, null, null)
++
++        suspend fun load(ctx: Context, repo: WhoopRepository): VictorPersonLines {
++            if (!AiKeyStore.readConsent(ctx)) return NONE
++            val scale = runCatching { ScaleImport.snapshot(repo, ScaleImport.newestReading(ctx)) }.getOrNull()
++            return VictorPersonLines(
++                profile = runCatching { VictorCoachVitals.profileLine(ctx, scaleHasWeight = scale?.weight != null) }.getOrNull(),
++                body = ScaleCoachContext.line(scale),
++                goals = runCatching { VictorGoals.coachLine(VictorGoalsStore.load(ctx), scale?.weight?.value) }.getOrNull(),
++            )
++        }
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/food/FoodCoachContext.kt b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
+index a56f2e1e..dcc75168 100644
+--- a/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
++++ b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
+@@ -5,21 +5,26 @@ import java.time.LocalDate
+ import kotlin.math.roundToInt
+ 
+ /**
+- * victor:food — one compact English line about the photo food log for the AI Coach prompt. Not wired
+- * here: the Coach adds it to its context. Numbers are whole (no locale-dependent decimals).
++ * victor:food — the photo food log for the AI Coach prompt: one compact English line, plus one short line per
++ * meal of today naming its foods. Not wired here: the Coach adds it to its context. Numbers are whole (no
++ * locale-dependent decimals).
+  */
+ object FoodCoachContext {
+ 
+     private const val PREFIX = "FOOD LOG (photo estimates): "
+     private const val WINDOW_DAYS = 7L
+ 
++    /** Food names per meal stop here, as in the week's review: enough to say what it was, short enough for the block. */
++    private const val FOODS_CHARS = 120
++
+     /** Null when nothing is logged today or in the previous 7 days. Reads the log from disk. */
+-    suspend fun line(ctx: Context, today: LocalDate = LocalDate.now()): String? =
++    suspend fun line(ctx: Context, today: LocalDate = LocalDate.parse(FoodDays.today())): String? =
+         line(FoodStore.load(ctx), today, FoodStore.loadScores(ctx))
+ 
+     /**
+      * Pure. Example: `FOOD LOG (photo estimates): today 1850 kcal (P 120 g, C 180 g, F 60 g) from 3 meals
+-     * (breakfast 400, lunch 900, dinner 550 kcal); previous 7 days avg 2100 kcal/day over 6 logged days`.
++     * (breakfast 400, lunch 900, dinner 550 kcal); previous 7 days avg 2100 kcal/day (P 110 g, C 240 g, F 70 g)
++     * over 6 logged days`, then one indented line per meal of today with its foods (`  lunch: Lentejas, Pan`).
+      * Today is left out of the average because it is still in progress.
+      */
+     internal fun line(entries: List<FoodEntry>, today: LocalDate, scores: Map<String, MealScore> = emptyMap()): String? {
+@@ -30,35 +35,37 @@ object FoodCoachContext {
+         if (todayEntries.isEmpty() && prior.isEmpty()) return null
+ 
+         val parts = ArrayList<String>(2)
++        val meals = FoodDays.groupedByMeal(todayEntries)
+         if (todayEntries.isNotEmpty()) {
+             val t = FoodTotals.ofEntries(todayEntries)
+             val n = todayEntries.size
+-            parts += "today ${t.kcal.roundToInt()} kcal (P ${t.proteinG.roundToInt()} g, " +
+-                "C ${t.carbsG.roundToInt()} g, F ${t.fatG.roundToInt()} g) from $n ${if (n == 1) "meal" else "meals"} (" +
+-                FoodDays.groupedByMeal(todayEntries).joinToString(", ") { (meal, list) ->
+-                    "${coachName(meal)} ${FoodTotals.ofEntries(list).kcal.roundToInt()}" + scoreText(scores, todayKey, meal, list)
++            parts += "today ${t.kcal.roundToInt()} kcal (${macros(t)}) from $n ${if (n == 1) "meal" else "meals"} (" +
++                meals.joinToString(", ") { (meal, list) ->
++                    "${meal.englishName} ${FoodTotals.ofEntries(list).kcal.roundToInt()}" + scoreText(scores, todayKey, meal, list)
+                 } + " kcal)"
+         } else {
+             parts += "today nothing logged yet"
+         }
+         if (prior.isNotEmpty()) {
+-            val avg = prior.values.map { FoodTotals.ofEntries(it).kcal }.average().roundToInt()
++            val days = prior.values.map { FoodTotals.ofEntries(it) }
++            val avg = FoodTotals(
++                days.map { it.kcal }.average(), days.map { it.proteinG }.average(),
++                days.map { it.carbsG }.average(), days.map { it.fatG }.average(),
++            )
+             val d = prior.size
+-            parts += "previous $WINDOW_DAYS days avg $avg kcal/day over $d logged ${if (d == 1) "day" else "days"}"
++            parts += "previous $WINDOW_DAYS days avg ${avg.kcal.roundToInt()} kcal/day (${macros(avg)}) over $d logged ${if (d == 1) "day" else "days"}"
++        }
++        // What was eaten, not only how much: one line per meal of today with its foods.
++        val foods = meals.mapNotNull { (meal, list) ->
++            list.flatMap { it.items }.map { it.name.trim() }.filter { it.isNotEmpty() }.takeIf { it.isNotEmpty() }
++                ?.let { "  ${meal.englishName}: ${it.joinToString(", ").take(FOODS_CHARS)}" }
+         }
+-        return PREFIX + parts.joinToString("; ")
++        return (listOf(PREFIX + parts.joinToString("; ")) + foods).joinToString("\n")
+     }
+ 
++    private fun macros(t: FoodTotals) = "P ${t.proteinG.roundToInt()} g, C ${t.carbsG.roundToInt()} g, F ${t.fatG.roundToInt()} g"
++
+     /** victor:scores — " (score 8/10)" when the meal as it is now has Claude's mark. */
+     private fun scoreText(scores: Map<String, MealScore>, day: String, meal: MealType, list: List<FoodEntry>): String =
+-        scores[MealScoring.key(day, meal)]?.takeIf { it.signature == MealScoring.signature(list) }?.let { " (meal score ${it.score}/10)" }.orEmpty()
+-
+-    private fun coachName(meal: MealType): String = when (meal) {
+-        MealType.BREAKFAST -> "breakfast"
+-        MealType.MID_MORNING -> "mid-morning snack"
+-        MealType.LUNCH -> "lunch"
+-        MealType.SNACK -> "afternoon snack"
+-        MealType.DINNER -> "dinner"
+-        MealType.NIBBLE -> "nibbles"
+-    }
++        scores[MealScoring.key(day, meal)]?.takeIf { MealScoring.isCurrent(it, list) }?.let { " (meal score ${it.score}/10)" }.orEmpty()
+ }
+diff --git a/android/app/src/main/java/com/noop/food/FoodDayCard.kt b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
+index bbf6b623..4f57c2bb 100644
+--- a/android/app/src/main/java/com/noop/food/FoodDayCard.kt
++++ b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
+@@ -10,10 +10,16 @@ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.filled.Add
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.graphics.Color
++import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import com.noop.R
++import com.noop.ingest.VictorHcRefresh
++import com.noop.training.TrainingAnalyzer
++import com.noop.training.TrainingStore
++import com.noop.ui.AppViewModel
+ import com.noop.ui.Metrics
+ import com.noop.ui.NoopButton
+ import com.noop.ui.NoopButtonKind
+@@ -79,7 +85,7 @@ internal fun FoodDayCard(
+                     color = if (left >= 0) Palette.textSecondary else Palette.metricAmber,
+                 )
+             }
+-            EnergyLines(totals.kcal, energy)
++            EnergyLines(totals.kcal, meals, energy)
+             if (onAdd != null) {
+                 NoopButton(
+                     text = uiString(R.string.victor_food_add_meal),
+@@ -95,10 +101,11 @@ internal fun FoodDayCard(
+ 
+ /**
+  * Burned (so far, for today) and where the day stands. Today shows where it closes if nothing more is
+- * eaten; a past day shows its actual balance.
++ * eaten; a past day shows its actual balance. With no meal logged there is no balance: nothing logged is
++ * not a fast ([balanceLine]).
+  */
+ @Composable
+-private fun EnergyLines(intakeKcal: Double, energy: FoodEnergy?) {
++private fun EnergyLines(intakeKcal: Double, meals: Int, energy: FoodEnergy?) {
+     energy ?: return
+     Column(verticalArrangement = Arrangement.spacedBy(Metrics.space2)) {
+         Text(
+@@ -113,23 +120,47 @@ private fun EnergyLines(intakeKcal: Double, energy: FoodEnergy?) {
+         if (energy.trainingKcal >= 1) {
+             Text(uiString(R.string.victor_food_training_extra, whole(energy.trainingKcal)), style = NoopType.caption, color = Palette.textSecondary)
+         }
+-        val balance = if (energy.isToday) energy.projectedBalance(intakeKcal) else energy.balance(intakeKcal)
+-        Text(
+-            uiString(
+-                when {
+-                    energy.isToday && balance < 0 -> R.string.victor_food_projected_deficit
+-                    energy.isToday -> R.string.victor_food_projected_surplus
+-                    balance < 0 -> R.string.victor_food_balance_deficit
+-                    else -> R.string.victor_food_balance_surplus
+-                },
+-                whole(abs(balance)),
+-            ),
+-            style = NoopType.headline,
+-            color = if (balance < 0) Palette.chargeColor else Palette.metricAmber,
+-        )
++        balanceLine(intakeKcal, meals, energy)?.let { (label, balance) ->
++            Text(
++                uiString(label, whole(abs(balance))),
++                style = NoopType.headline,
++                color = if (balance < 0) Palette.chargeColor else Palette.metricAmber,
++            )
++        }
+     }
+ }
+ 
++/**
++ * Pure: the balance line's text and kcal (negative = deficit), or null with no meal logged, as the coach
++ * leaves it out then too: "if you eat nothing more, a deficit of 1,800" reads as a fast, not as nothing logged.
++ */
++internal fun balanceLine(intakeKcal: Double, meals: Int, energy: FoodEnergy): Pair<Int, Double>? {
++    if (meals == 0) return null
++    val balance = if (energy.isToday) energy.projectedBalance(intakeKcal) else energy.balance(intakeKcal)
++    val label = when {
++        energy.isToday && balance < 0 -> R.string.victor_food_projected_deficit
++        energy.isToday -> R.string.victor_food_projected_surplus
++        balance < 0 -> R.string.victor_food_balance_deficit
++        else -> R.string.victor_food_balance_surplus
++    }
++    return label to balance
++}
++
++/**
++ * victor:food — what a day's burn ([FoodEnergy], [FoodAdaptive]) is read from besides the food log: the strap's
++ * day rows (a sync recomputes them), the full Health Connect import, the two-day refresh and the workout
++ * analyses. Every card that loads them keys on this, so its figures follow a sync without leaving the screen.
++ */
++@Composable
++internal fun energyInputs(vm: AppViewModel): List<Any?> {
++    val days by vm.recentDays.collectAsStateWithLifecycle()
++    val hcImport by vm.hcLastSync.collectAsStateWithLifecycle()
++    val hcRefresh by VictorHcRefresh.version.collectAsStateWithLifecycle()
++    val sessions by TrainingStore.sessions.collectAsStateWithLifecycle()
++    val rows by TrainingAnalyzer.rowsChanged.collectAsStateWithLifecycle()
++    return listOf(days, hcImport, hcRefresh, sessions, rows)
++}
++
+ internal fun energySourceLabel(source: EnergySource): Int = when (source) {
+     EnergySource.STRAP -> R.string.victor_food_source_strap
+     EnergySource.PHONE -> R.string.victor_food_source_phone
+diff --git a/android/app/src/main/java/com/noop/food/FoodHistory.kt b/android/app/src/main/java/com/noop/food/FoodHistory.kt
+index 27ff165a..c898470e 100644
+--- a/android/app/src/main/java/com/noop/food/FoodHistory.kt
++++ b/android/app/src/main/java/com/noop/food/FoodHistory.kt
+@@ -35,6 +35,7 @@ import androidx.compose.ui.platform.LocalConfiguration
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.unit.dp
+ import com.noop.R
++import com.noop.day.DayCalendar
+ import com.noop.ui.AppViewModel
+ import com.noop.ui.Metrics
+ import com.noop.ui.NoopCard
+@@ -47,7 +48,6 @@ import kotlinx.coroutines.withContext
+ import java.time.LocalDate
+ import java.time.format.DateTimeFormatter
+ import java.time.temporal.TemporalAdjusters
+-import java.time.temporal.WeekFields
+ import java.util.Locale
+ import kotlin.math.max
+ 
+@@ -76,7 +76,7 @@ internal object FoodHistory {
+      */
+     fun points(days: List<HistoryDay>, weekly: Boolean, today: LocalDate, locale: Locale): List<HistoryDay> {
+         if (!weekly) return days
+-        val first = WeekFields.of(locale).firstDayOfWeek
++        val first = DayCalendar.firstDayOfWeek(locale)
+         return days.filter { it.day != today }
+             .groupBy { it.day.with(TemporalAdjusters.previousOrSame(first)) }
+             .toSortedMap()
+@@ -148,7 +148,8 @@ internal fun FoodHistorySection(vm: AppViewModel, entries: List<FoodEntry>, kcal
+     var showBurned by rememberSaveable { mutableStateOf(true) }
+     val locale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
+     val from = today.minusDays(range.days.toLong() - 1)
+-    val energy by produceState(emptyMap<String, FoodEnergy>(), range, entries) {
++    val inputs = energyInputs(vm)
++    val energy by produceState(emptyMap<String, FoodEnergy>(), range, entries, inputs) {
+         value = withContext(Dispatchers.IO) {
+             runCatching { FoodEnergy.loadRange(ctx, vm.repo, vm.activeStrapId, from.toString(), today.toString()) }.getOrDefault(emptyMap())
+         }
+diff --git a/android/app/src/main/java/com/noop/food/FoodModels.kt b/android/app/src/main/java/com/noop/food/FoodModels.kt
+index 1c3fed14..78bc3922 100644
+--- a/android/app/src/main/java/com/noop/food/FoodModels.kt
++++ b/android/app/src/main/java/com/noop/food/FoodModels.kt
+@@ -4,6 +4,7 @@ import java.time.Instant
+ import java.time.LocalDate
+ import java.time.LocalTime
+ import java.time.ZoneId
++import java.time.temporal.ChronoUnit
+ import kotlin.math.roundToLong
+ 
+ /*
+@@ -28,15 +29,16 @@ data class FoodItem(
+ 
+ /**
+  * The meals of a Spanish day, in the order they are shown. [NIBBLE] (picoteo) is never picked by the
+- * clock: it is the wearer's choice for something eaten between meals.
++ * clock: it is the wearer's choice for something eaten between meals. [englishName] is the one name every
++ * prompt to Claude uses (the coach, the meal marks and the week's review).
+  */
+-enum class MealType(val id: String) {
+-    BREAKFAST("breakfast"),
+-    MID_MORNING("mid_morning"),
+-    LUNCH("lunch"),
+-    SNACK("snack"),
+-    DINNER("dinner"),
+-    NIBBLE("nibble");
++enum class MealType(val id: String, val englishName: String) {
++    BREAKFAST("breakfast", "breakfast"),
++    MID_MORNING("mid_morning", "mid-morning snack"),
++    LUNCH("lunch", "lunch"),
++    SNACK("snack", "afternoon snack"),
++    DINNER("dinner", "dinner"),
++    NIBBLE("nibble", "nibbles");
+ 
+     companion object {
+         fun fromId(id: String?): MealType? = entries.firstOrNull { it.id == id }
+@@ -120,7 +122,11 @@ object FoodDays {
+     fun dayOf(timestampMs: Long, zone: ZoneId = ZoneId.systemDefault()): String =
+         Instant.ofEpochMilli(timestampMs).atZone(zone).toLocalDate().toString()
+ 
+-    fun today(zone: ZoneId = ZoneId.systemDefault()): String = LocalDate.now(zone).toString()
++    /**
++     * The day the fork's screens, prompts and reviews call "today": [mealDayOf] now, so it rolls at 04:00 like
++     * upstream's logical day (ui/LogicalDay.kt) and a dinner logged at 00:45 is on the day still shown as Today.
++     */
++    fun today(zone: ZoneId = ZoneId.systemDefault(), nowMs: Long = System.currentTimeMillis()): String = mealDayOf(nowMs, zone)
+ 
+     /**
+      * The day a meal eaten at [timestampMs] belongs to: before 04:00 it is still the night before, the
+@@ -131,10 +137,15 @@ object FoodDays {
+         return (if (t.toLocalTime() < LocalTime.of(4, 0)) t.toLocalDate().minusDays(1) else t.toLocalDate()).toString()
+     }
+ 
+-    /** [timestampMs] moved to the local [day], same wall-clock time: what "this was yesterday's dinner" means. */
++    /**
++     * [timestampMs] moved to the meal day [day], same wall-clock time: what "this was yesterday's dinner" means.
++     * It shifts by whole days from the meal's own [mealDayOf], so a dinner at 01:30 stays in the small hours
++     * after [day] and still belongs to it.
++     */
+     fun moveToDay(timestampMs: Long, day: String, zone: ZoneId = ZoneId.systemDefault()): Long {
+-        val time = Instant.ofEpochMilli(timestampMs).atZone(zone).toLocalTime()
+-        return LocalDate.parse(day).atTime(time).atZone(zone).toInstant().toEpochMilli()
++        val at = Instant.ofEpochMilli(timestampMs).atZone(zone).toLocalDateTime()
++        val shift = ChronoUnit.DAYS.between(LocalDate.parse(mealDayOf(timestampMs, zone)), LocalDate.parse(day))
++        return at.plusDays(shift).atZone(zone).toInstant().toEpochMilli()
+     }
+ 
+     /** The day's totals, or null when nothing is logged that day (distinct from a logged 0 kcal). */
+diff --git a/android/app/src/main/java/com/noop/food/FoodNutritionSync.kt b/android/app/src/main/java/com/noop/food/FoodNutritionSync.kt
+index 6a1b02b4..6a49077a 100644
+--- a/android/app/src/main/java/com/noop/food/FoodNutritionSync.kt
++++ b/android/app/src/main/java/com/noop/food/FoodNutritionSync.kt
+@@ -21,8 +21,8 @@ import kotlin.math.abs
+  *  1. It only ever writes the four intake keys (never `weight`), and only for days that have photo
+  *     entries. Days without photo entries are never touched.
+  *  2. A day with photo entries shows the photo totals: an edit there overwrites that day's intake
+- *     values. A later CSV import of the same day replaces them again until the next photo edit of
+- *     that day (the same last-writer-wins the importer has with itself).
++ *     values, and so does the repair pass ([staleDays]) when the lane no longer holds what the log
++ *     wrote there (a CSV import of that day, a restored older backup, a cleared database).
+  *  3. It remembers what it last wrote per day (the ledger). When a day loses its last photo entry,
+  *     a key is deleted only if the stored value is still exactly what the photo log wrote, so a CSV
+  *     value imported over it in the meantime survives.
+@@ -75,6 +75,24 @@ internal object FoodNutritionSync {
+         return Plan(upserts = emptyList(), deleteKeys = deletes, ledger = null)
+     }
+ 
++    /**
++     * Pure: the days the repair pass re-syncs. A day whose ledger [synced] disagrees with its [entries] (a
++     * write that failed half-way), and a day with entries whose stored `calories_in` ([storedKcal], by day)
++     * is not what the ledger says was written there (the lane lost or replaced it). A day without entries is
++     * only ever cleared through its ledger, so a CSV day with no photos is never touched.
++     */
++    fun staleDays(entries: List<FoodEntry>, synced: Map<String, FoodTotals>, storedKcal: Map<String, Double>): Set<String> {
++        val days = (entries.map { it.day } + synced.keys).toSet()
++        return days.filter { d ->
++            val totals = FoodDays.totalsFor(entries, d)
++            totals != synced[d] || (totals != null && storedKcal[d]?.let { abs(it - totals.kcal) < EPSILON } != true)
++        }.toSet()
++    }
++
++    /** The lane's stored `calories_in` for the days [from]..[to], by day: one read for the repair pass. */
++    suspend fun storedKcal(repo: WhoopRepository, from: String, to: String): Map<String, Double> =
++        repo.metricSeries(SOURCE_ID, KEYS[0], from, to).associate { it.day to it.value }
++
+     /** Read the lane's current values for [day] (only needed when a day may be cleared). */
+     suspend fun storedValues(repo: WhoopRepository, day: String): Map<String, Double?> =
+         KEYS.associateWith { k -> repo.metricSeries(SOURCE_ID, k, day, day).firstOrNull()?.value }
+diff --git a/android/app/src/main/java/com/noop/food/FoodScorer.kt b/android/app/src/main/java/com/noop/food/FoodScorer.kt
+index 80fda57f..0652e33c 100644
+--- a/android/app/src/main/java/com/noop/food/FoodScorer.kt
++++ b/android/app/src/main/java/com/noop/food/FoodScorer.kt
+@@ -4,17 +4,14 @@ import android.content.Context
+ import com.noop.NoopApplication
+ import com.noop.ai.AiKeyStore
+ import com.noop.ai.AiProvider
+-import com.noop.ai.ScaleCoachContext
+-import com.noop.ai.VictorCoachVitals
+-import com.noop.goals.VictorGoals
+-import com.noop.goals.VictorGoalsStore
+-import com.noop.ingest.ScaleImport
++import com.noop.ai.VictorPersonLines
+ import com.noop.training.TrainingAi
+ import com.noop.training.TrainingAiResult
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.SupervisorJob
+ import kotlinx.coroutines.launch
++import java.time.LocalDate
+ import java.time.LocalDateTime
+ import java.util.concurrent.atomic.AtomicBoolean
+ 
+@@ -49,10 +46,10 @@ object FoodScorer {
+         if (System.currentTimeMillis() < pausedUntil) return
+         val entries = FoodStore.load(ctx)
+         val now = LocalDateTime.now()
+-        val today = now.toLocalDate()
++        val today = LocalDate.parse(FoodDays.today())
+         val due = MealScoring.due(entries, FoodStore.loadScores(ctx), now, setOf(today.toString(), today.minusDays(1).toString()))
+         if (due.isEmpty()) return
+-        val person = personLines(ctx)
++        val person = VictorPersonLines.load(ctx, (ctx.applicationContext as NoopApplication).repository).lines
+         for ((day, meal) in due) {
+             val group = entries.filter { it.day == day && it.meal == meal }
+             val signature = MealScoring.signature(group)
+@@ -66,16 +63,4 @@ object FoodScorer {
+             }
+         }
+     }
+-
+-    /** Profile, scale and goals, as the coach reads them, and only with the coach's data consent. */
+-    private suspend fun personLines(ctx: Context): List<String> {
+-        if (!AiKeyStore.readConsent(ctx)) return emptyList()
+-        val repo = (ctx.applicationContext as NoopApplication).repository
+-        val scale = runCatching { ScaleImport.snapshot(repo, ScaleImport.newestReading(ctx)) }.getOrNull()
+-        return listOfNotNull(
+-            runCatching { VictorCoachVitals.profileLine(ctx, scaleHasWeight = scale?.weight != null) }.getOrNull(),
+-            ScaleCoachContext.line(scale),
+-            runCatching { VictorGoals.coachLine(VictorGoalsStore.load(ctx), scale?.weight?.value) }.getOrNull(),
+-        )
+-    }
+ }
+diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+index a103047a..95607b3e 100644
+--- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
++++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+@@ -119,14 +119,14 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+     val previous = grouped.filter { it.first != today }
+     val todayTotals = FoodTotals.ofEntries(todayEntries)
+ 
+-    // victor:fresh — re-read today's Health Connect figures on open; the balance reloads when they land.
+-    val hcVersion by VictorHcRefresh.version.collectAsStateWithLifecycle()
++    // victor:fresh — re-read today's Health Connect figures on open; the balance reloads when they land, and
++    // when the strap syncs, an import ends or a workout is analysed ([energyInputs]).
+     LaunchedEffect(Unit) { VictorHcRefresh.refresh(ctx, vm.repo) }
+-    val training by com.noop.training.TrainingStore.sessions.collectAsStateWithLifecycle()   // victor:training
+-    val energy by produceState<FoodEnergy?>(null, today, entries, hcVersion, training) {
++    val inputs = energyInputs(vm)
++    val energy by produceState<FoodEnergy?>(null, today, entries, inputs) {
+         value = withContext(Dispatchers.IO) { runCatching { FoodEnergy.load(ctx, vm.repo, vm.activeStrapId, today) }.getOrNull() }
+     }
+-    val adaptive by produceState<AdaptiveState?>(null, entries, hcVersion) {
++    val adaptive by produceState<AdaptiveState?>(null, entries, inputs) {
+         value = withContext(Dispatchers.IO) { runCatching { FoodAdaptive.load(ctx, vm.repo, vm.activeStrapId) }.getOrNull() }
+     }
+ 
+@@ -325,8 +325,8 @@ private fun DayCard(
+ ) {
+     val ctx = LocalContext.current
+     val t = FoodTotals.ofEntries(entries)
+-    val training by com.noop.training.TrainingStore.sessions.collectAsStateWithLifecycle()
+-    val energy by produceState<FoodEnergy?>(null, day, t.kcal, training) {
++    val inputs = energyInputs(vm)
++    val energy by produceState<FoodEnergy?>(null, day, t.kcal, inputs) {
+         value = withContext(Dispatchers.IO) { runCatching { FoodEnergy.load(ctx, vm.repo, vm.activeStrapId, day) }.getOrNull() }
+     }
+     NoopCard {
+@@ -361,7 +361,7 @@ private fun MealGroups(entries: List<FoodEntry>, scores: Map<String, MealScore>,
+         FoodDays.groupedByMeal(entries).forEach { (meal, list) ->
+             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Metrics.space8)) {
+                 Text(uiString(mealLabel(meal)), style = NoopType.subhead, color = Palette.textSecondary, modifier = Modifier.weight(1f))
+-                val score = scores[MealScoring.key(list.first().day, meal)]?.takeIf { it.signature == MealScoring.signature(list) }
++                val score = scores[MealScoring.key(list.first().day, meal)]?.takeIf { MealScoring.isCurrent(it, list) }
+                 if (score != null) {
+                     ScoreBadge(score.score, Modifier.clip(RoundedCornerShape(50)).clickable { showing = meal to score })
+                 }
+diff --git a/android/app/src/main/java/com/noop/food/FoodSheet.kt b/android/app/src/main/java/com/noop/food/FoodSheet.kt
+index 68ec0a96..6ad15502 100644
+--- a/android/app/src/main/java/com/noop/food/FoodSheet.kt
++++ b/android/app/src/main/java/com/noop/food/FoodSheet.kt
+@@ -385,7 +385,7 @@ private fun WhenPicker(draft: FoodDraft, food: FoodViewModel) {
+                 if (other) foodDayLabel(draft.day, today, locale) else uiString(R.string.victor_food_day_other),
+                 selected = other,
+             ) {
+-                val d = runCatching { LocalDate.parse(draft.day) }.getOrDefault(LocalDate.now())
++                val d = runCatching { LocalDate.parse(draft.day) }.getOrDefault(LocalDate.parse(today))
+                 DatePickerDialog(ctx, { _, y, m, dom -> food.setDay(LocalDate.of(y, m + 1, dom).toString()) }, d.year, d.monthValue - 1, d.dayOfMonth)
+                     .apply {
+                         datePicker.maxDate = LocalDate.parse(today).plusDays(1)
+diff --git a/android/app/src/main/java/com/noop/food/FoodStore.kt b/android/app/src/main/java/com/noop/food/FoodStore.kt
+index fbb4f1bd..8634b6c8 100644
+--- a/android/app/src/main/java/com/noop/food/FoodStore.kt
++++ b/android/app/src/main/java/com/noop/food/FoodStore.kt
+@@ -308,14 +308,17 @@ object FoodStore {
+ 
+     /**
+      * Repair pass: re-sync every day whose ledger disagrees with its entries (a write that failed
+-     * half-way, e.g. the app was killed between the file and the DB). It compares the ledger with
+-     * the log, never with the DB, so it does not fight a CSV import made on purpose.
++     * half-way, e.g. the app was killed between the file and the DB) or whose stored `calories_in` is not
++     * what the ledger says was written (a restored older backup, a cleared database), see
++     * [FoodNutritionSync.staleDays]. Days without photo entries are only cleared through the ledger, so a
++     * CSV day with no photos is never touched.
+      */
+     suspend fun reconcile(ctx: Context, repo: WhoopRepository) = withContext(Dispatchers.IO) {
+         mutex.withLock {
+             val current = state(ctx)
+-            val days = (current.entries.map { it.day } + current.synced.keys).toSet()
+-            val stale = days.filter { d -> FoodDays.totalsFor(current.entries, d) != current.synced[d] }.toSet()
++            val logged = current.entries.map { it.day }
++            val stored = if (logged.isEmpty()) emptyMap() else FoodNutritionSync.storedKcal(repo, logged.min(), logged.max())
++            val stale = FoodNutritionSync.staleDays(current.entries, current.synced, stored)
+             if (stale.isNotEmpty()) persist(ctx, syncDays(repo, current, stale))
+         }
+     }
+diff --git a/android/app/src/main/java/com/noop/food/MealScoring.kt b/android/app/src/main/java/com/noop/food/MealScoring.kt
+index a08d6b42..f2ba638a 100644
+--- a/android/app/src/main/java/com/noop/food/MealScoring.kt
++++ b/android/app/src/main/java/com/noop/food/MealScoring.kt
+@@ -28,8 +28,25 @@ object MealScoring {
+ 
+     fun key(day: String, meal: MealType): String = "$day|${meal.id}"
+ 
++    /**
++     * The meal as it is now: each entry's id, kcal and number of foods, plus a hash of every food's name and
++     * macros, so correcting "patatas fritas" to "patata asada" at the same kcal asks for a new mark.
++     */
+     fun signature(entries: List<FoodEntry>): String =
+-        entries.sortedBy { it.id }.joinToString(";") { "${it.id}:${round1(it.kcal)}:${it.items.size}" }
++        entries.sortedBy { it.id }.joinToString(";") { "${legacyPart(it)}:${foodsHash(it.items)}" }
++
++    /**
++     * Whether [score] is the mark of [entries] as they are now. A mark stored before names and macros joined
++     * the [signature] (2026-10-20) still counts where its old form matches, so past days keep their marks;
++     * [due] asks again for today's and yesterday's.
++     */
++    fun isCurrent(score: MealScore?, entries: List<FoodEntry>): Boolean =
++        score != null && (score.signature == signature(entries) || score.signature == entries.sortedBy { it.id }.joinToString(";") { legacyPart(it) })
++
++    private fun legacyPart(e: FoodEntry) = "${e.id}:${round1(e.kcal)}:${e.items.size}"
++
++    private fun foodsHash(items: List<FoodItem>): String =
++        Integer.toHexString(items.joinToString("|") { "${it.name.trim()}/${round1(it.proteinG)}/${round1(it.carbsG)}/${round1(it.fatG)}" }.hashCode())
+ 
+     /** The end of a meal's slot on the Spanish clock the meal types use; picoteo closes with the day. */
+     fun windowEnd(meal: MealType, day: LocalDate): LocalDateTime = when (meal) {
+@@ -89,11 +106,11 @@ object MealScoring {
+         append("for their goals and for the rest of the day, and balance. 10 = excellent, 5 = acceptable but clearly ")
+         append("improvable, 2 = poor. Judge what was eaten, not the photo. note: ONE short sentence in Spanish (Spain), at most ")
+         append("15 words, the main reason or what would make it better.\n\n")
+-        append("MEAL: ${coachName(meal)} on $day")
++        append("MEAL: ${meal.englishName} on $day")
+         entries.map { it.timestamp }.minOrNull()?.let { append(" at ").append(HHMM.format(java.time.Instant.ofEpochMilli(it).atZone(java.time.ZoneId.systemDefault()))) }
+         append(", ${FoodTotals.ofEntries(entries).kcal.roundToInt()} kcal in total\n")
+         for (e in entries) for (i in e.items) {
+-            append("- ${i.name}${if (i.portion.isNotBlank()) " (${i.portion})" else ""}: ${i.kcal.roundToInt()} kcal, ")
++            append("- ${i.name}${portionText(i)}: ${i.kcal.roundToInt()} kcal, ")
+             append("P ${i.proteinG.roundToInt()} g, C ${i.carbsG.roundToInt()} g, F ${i.fatG.roundToInt()} g\n")
+         }
+         entries.map { it.note.trim() }.filter { it.isNotEmpty() }.takeIf { it.isNotEmpty() }?.let {
+@@ -102,7 +119,7 @@ object MealScoring {
+         val others = FoodDays.groupedByMeal(dayEntries.filter { it.meal != meal })
+         if (others.isNotEmpty()) {
+             append("Rest of that day: ")
+-            append(others.joinToString(", ") { (m, l) -> "${coachName(m)} ${FoodTotals.ofEntries(l).kcal.roundToInt()} kcal" })
++            append(others.joinToString(", ") { (m, l) -> "${m.englishName} ${FoodTotals.ofEntries(l).kcal.roundToInt()} kcal" })
+             append('\n')
+         }
+         personLines.forEach { append(it).append('\n') }
+@@ -113,13 +130,23 @@ object MealScoring {
+         return MealScore(s.roundToInt().coerceIn(0, 10), o.optString("note").trim().take(200), signature, nowMs)
+     }
+ 
+-    private fun coachName(meal: MealType): String = when (meal) {
+-        MealType.BREAKFAST -> "breakfast"
+-        MealType.MID_MORNING -> "mid-morning snack"
+-        MealType.LUNCH -> "lunch"
+-        MealType.SNACK -> "afternoon snack"
+-        MealType.DINNER -> "dinner"
+-        MealType.NIBBLE -> "nibbles"
++    /**
++     * " (200 g)", or with part of it eaten " (ate 1/2 of the 200 g portion)": the kcal and macros are already
++     * what was eaten ([FoodItem]), so the served portion alone would contradict them.
++     */
++    private fun portionText(i: FoodItem): String {
++        val served = i.portion.trim()
++        if (i.eaten == 1.0) return if (served.isNotEmpty()) " ($served)" else ""
++        val portion = if (served.isNotEmpty()) "the $served portion" else "the served portion"
++        return if (i.eaten < 1.0) " (ate ${share(i.eaten)} of $portion)"
++        else " (ate ${String.format(Locale.US, "%.2f", i.eaten).trimEnd('0').trimEnd('.')} times $portion)"
++    }
++
++    private fun share(eaten: Double): String = when (eaten) {
++        0.25 -> "1/4"
++        0.5 -> "1/2"
++        0.75 -> "3/4"
++        else -> "${(eaten * 100).roundToInt()}%"
+     }
+ 
+     private val HHMM = DateTimeFormatter.ofPattern("HH:mm", Locale.ROOT)
+diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+index 0f3cc5c9..abf32ad7 100644
+--- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
++++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+@@ -7,10 +7,8 @@ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.produceState
+ import androidx.compose.ui.platform.LocalContext
+-import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import com.noop.R
+ import com.noop.goals.VictorGoalsStore
+-import com.noop.ingest.VictorHcRefresh
+ import com.noop.ui.AppViewModel
+ import com.noop.ui.Metrics
+ import com.noop.ui.uiString
+@@ -29,13 +27,13 @@ internal fun TodayFoodSection(vm: AppViewModel, onOpenFood: () -> Unit) {
+     val entries by produceState(emptyList<FoodEntry>(), today) {
+         value = runCatching { FoodStore.load(ctx) }.getOrDefault(emptyList())
+     }
+-    val hcVersion by VictorHcRefresh.version.collectAsStateWithLifecycle()   // victor:fresh
+     LaunchedEffect(entries) {
+         FoodScorer.scoreDue(ctx)   // victor:scores
+         com.noop.training.TrainingAnalyzer.refreshStale(ctx)   // victor:training — workouts scored on part of their heart rate
+     }
+-    val training by com.noop.training.TrainingStore.sessions.collectAsStateWithLifecycle()   // victor:training
+-    val energy by produceState<FoodEnergy?>(null, today, entries, hcVersion, training) {
++    // A strap sync, a Health Connect import or refresh, or a workout analysis reloads the burn.
++    val inputs = energyInputs(vm)
++    val energy by produceState<FoodEnergy?>(null, today, entries, inputs) {
+         value = withContext(Dispatchers.IO) { runCatching { FoodEnergy.load(ctx, vm.repo, vm.activeStrapId, today) }.getOrNull() }
+     }
+     val todays = entries.filter { it.day == today }
+diff --git a/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt b/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt
+index fb606868..1eaaff40 100644
+--- a/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt
++++ b/android/app/src/main/java/com/noop/ingest/VictorHcRefresh.kt
+@@ -176,7 +176,9 @@ object VictorHcRefresh {
+     /**
+      * Pure: [existing] (the stored Health Connect row for [day], or null) with the fresh figures laid over
+      * it, exactly as the full import would write them; null when nothing changes. A zero or null figure
+-     * keeps the stored one: "nothing read" must never wipe a good number.
++     * keeps the stored one: "nothing read" must never wipe a good number. The basal is the fresh total less
++     * the active figure the row will hold: with no active read, the stored one, so the activity is never left
++     * inside the basal and counted twice (stored active + a basal that is the whole total).
+      */
+     internal fun merge(
+         existing: AppleDaily?,
+@@ -187,7 +189,8 @@ object VictorHcRefresh {
+         weightKg: Double?,
+     ): AppleDaily? {
+         val base = existing ?: AppleDaily(deviceId = HealthConnectImporter.HC_DEVICE, day = day)
+-        val basal = if (totalKcal > 0.0) (totalKcal - activeKcal).takeIf { it > 0.0 }?.let(::round1) else null
++        val active = if (activeKcal > 0.0) activeKcal else base.activeKcal ?: 0.0
++        val basal = if (totalKcal > 0.0) (totalKcal - active).takeIf { it > 0.0 }?.let(::round1) else null
+         val updated = base.copy(
+             steps = if (steps > 0L) steps.toInt() else base.steps,
+             activeKcal = if (activeKcal > 0.0) round1(activeKcal) else base.activeKcal,
+diff --git a/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
+index 6dffa852..25395d18 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
+@@ -3,12 +3,10 @@ package com.noop.training
+ import android.content.Context
+ import com.noop.NoopApplication
+ import com.noop.ai.AiKeyStore
+-import com.noop.ai.ScaleCoachContext
+-import com.noop.ai.VictorCoachVitals
++import com.noop.ai.VictorPersonLines
+ import com.noop.analytics.ManualWorkoutRescore
+ import com.noop.data.WorkoutRow
+ import com.noop.food.FoodError
+-import com.noop.ingest.ScaleImport
+ import com.noop.ui.NoopPrefs
+ import com.noop.ui.ProfileStore
+ import kotlinx.coroutines.CoroutineScope
+@@ -60,9 +58,10 @@ object TrainingAnalyzer {
+ 
+     /**
+      * The strap banks its heart rate and hands it over at the next sync, so a workout saved before that is
+-     * first scored on part of it. For the sessions of the last [RECHECK_DAYS] days: one never analysed (a
+-     * failed try) or one whose window now holds clearly more samples than its analysis saw is analysed
+-     * again. Cheap when nothing changed (a local count); called when Today, Food or a workout shows.
++     * first scored on part of it. For the sessions of the last [RECHECK_DAYS] days ([SPARSE_RECHECK_DAYS] for
++     * one analysed on almost no heart rate, a strap that synced days late): one never analysed (a failed try)
++     * or one whose window now holds clearly more samples than its analysis saw is analysed again. Cheap when
++     * nothing changed (a local count); called when Today, Food or a workout shows.
+      */
+     fun refreshStale(ctx: Context) {
+         val app = ctx.applicationContext
+@@ -79,8 +78,7 @@ object TrainingAnalyzer {
+                         val rows = a.repository.workoutsUnion(strapId, all.minOf { it.startTs } - 1, all.maxOf { it.endTs ?: it.startTs } + 1)
+                         VictorDayEffort.setUnpaired(all.filter { s -> s.analysis != null && rows.none { s.pairs(it) } }.map { it.id }.toSet())
+                     }
+-                    val since = nowMs / 1000 - RECHECK_DAYS * 86_400L
+-                    for (s in all.filter { (it.endTs ?: 0) >= since }) {
++                    for (s in all.filter { recheckDue(it, nowMs / 1000) }) {
+                         val end = s.endTs ?: continue
+                         if (failedAt[s.id]?.let { nowMs - it < RETRY_MS } == true) continue
+                         val seen = s.analysis?.hrSamples
+@@ -94,6 +92,16 @@ object TrainingAnalyzer {
+         }
+     }
+ 
++    /**
++     * Pure: whether [refreshStale] looks at [s] at [nowS]. A session analysed on fewer than [SPARSE_SAMPLES]
++     * heart-rate samples stays in the window [SPARSE_RECHECK_DAYS] days; any other, [RECHECK_DAYS].
++     */
++    internal fun recheckDue(s: TrainingSession, nowS: Long): Boolean {
++        val end = s.endTs ?: return false
++        val sparse = s.analysis?.let { it.hrSamples < SPARSE_SAMPLES } == true
++        return end >= nowS - (if (sparse) SPARSE_RECHECK_DAYS else RECHECK_DAYS) * 86_400L
++    }
++
+     /**
+      * A later rewrite of the workout row (upstream's rescore of a fresh manual workout, a sync) can put back the
+      * heart-rate-only figures; the session's analysis is applied again, locally, without asking Claude.
+@@ -141,17 +149,17 @@ object TrainingAnalyzer {
+                     strain = it.strain,
+                 )
+             }
+-            val scale = runCatching { ScaleImport.snapshot(repo, ScaleImport.newestReading(ctx)) }.getOrNull()
+             val zone = ZoneId.systemDefault()
+             // Body, resting HR and the strap's heart rate leave the phone only with the coach's data consent;
+             // without it Claude estimates from the exercises alone (the local heart-rate figures still count).
+             val consent = AiKeyStore.readConsent(ctx)
++            val person = VictorPersonLines.load(ctx, repo)
+             val prompt = TrainingAi.kcalPrompt(
+                 session = session,
+                 whenLine = whenLine(session.startTs, end, zone),
+                 durationMin = ((end - session.startTs) / 60).toInt(),
+-                profileLine = if (consent) VictorCoachVitals.profileLine(ctx, scaleHasWeight = scale?.weight != null) else null,
+-                bodyLine = if (consent) ScaleCoachContext.line(scale) else null,
++                profileLine = person.profile,
++                bodyLine = person.body,
+                 restingHr = if (consent) restingHr else null,
+                 hr = if (consent) hr else null,
+                 perExercise = if (consent) TrainingHr.perExercise(session, samples) else emptyMap(),
+@@ -199,6 +207,8 @@ object TrainingAnalyzer {
+     private val HHMM = DateTimeFormatter.ofPattern("HH:mm")
+     private const val HR_LIMIT = 20_000
+     private const val RECHECK_DAYS = 3L
++    private const val SPARSE_RECHECK_DAYS = 14L
++    private const val SPARSE_SAMPLES = 20
+     private const val RETRY_MS = 3_600_000L
+ }
+ 
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt b/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt
+index 0a9f4277..efa279da 100644
+--- a/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyCard.kt
+@@ -31,13 +31,15 @@ import com.noop.ui.Overline
+ import com.noop.ui.Palette
+ import com.noop.ui.uiString
+ import java.time.LocalDate
++import java.time.LocalDateTime
+ import java.time.format.DateTimeFormatter
+ import java.util.Locale
+ 
+ /**
+  * victor:weekly — "Tu semana" on Today: last week's three marks in one line (food, training, overall); a tap
+- * opens the reasons and the focus for this week. Shows only the review of the week that just ended, so it
+- * changes once a week; nothing at all until that review exists.
++ * opens the reasons and the focus for this week. Shows only the review of the week that just ended
++ * ([WeeklyReviews.dueWeekStart]: from 10:00 on the new week's first day), so it changes once a week; nothing
++ * at all until that review exists.
+  */
+ @Composable
+ fun WeeklyCard() {
+@@ -47,7 +49,7 @@ fun WeeklyCard() {
+         WeeklyReviewer.load(ctx)
+         WeeklyReviewer.ensure(ctx)
+     }
+-    val start = WeeklyReviews.lastWeekStart(LocalDate.now())
++    val start = WeeklyReviews.dueWeekStart(LocalDateTime.now())
+     val r = reviews.lastOrNull { it.weekStart == start.toString() } ?: return
+     val locale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
+     var open by rememberSaveable { mutableStateOf(false) }
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
+index 429d513e..692339db 100644
+--- a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
+@@ -1,33 +1,34 @@
+ package com.noop.weekly
+ 
+ import com.noop.data.WorkoutRow
++import com.noop.day.DayCalendar
+ import com.noop.food.FoodDays
+ import com.noop.food.FoodEnergy
+ import com.noop.food.FoodEntry
+ import com.noop.food.FoodTotals
+ import com.noop.food.MealScore
+ import com.noop.food.MealScoring
+-import com.noop.food.MealType
+ import com.noop.training.TrainingFormat
+ import com.noop.training.TrainingSession
+ import org.json.JSONArray
+ import org.json.JSONObject
+-import java.time.DayOfWeek
+ import java.time.Instant
+ import java.time.LocalDate
++import java.time.LocalDateTime
+ import java.time.ZoneId
+ import java.time.format.DateTimeFormatter
++import java.time.format.TextStyle
+ import java.time.temporal.TemporalAdjusters
+ import java.util.Locale
+ import kotlin.math.roundToInt
+ 
+ /**
+- * victor:weekly — Claude's marks for one finished week (Monday to Sunday): food, training and the two
+- * together, each 0-10 with its reason, and one thing to focus on next. [food]/[training] are null when the
+- * week had too little of it to judge.
++ * victor:weekly — Claude's marks for one finished week (from the locale's first weekday: Monday to Sunday in
++ * Spain): food, training and the two together, each 0-10 with its reason, and one thing to focus on next.
++ * [food]/[training] are null when the week had too little of it to judge.
+  */
+ data class WeeklyReview(
+-    /** The Monday, yyyy-MM-dd. */
++    /** The week's first day, yyyy-MM-dd. */
+     val weekStart: String,
+     val food: Int?,
+     val foodNote: String,
+@@ -46,9 +47,23 @@ data class WeeklyReview(
+  */
+ object WeeklyReviews {
+ 
+-    /** The last finished week's Monday: on any day of this week, the Monday before this one. */
+-    fun lastWeekStart(today: LocalDate): LocalDate =
+-        today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY)).minusWeeks(1)
++    /** Hours into a new week before the last one is reviewed: the late Sunday dinner, its mark and the strap's morning hand-over are in by then. */
++    private const val READY_HOURS = 10L
++
++    /**
++     * The last finished week's first day: on any day of this week, the one before this week's. Weeks start on
++     * the [locale]'s first weekday, as the Food history and «Mi día» weeks do (Monday in Spain).
++     */
++    fun lastWeekStart(today: LocalDate, locale: Locale = Locale.getDefault()): LocalDate =
++        today.with(TemporalAdjusters.previousOrSame(DayCalendar.firstDayOfWeek(locale))).minusWeeks(1)
++
++    /**
++     * The week reviewed and shown at [now]: the last finished one from [READY_HOURS] o'clock on the new week's
++     * first day, the one before it until then, so the review is never asked before the week's data is in and
++     * the card keeps last week's marks meanwhile. The reviewer, the card and the coach all use it.
++     */
++    fun dueWeekStart(now: LocalDateTime, locale: Locale = Locale.getDefault()): LocalDate =
++        lastWeekStart(now.minusHours(READY_HOURS).toLocalDate(), locale)
+ 
+     /** Enough to judge: three days with meals, or any workout. */
+     fun hasEnough(foodDays: Int, workouts: Int): Boolean = foodDays >= 3 || workouts > 0
+@@ -95,7 +110,7 @@ object WeeklyReviews {
+         append("food_score or training_score when there is too little of it to judge. Each *_note: ONE short sentence in Spanish ")
+         append("(Spain), at most 20 words, the main reason. focus: the ONE most useful thing to change next week, in Spanish, at ")
+         append("most 15 words, concrete.\n\n")
+-        append("WEEK: $weekStart (Monday) to $end (Sunday).")
++        append("WEEK: $weekStart (${dayName(weekStart)}) to $end (${dayName(end)}).")
+         kcalTarget?.let { append(" Daily intake target: $it kcal.") }
+         append("\n\nFOOD (photo log, estimates):\n")
+         for (i in 0..6) {
+@@ -112,9 +127,9 @@ object WeeklyReviews {
+             append(". ")
+             append(
+                 FoodDays.groupedByMeal(ofDay).joinToString("; ") { (meal, list) ->
+-                    val score = mealScores[MealScoring.key(day, meal)]?.takeIf { it.signature == MealScoring.signature(list) }
++                    val score = mealScores[MealScoring.key(day, meal)]?.takeIf { MealScoring.isCurrent(it, list) }
+                     val foods = list.flatMap { it.items }.joinToString(", ") { it.name }.take(120)
+-                    "${mealName(meal)} ${FoodTotals.ofEntries(list).kcal.roundToInt()} kcal${score?.let { " [${it.score}/10]" }.orEmpty()} ($foods)"
++                    "${meal.englishName} ${FoodTotals.ofEntries(list).kcal.roundToInt()} kcal${score?.let { " [${it.score}/10]" }.orEmpty()} ($foods)"
+                 },
+             )
+             append('\n')
+@@ -223,14 +238,7 @@ object WeeklyReviews {
+         return "LAST WEEK REVIEW (week of ${r.weekStart}, by Claude): " + parts.joinToString("; ")
+     }
+ 
+-    private fun mealName(meal: MealType): String = when (meal) {
+-        MealType.BREAKFAST -> "breakfast"
+-        MealType.MID_MORNING -> "mid-morning"
+-        MealType.LUNCH -> "lunch"
+-        MealType.SNACK -> "snack"
+-        MealType.DINNER -> "dinner"
+-        MealType.NIBBLE -> "nibbles"
+-    }
++    private fun dayName(d: LocalDate): String = d.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.US)
+ 
+     private fun signed(v: Double): String = v.roundToInt().let { if (it > 0) "+$it" else "$it" }
+ 
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
+index 5e6f8fd0..745b8edd 100644
+--- a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
+@@ -5,13 +5,10 @@ import com.noop.NoopApplication
+ import com.noop.ai.AiCoach
+ import com.noop.ai.AiKeyStore
+ import com.noop.ai.AiProvider
+-import com.noop.ai.ScaleCoachContext
+-import com.noop.ai.VictorCoachVitals
++import com.noop.ai.VictorPersonLines
+ import com.noop.food.FoodEnergy
+ import com.noop.food.FoodStore
+-import com.noop.goals.VictorGoals
+ import com.noop.goals.VictorGoalsStore
+-import com.noop.ingest.ScaleImport
+ import com.noop.training.TrainingAi
+ import com.noop.training.TrainingAiResult
+ import com.noop.training.TrainingStore
+@@ -26,15 +23,16 @@ import kotlinx.coroutines.sync.Mutex
+ import kotlinx.coroutines.sync.withLock
+ import kotlinx.coroutines.withContext
+ import java.io.File
+-import java.time.LocalDate
++import java.time.LocalDateTime
+ import java.time.ZoneId
+ import java.util.concurrent.atomic.AtomicBoolean
+ 
+ /**
+  * victor:weekly — the reviews on disk (`files/weekly/reviews.json`, the last 12 weeks) and the pass that asks
+- * Claude for last week's once the week is over. Called when the Today food card shows: the first look on or
+- * after a Monday reviews the week before it. Only with the coach's data consent. A week with too little logged
+- * is skipped without a request, and a failure (offline, no key) is tried again after [RETRY_MS].
++ * Claude for last week's once the week is over. Called when the Today food card shows: the first look from
++ * 10:00 on the new week's first day reviews the week before it ([WeeklyReviews.dueWeekStart]). Only with the
++ * coach's data consent. A week with too little logged is skipped without a request, and a failure (offline,
++ * no key) is tried again after [RETRY_MS].
+  */
+ object WeeklyReviewer {
+ 
+@@ -70,7 +68,7 @@ object WeeklyReviewer {
+ 
+     private suspend fun pass(ctx: Context) {
+         val zone = ZoneId.systemDefault()
+-        val start = WeeklyReviews.lastWeekStart(LocalDate.now(zone))
++        val start = WeeklyReviews.dueWeekStart(LocalDateTime.now(zone))
+         if (load(ctx).any { it.weekStart == start.toString() }) return
+         if (AiKeyStore.read(ctx, AiProvider.ANTHROPIC) == null) return
+         // The week's burn, heart rate and workouts are the wearer's data: only with the coach's data consent.
+@@ -86,8 +84,7 @@ object WeeklyReviewer {
+         val toS = end.plusDays(1).atStartOfDay(zone).toEpochSecond()
+ 
+         val food = FoodStore.load(ctx).filter { it.day >= start.toString() && it.day <= end.toString() }
+-        val workouts = runCatching { repo.workoutsUnion(strapId, fromS, toS) }.getOrDefault(emptyList())
+-            .filter { it.startTs in fromS until toS }
++        val workouts = runCatching { weekWorkouts(repo, strapId, fromS, toS) }.getOrDefault(emptyList())
+         if (!WeeklyReviews.hasEnough(food.map { it.day }.distinct().size, workouts.size)) return
+ 
+         val sessions = TrainingStore.load(ctx).filter { !it.isLive && it.startTs in fromS until toS }
+@@ -108,17 +105,19 @@ object WeeklyReviewer {
+         if (r is TrainingAiResult.Ok) save(ctx, r.value)
+     }
+ 
++    /**
++     * The week's workouts [fromS, toS) as the coach and the Workouts list see them: every source (strap, Health
++     * Connect, files, lifting apps, detected), without the dismissed ones and with cross-source twins once.
++     */
++    internal suspend fun weekWorkouts(repo: com.noop.data.WhoopRepository, strapId: String, fromS: Long, toS: Long) =
++        AiCoach(repo) { strapId }.visibleWorkoutRows(fromS, toS - 1).filter { it.startTs in fromS until toS }
++
+     /** With the coach's consent only: profile, scale, goals and the strap's daily table, as the coach reads them. */
+     private suspend fun personLines(ctx: Context, repo: com.noop.data.WhoopRepository, strapId: String): List<String> {
+         if (!AiKeyStore.readConsent(ctx)) return emptyList()
+-        val scale = runCatching { ScaleImport.snapshot(repo, ScaleImport.newestReading(ctx)) }.getOrNull()
+         val days = runCatching { repo.daysMerged(strapId) }.getOrDefault(emptyList())
+-        return listOfNotNull(
+-            runCatching { VictorCoachVitals.profileLine(ctx, scaleHasWeight = scale?.weight != null) }.getOrNull(),
+-            ScaleCoachContext.line(scale),
+-            runCatching { VictorGoals.coachLine(VictorGoalsStore.load(ctx), scale?.weight?.value) }.getOrNull(),
+-            runCatching { AiCoach(repo) { strapId }.buildContext(days) }.getOrNull(),
+-        )
++        return VictorPersonLines.load(ctx, repo).lines +
++            listOfNotNull(runCatching { AiCoach(repo) { strapId }.buildContext(days) }.getOrNull())
+     }
+ 
+     private suspend fun save(ctx: Context, review: WeeklyReview) = withContext(Dispatchers.IO) {
+diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
+index 83667bf9..830578dd 100644
+--- a/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
++++ b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
+@@ -2,6 +2,8 @@ package com.noop.ai
+ 
+ import com.noop.analytics.AdaptiveExpenditureConfidence
+ import com.noop.analytics.AdaptiveExpenditureEstimate
++import com.noop.data.AppleDaily
++import com.noop.data.DailyMetric
+ import com.noop.food.AdaptiveState
+ import com.noop.food.FoodEnergy
+ import java.time.LocalTime
+@@ -24,6 +26,25 @@ class VictorCoachExtrasTest {
+         )
+     }
+ 
++    @Test
++    fun stepsComeInTheTodayCardsOrderStrapFirst() {
++        // Strap 9400, phone 6100: Today shows 9400, so the coach says 9400 too (it said 6100, then 9400/day on average).
++        val strap = listOf(DailyMetric("my-whoop", "2026-10-16", steps = 9400))
++        val phone = listOf(AppleDaily(deviceId = "health-connect", day = "2026-10-16", steps = 6100))
++        assertEquals(9400, VictorCoachExtras.todaySteps(strap, emptyList(), phone, "2026-10-16"))
++        assertEquals(6100, VictorCoachExtras.todaySteps(listOf(DailyMetric("my-whoop", "2026-10-16")), emptyList(), phone, "2026-10-16"))
++        assertNull(VictorCoachExtras.todaySteps(strap, emptyList(), phone, "2026-10-17"))
++    }
++
++    @Test
++    fun inTheSmallHoursTodayIsStillTheEveningsDay() {
++        // 00:45 on the 17th: the logical day is the 16th, and the clock says it is past its midnight.
++        assertEquals(
++            "TODAY so far (2026-10-16, 00:45 past midnight): eaten 2400 kcal (photo food log)",
++            VictorCoachExtras.todayLine("2026-10-16", LocalTime.of(0, 45), null, null, 2400.0),
++        )
++    }
++
+     @Test
+     fun nothingKnownMeansNoLine() {
+         assertNull(VictorCoachExtras.todayLine("2026-10-16", teatime, null, null, null))
+diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
+index f1a536b9..548da205 100644
+--- a/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
++++ b/android/app/src/test/java/com/noop/ai/VictorCoachVitalsTest.kt
+@@ -49,6 +49,21 @@ class VictorCoachVitalsTest {
+         )
+     }
+ 
++    @Test
++    fun aNapNeverReplacesTheNight() {
++        // Night 00:30-08:00 and a nap 15:10-15:40 both end on the 19th: the line is the night's, not the nap's.
++        val days = listOf(DailyMetric("my-whoop", "2026-10-19", spo2Pct = 96.0))
++        val sessions = listOf(
++            SleepSession("my-whoop", ts(2026, 10, 19, 0, 30), ts(2026, 10, 19, 8, 0)),
++            SleepSession("my-whoop", ts(2026, 10, 19, 15, 10), ts(2026, 10, 19, 15, 40)),
++        )
++        assertEquals(
++            "NIGHTS (newest first; bed/up = local sleep and wake times; skin temp ± is vs the user's own baseline):\n" +
++                "  2026-10-19: bed 00:30, up 08:00, SpO₂ 96%",
++            VictorCoachVitals.nightsBlock(days, sessions, zone),
++        )
++    }
++
+     @Test
+     fun noFiguresMeansNoNightsBlock() {
+         assertNull(VictorCoachVitals.nightsBlock(listOf(DailyMetric("my-whoop", "2026-10-15")), emptyList(), zone))
+diff --git a/android/app/src/test/java/com/noop/food/FoodLogTest.kt b/android/app/src/test/java/com/noop/food/FoodLogTest.kt
+index 1f2175b2..96e6c06d 100644
+--- a/android/app/src/test/java/com/noop/food/FoodLogTest.kt
++++ b/android/app/src/test/java/com/noop/food/FoodLogTest.kt
+@@ -107,6 +107,31 @@ class FoodLogTest {
+         assertEquals(ts - 24 * 3600 * 1000L, moved)
+     }
+ 
++    @Test
++    fun movingADinnerAfterMidnightKeepsItInTheSmallHoursOfItsNewDay() {
++        // The 19th's dinner, eaten at 01:30 on the 20th, moved to the 18th: 01:30 on the 19th, still the 18th's.
++        // It used to land on the 18th at 01:30, which is the 17th's night.
++        val madrid = ZoneId.of("Europe/Madrid")
++        val ts = LocalDate.of(2026, 10, 20).atTime(1, 30).atZone(madrid).toInstant().toEpochMilli()
++        val moved = FoodDays.moveToDay(ts, "2026-10-18", madrid)
++        assertEquals("2026-10-18", FoodDays.mealDayOf(moved, madrid))
++        assertEquals(LocalDate.of(2026, 10, 19).atTime(1, 30).atZone(madrid).toInstant().toEpochMilli(), moved)
++    }
++
++    @Test
++    fun todayRollsAtFourLikeUpstreamsLogicalDay() {
++        // 00:45 on Monday the 20th: Today (upstream's logical day) still shows Sunday, and so does Food.
++        val madrid = ZoneId.of("Europe/Madrid")
++        for ((h, m) in listOf(0 to 45, 3 to 59, 4 to 0, 12 to 0, 23 to 59)) {
++            val at = LocalDate.of(2026, 10, 20).atTime(h, m).atZone(madrid)
++            assertEquals("$h:$m", com.noop.ui.logicalDay(at).toString(), FoodDays.today(madrid, at.toInstant().toEpochMilli()))
++        }
++        val smallHours = LocalDate.of(2026, 10, 20).atTime(0, 45).atZone(madrid).toInstant().toEpochMilli()
++        assertEquals("2026-10-19", FoodDays.today(madrid, smallHours))
++        // A dinner logged then is on the day shown as Today.
++        assertEquals(FoodDays.mealDayOf(smallHours, madrid), FoodDays.today(madrid, smallHours))
++    }
++
+     // MARK: - Review draft numbers
+ 
+     @Test
+@@ -185,6 +210,18 @@ class FoodLogTest {
+         assertTrue(plan.deleteKeys.isEmpty())
+     }
+ 
++    @Test
++    fun theRepairPassRewritesALoggedDayTheLaneLost() {
++        val log = listOf(entry("a", "2026-10-15", 2000.0), entry("b", "2026-10-16", 1800.0))
++        val ledger = mapOf("2026-10-15" to FoodTotals(2000.0, 10.0, 20.0, 5.0), "2026-10-16" to FoodTotals(1800.0, 10.0, 20.0, 5.0))
++        // In step with the lane: nothing to do.
++        assertEquals(emptySet<String>(), FoodNutritionSync.staleDays(log, ledger, mapOf("2026-10-15" to 2000.0, "2026-10-16" to 1800.0)))
++        // A restored older backup lost the 16th; a CSV import replaced the 15th. The ledger alone said both were written.
++        assertEquals(setOf("2026-10-15", "2026-10-16"), FoodNutritionSync.staleDays(log, ledger, mapOf("2026-10-15" to 2350.0)))
++        // A CSV day with no photos (the 10th) is never a repair target, and a half-written day still is.
++        assertEquals(setOf("2026-10-16"), FoodNutritionSync.staleDays(log, ledger - "2026-10-16", mapOf("2026-10-10" to 2500.0, "2026-10-15" to 2000.0, "2026-10-16" to 1800.0)))
++    }
++
+     // MARK: - Coach line
+ 
+     private val today = LocalDate.of(2026, 10, 16)
+@@ -209,7 +246,8 @@ class FoodLogTest {
+         )
+         assertEquals(
+             "FOOD LOG (photo estimates): today 1850 kcal (P 120 g, C 180 g, F 60 g) from 3 meals " +
+-                "(breakfast 600, lunch 800, dinner 450 kcal); previous 7 days avg 2200 kcal/day over 3 logged days",
++                "(breakfast 600, lunch 800, dinner 450 kcal); previous 7 days avg 2200 kcal/day (P 13 g, C 27 g, F 7 g) " +
++                "over 3 logged days",
+             FoodCoachContext.line(log, today),
+         )
+     }
+@@ -217,7 +255,7 @@ class FoodLogTest {
+     @Test
+     fun coachLineWithoutTodayOrWithoutHistory() {
+         assertEquals(
+-            "FOOD LOG (photo estimates): today nothing logged yet; previous 7 days avg 2000 kcal/day over 1 logged day",
++            "FOOD LOG (photo estimates): today nothing logged yet; previous 7 days avg 2000 kcal/day (P 10 g, C 20 g, F 5 g) over 1 logged day",
+             FoodCoachContext.line(listOf(entry("y", "2026-10-15", 2000.0)), today),
+         )
+         assertEquals(
+@@ -225,4 +263,42 @@ class FoodLogTest {
+             FoodCoachContext.line(listOf(entry("t", "2026-10-16", 500.0)), today),
+         )
+     }
++
++    @Test
++    fun coachLineSaysWhatWasEatenTodayAndThePastWeeksMacros() {
++        fun meal(id: String, day: String, meal: MealType, vararg foods: FoodItem) = FoodEntry(
++            id = id, timestamp = 0L, day = day, note = "", items = foods.toList(),
++            kcal = foods.sumOf { it.kcal }, proteinG = foods.sumOf { it.proteinG }, carbsG = foods.sumOf { it.carbsG },
++            fatG = foods.sumOf { it.fatG }, thumbnailPaths = emptyList(), meal = meal,
++        )
++        val log = listOf(
++            meal("b", "2026-10-16", MealType.BREAKFAST, FoodItem("Tostada con tomate", "1", 250.0, 6.0, 40.0, 7.0), FoodItem("Café con leche", "1", 80.0, 4.0, 6.0, 4.0)),
++            meal("l", "2026-10-16", MealType.LUNCH, FoodItem("Lentejas con chorizo", "1 plato", 520.0, 28.0, 55.0, 18.0)),
++            meal("y", "2026-10-15", MealType.DINNER, FoodItem("Pollo", "200 g", 330.0, 60.0, 0.0, 8.0)),
++            meal("z", "2026-10-14", MealType.DINNER, FoodItem("Salmón", "150 g", 310.0, 30.0, 0.0, 20.0)),
++        )
++        assertEquals(
++            "FOOD LOG (photo estimates): today 850 kcal (P 38 g, C 101 g, F 29 g) from 2 meals (breakfast 330, lunch 520 kcal); " +
++                "previous 7 days avg 320 kcal/day (P 45 g, C 0 g, F 14 g) over 2 logged days\n" +
++                "  breakfast: Tostada con tomate, Café con leche\n" +
++                "  lunch: Lentejas con chorizo",
++            FoodCoachContext.line(log, today),
++        )
++        // A long meal is cut, as in the week's review, so the coach's block stays small.
++        val feast = meal("f", "2026-10-16", MealType.DINNER, *Array(30) { FoodItem("Plato número $it", "", 10.0, 1.0, 1.0, 1.0) })
++        val dinner = FoodCoachContext.line(listOf(feast), today)!!.lines().last()
++        assertEquals("  dinner: ".length + 120, dinner.length)
++    }
++
++    // MARK: - Day card
++
++    @Test
++    fun withNothingLoggedTheCardShowsNoBalanceAsIfFasting() {
++        // 09:00, nothing logged: "if you eat nothing more, a deficit of 1,800" read as a fast. Burned stays.
++        val morning = FoodEnergy.resolve(900.0, null, null, 1867.0, dayFraction = 0.375)!!
++        assertNull(balanceLine(0.0, meals = 0, energy = morning))
++        val (label, kcal) = balanceLine(400.0, meals = 1, energy = morning)!!
++        assertEquals(com.noop.R.string.victor_food_projected_deficit, label)
++        assertEquals(400.0 - (900.0 + 1867.0 * 0.625), kcal, 0.01)
++    }
+ }
+diff --git a/android/app/src/test/java/com/noop/food/MealScoringTest.kt b/android/app/src/test/java/com/noop/food/MealScoringTest.kt
+index 92b88538..640be4e4 100644
+--- a/android/app/src/test/java/com/noop/food/MealScoringTest.kt
++++ b/android/app/src/test/java/com/noop/food/MealScoringTest.kt
+@@ -98,4 +98,50 @@ class MealScoringTest {
+         val line = FoodCoachContext.line(listOf(coffee, eggs), LocalDate.parse(day), mapOf(MealScoring.key(day, MealType.BREAKFAST) to MealScore(8, "", MealScoring.signature(listOf(coffee, eggs)), 1L)))
+         assertTrue(line!!.contains("breakfast 280 (meal score 8/10)"))
+     }
++
++    @Test
++    fun aCorrectedFoodAsksForANewMarkButOldMarksStay() {
++        val fries = entry("p", 21, 0, MealType.DINNER, 350.0).let { it.copy(items = listOf(FoodItem("Patatas fritas", "1 ración", 350.0, 4.0, 40.0, 18.0))) }
++        val baked = fries.copy(items = listOf(FoodItem("Patata asada", "1 ración", 350.0, 4.0, 40.0, 18.0)))
++        val leaner = fries.copy(items = listOf(FoodItem("Patatas fritas", "1 ración", 350.0, 4.0, 52.0, 12.0)))
++        // Same id, kcal and number of foods: only the name, or only the macros, changed.
++        assertTrue(MealScoring.signature(listOf(fries)) != MealScoring.signature(listOf(baked)))
++        assertTrue(MealScoring.signature(listOf(fries)) != MealScoring.signature(listOf(leaner)))
++        val scored = mapOf(MealScoring.key(day, MealType.DINNER) to MealScore(4, "Fritura.", MealScoring.signature(listOf(fries)), 1L))
++        assertEquals(listOf(day to MealType.DINNER), MealScoring.due(listOf(baked), scored, at(23, 59), setOf(day)))
++        assertTrue(MealScoring.isCurrent(scored.values.single(), listOf(fries)))
++        assertTrue(!MealScoring.isCurrent(scored.values.single(), listOf(baked)))
++        // A mark stored before the names joined the signature still shows; today's and yesterday's are asked again.
++        val legacy = MealScore(6, "Bien.", "p:350.0:1", 1L)
++        assertTrue(MealScoring.isCurrent(legacy, listOf(fries)))
++        assertEquals(listOf(day to MealType.DINNER), MealScoring.due(listOf(fries), mapOf(MealScoring.key(day, MealType.DINNER) to legacy), at(23, 59), setOf(day)))
++        assertTrue(!MealScoring.isCurrent(legacy, listOf(fries.copy(kcal = 400.0))))
++    }
++
++    @Test
++    fun thePromptSaysHowMuchOfThePortionWasEaten() {
++        // Half of a 200 g / 500 kcal steak is stored as 250 kcal: "200 g, 250 kcal" alone contradicts itself.
++        val steak = FoodItemDraft("Filete", "200 g", "500", "60", "0", "28").copy(eaten = 0.5).toItem()
++        val double = FoodItem("Arroz", "", 400.0, 8.0, 88.0, 1.0, eaten = 2.0)
++        val e = entry("s", 14, 0, MealType.LUNCH).copy(items = listOf(steak, double))
++        val p = MealScoring.prompt(MealType.LUNCH, day, listOf(e), listOf(e), emptyList())
++        assertTrue(p, p.contains("- Filete (ate 1/2 of the 200 g portion): 250 kcal, P 30 g, C 0 g, F 14 g"))
++        assertTrue(p, p.contains("- Arroz (ate 2 times the served portion): 400 kcal"))
++    }
++
++    @Test
++    fun everyPromptCallsAMealByTheSameName() {
++        val snack = entry("m", 11, 0, MealType.MID_MORNING, 200.0)
++        val tea = entry("s", 18, 0, MealType.SNACK, 150.0)
++        val scoring = MealScoring.prompt(MealType.MID_MORNING, day, listOf(snack), listOf(snack, tea), emptyList())
++        val coach = FoodCoachContext.line(listOf(snack, tea), LocalDate.parse(day))!!
++        val week = com.noop.weekly.WeeklyReviews.prompt(
++            LocalDate.parse("2026-10-19"), listOf(snack, tea), emptyMap(), emptyMap(), null, emptyList(), emptyList(), emptyList(), madrid,
++        )
++        for (text in listOf(scoring, coach, week)) {
++            assertTrue(text, text.contains("mid-morning snack"))
++            assertTrue(text, text.contains("afternoon snack"))
++        }
++        assertEquals(listOf("breakfast", "mid-morning snack", "lunch", "afternoon snack", "dinner", "nibbles"), MealType.entries.map { it.englishName })
++    }
+ }
+diff --git a/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt b/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
+new file mode 100644
+index 00000000..d6ee8372
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
+@@ -0,0 +1,70 @@
++package com.noop.food
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.io.File
++
++/**
++ * victor:audit-2026-10-20 — wiring that has no logic function to assert against, so this reads the sources (the
++ * idiom of ResolvedSeriesCallSiteAuditTest and TodayWorkoutTapTest). `//` comments are stripped first: the
++ * comments name the very symbols asserted on.
++ */
++class VictorWiringAuditTest {
++
++    private fun mainRoot(): File {
++        val userDir = File(System.getProperty("user.dir") ?: ".")
++        val candidates = listOf(userDir, File(userDir, "app"), File(userDir, "android/app"), File(userDir, "../android/app"))
++        return candidates.map { File(it, "src/main/java/com/noop") }.firstOrNull { it.isDirectory }
++            ?: error("could not locate the app sources from ${userDir.absolutePath}")
++    }
++
++    private fun code(rel: String): String =
++        File(mainRoot(), rel).readText().lines().joinToString("\n") { it.substringBefore("//") }
++
++    @Test
++    fun everyForkSurfaceUsesTheOneToday() {
++        // "Today" is FoodDays.today() (04:00 roll, as upstream's Today); a calendar date flips the coach, the meal
++        // marks and the week at midnight while Today still shows the evening.
++        val files = listOf(
++            "food/TodayFoodSection.kt", "food/FoodScreen.kt", "food/FoodHistory.kt", "food/FoodSheet.kt",
++            "food/FoodCoachContext.kt", "food/FoodScorer.kt", "ai/VictorCoachExtras.kt",
++            "weekly/WeeklyReviewer.kt", "weekly/WeeklyCard.kt",
++        )
++        for (f in files) {
++            assertFalse("$f reads the calendar date as today", code(f).contains("LocalDate.now("))
++        }
++    }
++
++    @Test
++    fun theFoodCardsReloadTheBurnWhenTheStrapOrAnImportLands() {
++        val files = listOf("food/TodayFoodSection.kt", "food/FoodScreen.kt", "food/FoodHistory.kt")
++        var loads = 0
++        for (f in files) {
++            val lines = code(f).lines()
++            lines.forEachIndexed { i, line ->
++                if (!line.contains("produceState")) return@forEachIndexed
++                val body = lines.subList(i, minOf(i + 4, lines.size)).joinToString("\n")
++                if (body.contains("FoodEnergy.load") || body.contains("FoodAdaptive.load")) {
++                    loads++
++                    assertTrue("$f:${i + 1} loads the burn without the energy inputs key", line.contains("inputs"))
++                }
++            }
++        }
++        // Today's card, Food's Today card, «Tu gasto real», each history day and the Historial charts.
++        assertEquals(5, loads)
++    }
++
++    @Test
++    fun theWearersProfileScaleAndGoalsAreReadInOnePlace() {
++        // The meal marks, the week's review and the workout estimate each had their own copy of these lines.
++        val callers = mainRoot().walkTopDown().filter { it.isFile && it.name.endsWith(".kt") }
++            .filter { f ->
++                val c = f.readText().lines().joinToString("\n") { it.substringBefore("//") }
++                c.contains("VictorCoachVitals.profileLine(") || c.contains("VictorGoals.coachLine(")
++            }
++            .map { it.name }.toSet()
++        assertEquals(setOf("VictorCoachExtras.kt", "VictorPersonLines.kt"), callers)
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt b/android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt
+index c3126426..56f95516 100644
+--- a/android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt
++++ b/android/app/src/test/java/com/noop/ingest/VictorHcRefreshTest.kt
+@@ -47,4 +47,18 @@ class VictorHcRefreshTest {
+         assertEquals(600.0, activeAboveTotal.basalKcal!!, 0.0)
+         assertEquals(300.0, activeAboveTotal.activeKcal!!, 0.0)
+     }
++
++    @Test
++    fun aFailedActiveReadNeverLeavesTheActivityInsideTheBasal() {
++        // Stored 320 active / 1850 basal; the refresh reads the total (2170) but not the active calories. The
++        // bug: basal = 2170 − 0, so the phone's day became 320 + 2170 = 2490, the activity counted twice.
++        val yesterday = AppleDaily(deviceId = "health-connect", day = "2026-10-19", activeKcal = 320.0, basalKcal = 1850.0)
++        val row = VictorHcRefresh.merge(yesterday, "2026-10-19", steps = 0, totalKcal = 2170.0, activeKcal = 0.0, weightKg = null)
++        assertNull("nothing new: the stored split still adds up to the total read", row)
++        // Later in the day the total grew: the stored active is kept and the basal is the rest of the total.
++        val later = VictorHcRefresh.merge(yesterday, "2026-10-19", steps = 0, totalKcal = 2300.0, activeKcal = 0.0, weightKg = null)!!
++        assertEquals(320.0, later.activeKcal!!, 0.0)
++        assertEquals(1980.0, later.basalKcal!!, 0.0)
++        assertEquals(2300.0, later.activeKcal!! + later.basalKcal!!, 0.0)
++    }
+ }
+diff --git a/android/app/src/test/java/com/noop/training/TrainingTest.kt b/android/app/src/test/java/com/noop/training/TrainingTest.kt
+index 05ce5390..8ccae7cb 100644
+--- a/android/app/src/test/java/com/noop/training/TrainingTest.kt
++++ b/android/app/src/test/java/com/noop/training/TrainingTest.kt
+@@ -339,4 +339,21 @@ class TrainingTest {
+         assertEquals("Sin catálogo", VictorSportNames.display("Sin catálogo", es))
+         assertNull(VictorSportNames.spanish("Strength", Locale.US))
+     }
++
++    @Test
++    fun aSessionAnalysedOnAlmostNoHeartRateIsLookedAtForTwoWeeks() {
++        // A trip without syncing: Friday's workout was analysed with no heart rate and the strap hands it over on
++        // Tuesday. It is re-checked for 14 days; a session analysed on its full heart rate only for 3.
++        val day = 86_400L
++        val now = end + 10 * day
++        val sparse = logged.copy(analysis = logged.analysis!!.copy(hrSamples = 0))
++        val full = logged.copy(analysis = logged.analysis!!.copy(hrSamples = 3_400))
++        assertTrue(TrainingAnalyzer.recheckDue(sparse, now))
++        assertFalse(TrainingAnalyzer.recheckDue(full, now))
++        assertTrue(TrainingAnalyzer.recheckDue(full, end + 2 * day))
++        assertFalse(TrainingAnalyzer.recheckDue(sparse, end + 15 * day))
++        // Never analysed (a failed try) keeps the short window: no paid retries for two weeks.
++        assertFalse(TrainingAnalyzer.recheckDue(logged.copy(analysis = null), now))
++        assertFalse(TrainingAnalyzer.recheckDue(sparse.copy(endTs = null), now))
++    }
+ }
+diff --git a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
+index 87e2ad0d..09e55196 100644
+--- a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
++++ b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
+@@ -13,24 +13,89 @@ import org.junit.Assert.assertNull
+ import org.junit.Assert.assertTrue
+ import org.junit.Test
+ import java.time.LocalDate
++import java.time.LocalDateTime
+ import java.time.ZoneId
++import java.util.Locale
+ 
+ /** victor:weekly — which week, what Claude is told, how the answer is read and kept. */
+ class WeeklyReviewTest {
+ 
+     private val madrid = ZoneId.of("Europe/Madrid")
+ 
++    private val spain = Locale.forLanguageTag("es-ES")
++
+     @Test
+     fun theReviewedWeekIsTheLastFinishedMondayToSunday() {
+         // Monday 19 Oct → the week of Monday 12; Sunday 25 Oct → still the week of the 12th.
+-        assertEquals(LocalDate.of(2026, 10, 12), WeeklyReviews.lastWeekStart(LocalDate.of(2026, 10, 19)))
+-        assertEquals(LocalDate.of(2026, 10, 12), WeeklyReviews.lastWeekStart(LocalDate.of(2026, 10, 25)))
+-        assertEquals(LocalDate.of(2026, 10, 19), WeeklyReviews.lastWeekStart(LocalDate.of(2026, 10, 26)))
++        assertEquals(LocalDate.of(2026, 10, 12), WeeklyReviews.lastWeekStart(LocalDate.of(2026, 10, 19), spain))
++        assertEquals(LocalDate.of(2026, 10, 12), WeeklyReviews.lastWeekStart(LocalDate.of(2026, 10, 25), spain))
++        assertEquals(LocalDate.of(2026, 10, 19), WeeklyReviews.lastWeekStart(LocalDate.of(2026, 10, 26), spain))
+         assertTrue(WeeklyReviews.hasEnough(3, 0))
+         assertTrue(WeeklyReviews.hasEnough(0, 1))
+         assertFalse(WeeklyReviews.hasEnough(2, 0))
+     }
+ 
++    @Test
++    fun lastWeekIsNotAskedForBeforeTenOnMondayMorning() {
++        // 00:40 on Monday the 26th the Sunday dinner is still being logged; at 09:59 the strap may not have handed
++        // over Sunday's workout. Until 10:00 the due week (and the card, and the coach) stays the one before.
++        fun at(d: Int, h: Int, m: Int) = WeeklyReviews.dueWeekStart(LocalDateTime.of(2026, 10, d, h, m), spain)
++        assertEquals(LocalDate.of(2026, 10, 12), at(25, 23, 59))
++        assertEquals(LocalDate.of(2026, 10, 12), at(26, 0, 40))
++        assertEquals(LocalDate.of(2026, 10, 12), at(26, 9, 59))
++        assertEquals(LocalDate.of(2026, 10, 19), at(26, 10, 0))
++        assertEquals(LocalDate.of(2026, 10, 19), at(27, 1, 0))
++    }
++
++    @Test
++    fun weeksStartOnTheLocalesFirstDayEverywhere() {
++        // Spain: Monday. A US phone: Sunday, in the review, the Food history and «Mi día» alike.
++        assertEquals(LocalDate.of(2026, 10, 18), WeeklyReviews.lastWeekStart(LocalDate.of(2026, 10, 25), Locale.US))
++        for (locale in listOf(spain, Locale.US)) {
++            for (anchor in (0L..6L).map { LocalDate.of(2026, 10, 19).plusDays(it) }) {
++                val calendarWeek = com.noop.day.DayCalendar.range(com.noop.day.DayView.WEEK, anchor, locale).first
++                assertEquals("$locale $anchor", calendarWeek, WeeklyReviews.lastWeekStart(anchor.plusWeeks(1), locale))
++                val history = com.noop.food.FoodHistory.points(
++                    listOf(com.noop.food.HistoryDay(anchor, null, 2000.0)), weekly = true, today = anchor.plusWeeks(1), locale = locale,
++                )
++                assertEquals("$locale $anchor", calendarWeek, history.single().day)
++            }
++        }
++        val sundayWeek = WeeklyReviews.prompt(
++            LocalDate.of(2026, 10, 18), emptyList(), emptyMap(), emptyMap(), null, emptyList(), emptyList(), emptyList(), madrid,
++        )
++        assertTrue(sundayWeek.contains("WEEK: 2026-10-18 (Sunday) to 2026-10-24 (Saturday)."))
++    }
++
++    @Test
++    fun theWeekSeesEveryWorkoutTheCoachSees() {
++        // A Strava run synced through Health Connect on Saturday: on the Workouts list and in the coach, and now
++        // in the week's review and its "enough to judge" count. Rows outside the week stay out.
++        val strap = "my-whoop"
++        fun row(source: String, start: Long, sport: String) =
++            WorkoutRow(deviceId = source, startTs = start, endTs = start + 3_600L, sport = sport, source = source, durationS = 3_600.0)
++        val from = LocalDate.of(2026, 10, 12).atStartOfDay(madrid).toEpochSecond()
++        val to = LocalDate.of(2026, 10, 19).atStartOfDay(madrid).toEpochSecond()
++        val saturday = LocalDate.of(2026, 10, 17).atTime(10, 0).atZone(madrid).toEpochSecond()
++        val byDevice = mapOf(
++            strap to listOf(row(strap, saturday - 86_400L, "Strength"), row(strap, to + 3_600L, "Strength")),
++            "health-connect" to listOf(row("health-connect", saturday, "Running")),
++        )
++        val dao = java.lang.reflect.Proxy.newProxyInstance(
++            com.noop.data.WhoopDao::class.java.classLoader, arrayOf(com.noop.data.WhoopDao::class.java),
++        ) { _, method, args ->
++            when (method.name) {
++                "workouts" -> byDevice[args[0] as String].orEmpty()
++                "dismissedWorkouts" -> emptyList<com.noop.data.DismissedWorkout>()
++                "pairedDevices" -> emptyList<com.noop.data.PairedDeviceRow>()
++                else -> throw UnsupportedOperationException(method.name)
++            }
++        } as com.noop.data.WhoopDao
++        val rows = kotlinx.coroutines.runBlocking { WeeklyReviewer.weekWorkouts(com.noop.data.WhoopRepository(dao), strap, from, to) }
++        assertEquals(setOf("Strength", "Running"), rows.map { it.sport }.toSet())
++        assertEquals(2, rows.size)
++    }
++
+     @Test
+     fun thePromptHasEveryDayTheMealsTheirMarksAndTheWorkouts() {
+         val day = "2026-10-14"
+-- 
+2.54.0
+

@@ -1,0 +1,280 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 16:04:16 +0200
+Subject: [PATCH] =?UTF-8?q?fix(weekly):=20=C2=ABTu=20semana=C2=BB=20is=20r?=
+ =?UTF-8?q?edone=20once=20when=20its=20week=20changes;=20Today's=20food=20?=
+ =?UTF-8?q?card=20follows=20the=20log?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Each review keeps an optional `sig` of what it was asked on (the week's meals with day, kcal and macros,
+  every workout the coach sees, Claude's workout analyses). If that changes before the next week's
+  Wednesday ends, the week is asked for once more; the redo keeps no sig, so it is never redone again.
+  Reviews written before have no sig and are left as they are. A failed workouts read is not a change;
+  only a failed request waits the retry hours.
+- The Today food card collects FoodStore's flow, so a meal saved, edited or deleted on the Food tab shows
+  at once, like the other Food cards.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../java/com/noop/food/TodayFoodSection.kt    | 11 ++---
+ .../main/java/com/noop/weekly/WeeklyReview.kt | 36 ++++++++++++++++
+ .../java/com/noop/weekly/WeeklyReviewer.kt    | 29 +++++++++----
+ .../com/noop/food/VictorWiringAuditTest.kt    |  8 ++++
+ .../java/com/noop/weekly/WeeklyReviewTest.kt  | 43 +++++++++++++++++++
+ 5 files changed, 113 insertions(+), 14 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+index abf32ad7..7348b546 100644
+--- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
++++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+@@ -7,6 +7,7 @@ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.produceState
+ import androidx.compose.ui.platform.LocalContext
++import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import com.noop.R
+ import com.noop.goals.VictorGoalsStore
+ import com.noop.ui.AppViewModel
+@@ -17,16 +18,16 @@ import kotlinx.coroutines.withContext
+ 
+ /**
+  * victor:food — the Today Food card (anchored above Workouts): today's intake and energy balance, the same
+- * [FoodDayCard] the Food tab shows, plus a button into the Food tab. Re-reads the log each time Today is
+- * composed, so a meal saved on the Food tab is here when the wearer comes back.
++ * [FoodDayCard] the Food tab shows, plus a button into the Food tab. It follows the log's flow, so a meal
++ * saved, edited or deleted anywhere shows at once, as on the Food tab.
+  */
+ @Composable
+ internal fun TodayFoodSection(vm: AppViewModel, onOpenFood: () -> Unit) {
+     val ctx = LocalContext.current
+     val today = FoodDays.today()
+-    val entries by produceState(emptyList<FoodEntry>(), today) {
+-        value = runCatching { FoodStore.load(ctx) }.getOrDefault(emptyList())
+-    }
++    val entries by FoodStore.entries.collectAsStateWithLifecycle()
++    // The flow is empty until the log's first read; later saves and deletes publish to it.
++    LaunchedEffect(today) { runCatching { FoodStore.load(ctx) } }
+     LaunchedEffect(entries) {
+         FoodScorer.scoreDue(ctx)   // victor:scores
+         com.noop.training.TrainingAnalyzer.refreshStale(ctx)   // victor:training — workouts scored on part of their heart rate
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
+index 692339db..7da21127 100644
+--- a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
+@@ -12,6 +12,7 @@ import com.noop.training.TrainingFormat
+ import com.noop.training.TrainingSession
+ import org.json.JSONArray
+ import org.json.JSONObject
++import java.time.DayOfWeek
+ import java.time.Instant
+ import java.time.LocalDate
+ import java.time.LocalDateTime
+@@ -39,6 +40,12 @@ data class WeeklyReview(
+     val overallNote: String,
+     val focus: String,
+     val atMs: Long,
++    /**
++     * The week's data when it was reviewed ([WeeklyReviews.signature]), so a change can ask for it again
++     * ([WeeklyReviews.redoDue]). Null on a review written before 2026-10-20 and on one already redone: neither is
++     * redone.
++     */
++    val sig: String? = null,
+ )
+ 
+ /**
+@@ -65,6 +72,33 @@ object WeeklyReviews {
+     fun dueWeekStart(now: LocalDateTime, locale: Locale = Locale.getDefault()): LocalDate =
+         lastWeekStart(now.minusHours(READY_HOURS).toLocalDate(), locale)
+ 
++    /**
++     * The week's data as Claude is told it: each meal's id, day, kcal and macros, each workout seen (source,
++     * start, end, sport) and each of Claude's workout analyses (when, kcal, effort). Order-free.
++     */
++    fun signature(weekFood: List<FoodEntry>, weekWorkouts: List<WorkoutRow>, sessions: List<TrainingSession>): String {
++        val meals = weekFood.map { "m:${it.id}:${it.day}:${it.kcal}:${it.proteinG}:${it.carbsG}:${it.fatG}" }
++        val workouts = weekWorkouts.map { "w:${it.deviceId}:${it.startTs}:${it.endTs}:${it.sport}" }
++        val analyses = sessions.mapNotNull { s -> s.analysis?.let { "a:${s.id}:${it.atMs}:${it.totalKcal}:${it.effort}" } }
++        return Integer.toHexString((meals + workouts + analyses).sorted().joinToString("|").hashCode())
++    }
++
++    /**
++     * Whether [review] can still be redone at [now]: it has a sig (not older than 2026-10-20, not redone yet,
++     * see [storedSig]) and the next week's Wednesday has not ended, while it still guides that week.
++     */
++    fun redoOpen(review: WeeklyReview, now: LocalDateTime): Boolean {
++        if (review.sig == null) return false
++        val start = runCatching { LocalDate.parse(review.weekStart) }.getOrNull() ?: return false
++        return now.isBefore(start.plusWeeks(1).with(TemporalAdjusters.nextOrSame(DayOfWeek.WEDNESDAY)).plusDays(1).atStartOfDay())
++    }
++
++    /** Whether [review] is asked for again now that its week reads [sig]: its data changed while [redoOpen]. */
++    fun redoDue(review: WeeklyReview, sig: String, now: LocalDateTime): Boolean = redoOpen(review, now) && review.sig != sig
++
++    /** The sig a new review keeps: the week's for a first review, none for a redo, so a week is redone once at most. */
++    fun storedSig(previous: WeeklyReview?, sig: String): String? = if (previous == null) sig else null
++
+     /** Enough to judge: three days with meals, or any workout. */
+     fun hasEnough(foodDays: Int, workouts: Int): Boolean = foodDays >= 3 || workouts > 0
+ 
+@@ -198,6 +232,7 @@ object WeeklyReviews {
+                     .put("focus", r.focus)
+                     .put("at", r.atMs)
+                     .apply {
++                        r.sig?.let { put("sig", it) }
+                         r.food?.let { put("food", it) }
+                         r.training?.let { put("training", it) }
+                         r.overall?.let { put("overall", it) }
+@@ -223,6 +258,7 @@ object WeeklyReviews {
+                 overallNote = o.optString("overall_note"),
+                 focus = o.optString("focus"),
+                 atMs = o.optLong("at"),
++                sig = o.optString("sig").takeIf { o.has("sig") && it.isNotEmpty() },
+             )
+         }.sortedBy { it.weekStart }
+     }
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
+index 745b8edd..dd126dd9 100644
+--- a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
+@@ -30,9 +30,10 @@ import java.util.concurrent.atomic.AtomicBoolean
+ /**
+  * victor:weekly — the reviews on disk (`files/weekly/reviews.json`, the last 12 weeks) and the pass that asks
+  * Claude for last week's once the week is over. Called when the Today food card shows: the first look from
+- * 10:00 on the new week's first day reviews the week before it ([WeeklyReviews.dueWeekStart]). Only with the
+- * coach's data consent. A week with too little logged is skipped without a request, and a failure (offline,
+- * no key) is tried again after [RETRY_MS].
++ * 10:00 on the new week's first day reviews the week before it ([WeeklyReviews.dueWeekStart]); if the week's
++ * meals, workouts or analyses change before the next Wednesday ends, it is asked for once more
++ * ([WeeklyReviews.redoDue]). Only with the coach's data consent. A week with too little logged is skipped
++ * without a request, and a failure (offline, no key) is tried again after [RETRY_MS].
+  */
+ object WeeklyReviewer {
+ 
+@@ -44,7 +45,7 @@ object WeeklyReviewer {
+     private val running = AtomicBoolean(false)
+     private val mutex = Mutex()
+     private var cache: List<WeeklyReview>? = null
+-    /** The week last asked for and when, for [RETRY_MS]. */
++    /** The week last asked for and failed, and when, for [RETRY_MS]. */
+     @Volatile private var lastTry: Pair<String, Long>? = null
+     private const val RETRY_MS = 6 * 3_600_000L
+ 
+@@ -68,8 +69,11 @@ object WeeklyReviewer {
+ 
+     private suspend fun pass(ctx: Context) {
+         val zone = ZoneId.systemDefault()
+-        val start = WeeklyReviews.dueWeekStart(LocalDateTime.now(zone))
+-        if (load(ctx).any { it.weekStart == start.toString() }) return
++        val now = LocalDateTime.now(zone)
++        val start = WeeklyReviews.dueWeekStart(now)
++        // Reviewed already: only a review that may still be redone once reads the week again.
++        val previous = load(ctx).lastOrNull { it.weekStart == start.toString() }
++        if (previous != null && !WeeklyReviews.redoOpen(previous, now)) return
+         if (AiKeyStore.read(ctx, AiProvider.ANTHROPIC) == null) return
+         // The week's burn, heart rate and workouts are the wearer's data: only with the coach's data consent.
+         if (!AiKeyStore.readConsent(ctx)) return
+@@ -84,10 +88,13 @@ object WeeklyReviewer {
+         val toS = end.plusDays(1).atStartOfDay(zone).toEpochSecond()
+ 
+         val food = FoodStore.load(ctx).filter { it.day >= start.toString() && it.day <= end.toString() }
+-        val workouts = runCatching { weekWorkouts(repo, strapId, fromS, toS) }.getOrDefault(emptyList())
++        // A failed read is not a change: it must not redo a review.
++        val workouts = runCatching { weekWorkouts(repo, strapId, fromS, toS) }.getOrNull() ?: if (previous == null) emptyList() else return
++        val sessions = TrainingStore.load(ctx).filter { !it.isLive && it.startTs in fromS until toS }
++        val sig = WeeklyReviews.signature(food, workouts, sessions)
++        if (previous != null && !WeeklyReviews.redoDue(previous, sig, now)) return
+         if (!WeeklyReviews.hasEnough(food.map { it.day }.distinct().size, workouts.size)) return
+ 
+-        val sessions = TrainingStore.load(ctx).filter { !it.isLive && it.startTs in fromS until toS }
+         val energy = runCatching { FoodEnergy.loadRange(ctx, repo, strapId, start.toString(), end.toString()) }.getOrDefault(emptyMap())
+         val prompt = WeeklyReviews.prompt(
+             weekStart = start,
+@@ -102,7 +109,11 @@ object WeeklyReviewer {
+         )
+         lastTry = start.toString() to nowMs
+         val r = TrainingAi.ask(ctx, prompt, WeeklyReviews.schema()) { WeeklyReviews.parse(it, start.toString(), System.currentTimeMillis()) }
+-        if (r is TrainingAiResult.Ok) save(ctx, r.value)
++        if (r is TrainingAiResult.Ok) {
++            // A redo keeps no sig, so the week is redone once at most; only a failure waits RETRY_MS.
++            save(ctx, r.value.copy(sig = WeeklyReviews.storedSig(previous, sig)))
++            lastTry = null
++        }
+     }
+ 
+     /**
+diff --git a/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt b/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
+index d6ee8372..75f4f6a4 100644
+--- a/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
++++ b/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
+@@ -56,6 +56,14 @@ class VictorWiringAuditTest {
+         assertEquals(5, loads)
+     }
+ 
++    @Test
++    fun todaysFoodCardFollowsTheLogsFlow() {
++        // A meal saved or deleted on the Food tab (or anywhere) shows on Today at once, as on the Food tab.
++        val c = code("food/TodayFoodSection.kt")
++        assertTrue(c.contains("FoodStore.entries.collectAsStateWithLifecycle()"))
++        assertFalse("a one-off read of the log goes stale", c.contains("produceState(emptyList<FoodEntry>()"))
++    }
++
+     @Test
+     fun theWearersProfileScaleAndGoalsAreReadInOnePlace() {
+         // The meal marks, the week's review and the workout estimate each had their own copy of these lines.
+diff --git a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
+index 09e55196..62daa389 100644
+--- a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
++++ b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
+@@ -144,4 +144,47 @@ class WeeklyReviewTest {
+             line,
+         )
+     }
++
++    @Test
++    fun aChangedWeekIsReviewedAgainOnceUntilTheNextWednesday() {
++        val day = "2026-10-14"
++        fun meal(kcal: Double) = FoodEntry(
++            "e", LocalDate.parse(day).atTime(21, 0).atZone(madrid).toInstant().toEpochMilli(), day, "",
++            listOf(FoodItem("Pasta", "1", kcal, 12.0, 70.0, 9.0)), kcal, 12.0, 70.0, 9.0, emptyList(), meal = MealType.DINNER,
++        )
++        val start = LocalDate.of(2026, 10, 14).atTime(18, 0).atZone(madrid).toEpochSecond()
++        val gym = WorkoutRow("my-whoop", start, start + 3600, "Strength", "manual", durationS = 3600.0)
++        val sig0 = WeeklyReviews.signature(listOf(meal(600.0)), listOf(gym), emptyList())
++        // Reviewed on Monday 19 at 10:05: the first review keeps the week's sig.
++        val first = WeeklyReview("2026-10-12", 6, "", 5, "", 6, "", "", 1L, sig = WeeklyReviews.storedSig(null, sig0))
++        assertEquals(sig0, first.sig)
++        val tuesday = LocalDateTime.of(2026, 10, 20, 12, 0)
++        assertFalse("nothing changed", WeeklyReviews.redoDue(first, sig0, tuesday))
++        // The dinner is corrected on Tuesday: asked for again.
++        val sig1 = WeeklyReviews.signature(listOf(meal(850.0)), listOf(gym), emptyList())
++        assertTrue(WeeklyReviews.redoDue(first, sig1, tuesday))
++        // The redo keeps no sig: a second change is not asked for again.
++        val redone = first.copy(atMs = 2L, sig = WeeklyReviews.storedSig(first, sig1))
++        assertNull(redone.sig)
++        val sig2 = WeeklyReviews.signature(listOf(meal(900.0)), listOf(gym), emptyList())
++        assertFalse(WeeklyReviews.redoDue(redone, sig2, tuesday))
++        // Past the next Wednesday (21st, 23:59) nothing is redone; a review from before sigs never is.
++        assertTrue(WeeklyReviews.redoDue(first, sig1, LocalDateTime.of(2026, 10, 21, 23, 59)))
++        assertFalse(WeeklyReviews.redoDue(first, sig1, LocalDateTime.of(2026, 10, 22, 0, 0)))
++        assertFalse(WeeklyReviews.redoDue(first.copy(sig = null), sig1, tuesday))
++        // A new workout or a new analysis changes the week too; the order things are read in does not.
++        assertTrue(sig0 != WeeklyReviews.signature(listOf(meal(600.0)), listOf(gym, gym.copy(startTs = start + 86_400L, endTs = start + 90_000L)), emptyList()))
++        assertEquals(sig0, WeeklyReviews.signature(listOf(meal(600.0)), listOf(gym), emptyList()))
++        val session = com.noop.training.TrainingSession(
++            id = "s", mode = com.noop.training.TrainingMode.LOGGED, startTs = start, endTs = start + 3600, sport = "Strength",
++            description = "", exercises = emptyList(),
++            analysis = com.noop.training.TrainingAnalysis(380.0, 330.0, 430.0, 210.0, "", 5L, effort = 48.0),
++        )
++        assertTrue(sig0 != WeeklyReviews.signature(listOf(meal(600.0)), listOf(gym), listOf(session)))
++        // On disk: the sig round-trips, and a file written before it reads with none.
++        assertEquals(listOf(first), WeeklyReviews.decode(WeeklyReviews.encode(listOf(first))))
++        val old = WeeklyReviews.decode("""{"version":1,"reviews":[{"week":"2026-10-05","food_note":"","training_note":"","overall_note":"x","focus":"","at":3,"overall":5}]}""")
++        assertNull(old.single().sig)
++        assertFalse(WeeklyReviews.redoDue(old.single(), sig1, LocalDateTime.of(2026, 10, 6, 12, 0)))
++    }
+ }
+-- 
+2.54.0
+

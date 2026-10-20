@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 16:05:55 +0200
+Subject: [PATCH] fix(weekly): a week's redo waits until its correction is
+ finished
+
+A correction often comes in steps (a meal edited, then its second photo). The redo now waits until the
+week's changed data has stood 15 min unchanged (RedoSettle, in process memory only: a restart starts the
+wait again), so the one redo sees every step. No stored field.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../main/java/com/noop/weekly/WeeklyReview.kt | 20 +++++++++++++++++++
+ .../java/com/noop/weekly/WeeklyReviewer.kt    |  5 ++++-
+ .../java/com/noop/weekly/WeeklyReviewTest.kt  | 16 +++++++++++++++
+ 3 files changed, 40 insertions(+), 1 deletion(-)
+
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
+index 7da21127..5b0d53f9 100644
+--- a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
+@@ -48,6 +48,26 @@ data class WeeklyReview(
+     val sig: String? = null,
+ )
+ 
++/**
++ * victor:weekly — the wait before a changed week is redone: a correction often comes in several steps (a meal
++ * edited, then its second photo), and the one redo should see them all. Remembers, in this process only, the
++ * last changed sig seen per week and since when; a redo goes ahead once it has stood [settleMs] unchanged. A
++ * process restart starts the wait again. Not thread-safe: the reviewer runs one pass at a time.
++ */
++internal class RedoSettle(private val settleMs: Long = 15 * 60_000L) {
++    private var seen: Triple<String, String, Long>? = null
++
++    /** Whether [sig], the changed data of [week], has stood unchanged for [settleMs] at [nowMs]. */
++    fun ready(week: String, sig: String, nowMs: Long): Boolean {
++        val s = seen
++        if (s == null || s.first != week || s.second != sig) {
++            seen = Triple(week, sig, nowMs)
++            return false
++        }
++        return nowMs - s.third >= settleMs
++    }
++}
++
+ /**
+  * victor:weekly — the pure half of the weekly review: which week is due, what Claude is told about it, the
+  * answer's shape, and the JSON on disk.
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
+index dd126dd9..1dbace25 100644
+--- a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
+@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicBoolean
+  * Claude for last week's once the week is over. Called when the Today food card shows: the first look from
+  * 10:00 on the new week's first day reviews the week before it ([WeeklyReviews.dueWeekStart]); if the week's
+  * meals, workouts or analyses change before the next Wednesday ends, it is asked for once more
+- * ([WeeklyReviews.redoDue]). Only with the coach's data consent. A week with too little logged is skipped
++ * ([WeeklyReviews.redoDue]), after the change has stood 15 min ([RedoSettle]). Only with the coach's data consent. A week with too little logged is skipped
+  * without a request, and a failure (offline, no key) is tried again after [RETRY_MS].
+  */
+ object WeeklyReviewer {
+@@ -48,6 +48,7 @@ object WeeklyReviewer {
+     /** The week last asked for and failed, and when, for [RETRY_MS]. */
+     @Volatile private var lastTry: Pair<String, Long>? = null
+     private const val RETRY_MS = 6 * 3_600_000L
++    private val settle = RedoSettle()
+ 
+     private val _reviews = MutableStateFlow<List<WeeklyReview>>(emptyList())
+     /** Oldest first. Empty until the first [load]. */
+@@ -93,6 +94,8 @@ object WeeklyReviewer {
+         val sessions = TrainingStore.load(ctx).filter { !it.isLive && it.startTs in fromS until toS }
+         val sig = WeeklyReviews.signature(food, workouts, sessions)
+         if (previous != null && !WeeklyReviews.redoDue(previous, sig, now)) return
++        // A correction in several steps: the redo waits until the week has stopped changing.
++        if (previous != null && !settle.ready(start.toString(), sig, nowMs)) return
+         if (!WeeklyReviews.hasEnough(food.map { it.day }.distinct().size, workouts.size)) return
+ 
+         val energy = runCatching { FoodEnergy.loadRange(ctx, repo, strapId, start.toString(), end.toString()) }.getOrDefault(emptyMap())
+diff --git a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
+index 62daa389..10448d0b 100644
+--- a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
++++ b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
+@@ -187,4 +187,20 @@ class WeeklyReviewTest {
+         assertNull(old.single().sig)
+         assertFalse(WeeklyReviews.redoDue(old.single(), sig1, LocalDateTime.of(2026, 10, 6, 12, 0)))
+     }
++
++    @Test
++    fun aCorrectionInTwoStepsIsRedoneOnceWithBoth() {
++        // The dinner is corrected at 12:00 and its second photo added at 12:05: one redo, with both, from 12:20.
++        val settle = RedoSettle()
++        val min = 60_000L
++        val t0 = 1_000_000_000L
++        val week = "2026-10-12"
++        assertFalse(settle.ready(week, "first-step", t0))
++        assertFalse(settle.ready(week, "both-steps", t0 + 5 * min))
++        assertFalse("15 min from the first change, 10 from the last", settle.ready(week, "both-steps", t0 + 15 * min))
++        assertFalse(settle.ready(week, "both-steps", t0 + 19 * min))
++        assertTrue(settle.ready(week, "both-steps", t0 + 20 * min))
++        // Another week's change starts its own wait.
++        assertFalse(settle.ready("2026-10-19", "both-steps", t0 + 21 * min))
++    }
+ }
+-- 
+2.54.0
+

@@ -1,0 +1,387 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 16:53:19 +0200
+Subject: [PATCH] feat(energy): every calorie surface reads the day model
+ (hooks marked victor:energy)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- WhoopRepository.resolvedSeries("active_kcal"/"energy_kcal") returns the model's active energy when
+  installed: Today's Calories tile and sparkline, Health's Energía activa, Compare, the Workouts heat map.
+- TodayScreen and HealthScreen stop preferring the phone's AppleDaily.activeKcal over the series.
+- AppViewModel.loadWorkouts and AiCoach.recentWorkoutsBlock publish rows priced by the model
+  (EnergyHooks.priced): the Workouts list, its detail, "Total calorías", Today's latest workouts and the
+  coach's workouts block all show the model's gross figure.
+- AiCoach.buildContext takes the model's active energy per day for its 30-day "active energy" (the
+  strap's figure was resting + active); chat, chatStream, the weekly review and "Sugiéreme" pass it.
+- CoupledScreen's "Calories" is the model's burn so far for the day shown.
+- WorkoutsScreen's detail sheet follows the list, so "Re-estimate" refreshes it while open.
+- ProfileStore.isWeightSet / isHeightSet / isBirthSet; NoopApplication installs the model.
+- VictorWiringAuditTest: no surface reads activeKcalEst or the phone's activeKcal on its own, every
+  calorie surface goes through the model, the old resolver is gone.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../src/main/java/com/noop/NoopApplication.kt |  1 +
+ .../app/src/main/java/com/noop/ai/AiCoach.kt  | 25 +++++++--
+ .../java/com/noop/data/WhoopRepository.kt     |  4 ++
+ .../noop/training/TrainingSuggestContext.kt   |  2 +-
+ .../src/main/java/com/noop/ui/AppViewModel.kt |  3 +-
+ .../main/java/com/noop/ui/CoupledScreen.kt    |  8 ++-
+ .../src/main/java/com/noop/ui/HealthScreen.kt | 10 ++--
+ .../main/java/com/noop/ui/SettingsScreen.kt   |  6 +++
+ .../src/main/java/com/noop/ui/TodayScreen.kt  | 15 +++---
+ .../main/java/com/noop/ui/WorkoutsScreen.kt   | 20 ++++---
+ .../com/noop/food/VictorWiringAuditTest.kt    | 53 ++++++++++++++++++-
+ 11 files changed, 115 insertions(+), 32 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/NoopApplication.kt b/android/app/src/main/java/com/noop/NoopApplication.kt
+index 0ca9158e..fb53a9ed 100644
+--- a/android/app/src/main/java/com/noop/NoopApplication.kt
++++ b/android/app/src/main/java/com/noop/NoopApplication.kt
+@@ -46,6 +46,7 @@ class NoopApplication : Application() {
+         super.onCreate()
+         com.noop.day.VictorTodayQuiet.applyOnce(this)   // victor:day
+         com.noop.training.TrainingStore.preload(this)   // victor:training — the day's Effort right from the start
++        com.noop.energy.DayEnergyModel.install(this)   // victor:energy — one energy-out figure for every screen
+         // Install before any app-owned startup work so even an early failure is preserved for the
+         // recovery screen on the next launch.
+         CrashCapture.install(this)
+diff --git a/android/app/src/main/java/com/noop/ai/AiCoach.kt b/android/app/src/main/java/com/noop/ai/AiCoach.kt
+index 33d4888f..82a089d7 100644
+--- a/android/app/src/main/java/com/noop/ai/AiCoach.kt
++++ b/android/app/src/main/java/com/noop/ai/AiCoach.kt
+@@ -131,7 +131,7 @@ class AiCoach(
+             val workouts = runCatching { recentWorkoutsBlock(ctx) }.getOrNull()
+             val victorExtras = runCatching { VictorCoachExtras.block(ctx, repo, activeStrapId()) }.getOrNull()   // victor:coach-extras
+             val full = buildString {
+-                append(buildContext(days))
++                append(buildContext(days, activeEnergyByDay(ctx)))   // victor:energy
+                 if (!workouts.isNullOrBlank()) append("\n\n").append(workouts)
+                 if (!stress.isNullOrBlank()) append("\n\n").append(stress)
+                 if (!signals.isNullOrBlank()) append("\n\n").append(signals)
+@@ -216,7 +216,7 @@ class AiCoach(
+             val workouts = runCatching { recentWorkoutsBlock(ctx) }.getOrNull()
+             val victorExtras = runCatching { VictorCoachExtras.block(ctx, repo, activeStrapId()) }.getOrNull()   // victor:coach-extras
+             val full = buildString {
+-                append(buildContext(days))
++                append(buildContext(days, activeEnergyByDay(ctx)))   // victor:energy
+                 if (!workouts.isNullOrBlank()) append("\n\n").append(workouts)
+                 if (!stress.isNullOrBlank()) append("\n\n").append(stress)
+                 if (!signals.isNullOrBlank()) append("\n\n").append(signals)
+@@ -408,7 +408,12 @@ class AiCoach(
+      * Kept well under ~1500 tokens. If there is no data at all, says so explicitly so the
+      * model doesn't invent numbers.
+      */
+-    fun buildContext(days: List<DailyMetric>): String {
++    fun buildContext(
++        days: List<DailyMetric>,
++        // victor:energy — the day model's active energy per finished day ([activeEnergyByDay]); the strap's own
++        // whole-day estimate was resting + active, and said "active".
++        activeKcalByDay: Map<String, Double> = emptyMap(),
++    ): String {
+         if (days.isEmpty()) {
+             return "USER DATA: No wearable data is available yet (no synced days). " +
+                 "Do not invent specific numbers; give general guidance and encourage the user " +
+@@ -460,7 +465,7 @@ class AiCoach(
+         sb.append("respiration ${avg1(last30) { it.respRateBpm }}/min, ")
+         sb.append("skin-temp deviation ${avg1(last30) { it.skinTempDevC }}°C, ")
+         sb.append("steps ${avgInt(done30) { d -> d.steps?.toDouble() }}/day, ")
+-        sb.append("active energy ${avgInt(last30) { it.activeKcalEst }}kcal/day\n")
++        sb.append("active energy ${avgInt(done30) { activeKcalByDay[it.day] }}kcal/day (steps + workouts + after-burn + unlogged activity; the day model)\n")   // victor:energy
+ 
+         // --- Recent workouts (derived from logged exercise counts + day strain) ---
+         val workoutDays = last14.filter { (it.exerciseCount ?: 0) > 0 }
+@@ -486,6 +491,16 @@ class AiCoach(
+         return sb.toString().trim()
+     }
+ 
++    /** victor:energy — the day model's active energy per finished day of the last 30, for [buildContext]. */
++    internal suspend fun activeEnergyByDay(ctx: Context): Map<String, Double> {
++        val today = com.noop.food.FoodDays.today()
++        return runCatching {
++            com.noop.energy.DayEnergyModel.range(
++                ctx, repo, activeStrapId(), com.noop.energy.EnergyDays.plusDays(today, -30), com.noop.energy.EnergyDays.plusDays(today, -1),
++            ).mapNotNull { (d, e) -> e.activeKcal?.let { d to it } }.toMap()
++        }.getOrDefault(emptyMap())
++    }
++
+     /**
+      * Recent workouts, one line PER SESSION rather than a per-day count.
+      *
+@@ -522,7 +537,7 @@ class AiCoach(
+     internal suspend fun recentWorkoutsBlock(ctx: Context, limit: Int = 6): String {
+         val now = System.currentTimeMillis() / 1000L
+         val from = now - 30L * 86_400L
+-        val rows = runCatching { visibleWorkoutRows(from, now) }.getOrDefault(emptyList())
++        val rows = runCatching { com.noop.energy.EnergyHooks.priced(visibleWorkoutRows(from, now)) }.getOrDefault(emptyList())   // victor:energy — the model's kcal per row
+         return formatWorkoutsBlock(rows, UnitPrefs.distanceSystem(ctx), limit)
+     }
+ 
+diff --git a/android/app/src/main/java/com/noop/data/WhoopRepository.kt b/android/app/src/main/java/com/noop/data/WhoopRepository.kt
+index 8c7bdd3e..2add7b61 100644
+--- a/android/app/src/main/java/com/noop/data/WhoopRepository.kt
++++ b/android/app/src/main/java/com/noop/data/WhoopRepository.kt
+@@ -2239,6 +2239,10 @@ class WhoopRepository(
+         // bedtime-schedule span) yields to a later candidate's REAL scored night, so Compare / Lab
+         // Book / any resolver read agrees with the mergeDaily dashboards instead of re-surfacing the
+         // schedule target the merge already rejects.
++        // victor:energy — calories are the day model's ACTIVE energy (steps + workouts + after-burn + unlogged
++        // activity), the one figure Today, Health, Compare and the Food balance share; the strap's and the
++        // phone's own estimates stay as diagnostics. Only when the model is installed (the app, not a bare test).
++        com.noop.energy.EnergyHooks.activeSeries(key, from, to)?.let { return MetricSeriesResolution(preferredSource, candidates, it) }
+         val perCandidate = candidates.map { it to resolvedRows(it, from, to) }
+         val points = resolveFirstWins(perCandidate).let { p ->   // victor:training — the gym extra, as the merged readers carry it
+             if (key != "strain") p else p.map { it.copy(value = com.noop.training.VictorDayEffort.onDay(it.day, it.value, com.noop.training.VictorDayEffort.boosts.value)) }
+diff --git a/android/app/src/main/java/com/noop/training/TrainingSuggestContext.kt b/android/app/src/main/java/com/noop/training/TrainingSuggestContext.kt
+index a2379f39..59bc378b 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingSuggestContext.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingSuggestContext.kt
+@@ -22,7 +22,7 @@ internal object TrainingSuggestContext {
+         VictorCoachExtras.refresh(ctx, repo)
+         val days = runCatching { repo.daysMerged(strapId) }.getOrDefault(emptyList())
+         return buildString {
+-            append(coach.buildContext(days))
++            append(coach.buildContext(days, coach.activeEnergyByDay(ctx)))   // victor:energy
+             runCatching { coach.recentWorkoutsBlock(ctx) }.getOrNull()?.takeIf { it.isNotBlank() }?.let { append("\n\n").append(it) }
+             runCatching { VictorCoachExtras.block(ctx, repo, strapId) }.getOrNull()?.let { append("\n\n").append(it) }
+         }
+diff --git a/android/app/src/main/java/com/noop/ui/AppViewModel.kt b/android/app/src/main/java/com/noop/ui/AppViewModel.kt
+index 76784f9f..b87246ea 100644
+--- a/android/app/src/main/java/com/noop/ui/AppViewModel.kt
++++ b/android/app/src/main/java/com/noop/ui/AppViewModel.kt
+@@ -2120,7 +2120,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
+             } else {
+                 WorkoutEditing.dedupCrossSource(filteredRows)
+             }
+-            val sorted = deduped.sortedByDescending { it.startTs }
++            // victor:energy — each row's kcal is the day model's gross for its window, the same figure the day counts.
++            val sorted = com.noop.energy.EnergyHooks.priced(deduped.sortedByDescending { it.startTs })
+             _workouts.value = sorted
+             // Post-workout summary (#517) — opt-in, default OFF. The newest session (by start) drives a
+             // one-shot Effort + duration + avg-HR notification when it's strictly newer than the last one
+diff --git a/android/app/src/main/java/com/noop/ui/CoupledScreen.kt b/android/app/src/main/java/com/noop/ui/CoupledScreen.kt
+index b85e871f..c92b180d 100644
+--- a/android/app/src/main/java/com/noop/ui/CoupledScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/CoupledScreen.kt
+@@ -143,6 +143,12 @@ fun CoupledScreen(
+     val workoutsToday = todayRow?.exerciseCount ?: 0
+     val context = LocalContext.current
+     val hrvEpoch = remember { NoopPrefs.of(context).getLong(Baselines.hrvBaselineEpochKey, 0L).toDouble() }
++    // victor:energy — "Calories" is the day model's burn so far for the day shown (basal + activity + digestion),
++    // the same figure as the Food balance, not the strap's heart-rate estimate.
++    val energyVersion by com.noop.energy.DayEnergyModel.version.collectAsStateWithLifecycle()
++    val modelCalories by androidx.compose.runtime.produceState<Double?>(null, todayKey, days, energyVersion) {
++        value = runCatching { com.noop.energy.DayEnergyModel.day(context, vm.repo, vm.activeStrapId, todayKey)?.totalKcal }.getOrNull()
++    }
+     // #1458: carry through the SAME helper Today uses, not a local re-derivation. The local copy was
+     // `days.lastOrNull { it.recovery != null && it.day < todayKey }`, which has no `todayScored` guard —
+     // so on a day that HAS a score it still returned a prior day, and the hero's Charge sheet opened that
+@@ -231,7 +237,7 @@ fun CoupledScreen(
+         StrainCard(
+             dayStrain21 = dayStrain21,
+             recovery = recovery,
+-            calories = todayRow?.activeKcalEst,
++            calories = modelCalories,   // victor:energy
+             workouts = workoutsToday,
+         )
+         SleepCard(
+diff --git a/android/app/src/main/java/com/noop/ui/HealthScreen.kt b/android/app/src/main/java/com/noop/ui/HealthScreen.kt
+index 74792a32..5ebb7d84 100644
+--- a/android/app/src/main/java/com/noop/ui/HealthScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/HealthScreen.kt
+@@ -2644,21 +2644,17 @@ internal suspend fun buildSeriesVitalDetail(vm: AppViewModel, key: String): Vita
+         // 5.0 user whose calories are on-device, and disagreed with the Key-Metrics tile. Resolve per day
+         // IMPORTED-FIRST (the phone's activeKcal, else NOOP's on-device estimate) — matching the tile + card
+         // so the chart + Readings agree, while keeping every imported day in the union.
++        // victor:energy — the resolved series is the day model's active energy, the one figure Today, Compare, Food
++        // and the coach share; the phone's own activeKcal is a diagnostic now and no longer wins its day.
+         val real = vm.repo.resolvedSeries("active_kcal", "my-whoop", "0000-00-00", "9999-99-99",
+             strapDeviceId = vm.activeStrapId)
+             .points.associateBy({ it.day }, { VitalReading(it.day, it.value, it.source) })
+-        val imported = LinkedHashMap<String, VitalReading>()
+-        for (r in vm.repo.appleDaily("apple-health", "0000-01-01", "9999-12-31") +
+-            vm.repo.appleDaily("health-connect", "0000-01-01", "9999-12-31")) {
+-            val k = r.activeKcal
+-            if (k != null && k > 0) imported.putIfAbsent(r.day, VitalReading(r.day, k, r.deviceId))
+-        }
+         VitalDetailModel(
+             key = key,
+             title = uiString(R.string.l10n_health_screen_active_energy_2d3288f9),
+             unit = "kcal",
+             color = Palette.metricAmber,
+-            readings = mergeReadings(imported, real),   // imported wins its day, else on-device estimate
++            readings = mergeReadings(real),
+             format = { it.roundToInt().toString() },
+         )
+     }
+diff --git a/android/app/src/main/java/com/noop/ui/SettingsScreen.kt b/android/app/src/main/java/com/noop/ui/SettingsScreen.kt
+index 2938993d..e1132200 100644
+--- a/android/app/src/main/java/com/noop/ui/SettingsScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/SettingsScreen.kt
+@@ -226,6 +226,12 @@ class ProfileStore(private val prefs: SharedPreferences) {
+         get() = prefs.getFloat(KEY_WEIGHT, 75f).toDouble().coerceIn(WEIGHT_MIN, WEIGHT_MAX)
+         set(v) = prefs.edit().putFloat(KEY_WEIGHT, v.coerceIn(WEIGHT_MIN, WEIGHT_MAX).toFloat()).apply()
+ 
++    // victor:energy — whether a value was ever entered: the getters answer a default for an empty store, and
++    // the energy model must say "no profile" rather than price a 75 kg adult nobody described.
++    val isWeightSet: Boolean get() = prefs.contains(KEY_WEIGHT)
++    val isHeightSet: Boolean get() = prefs.contains(KEY_HEIGHT)
++    val isBirthSet: Boolean get() = prefs.contains(KEY_DOB) || prefs.contains(KEY_AGE)
++
+     /**
+      * Opt-in "Use weight from Health Connect", OFF by default. When ON, every Health Connect import
+      * copies the newest Health Connect weight into [weightKg] ([HealthConnectWeightSync]) and Settings
+diff --git a/android/app/src/main/java/com/noop/ui/TodayScreen.kt b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
+index 1cbe0528..525e8bd1 100644
+--- a/android/app/src/main/java/com/noop/ui/TodayScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
+@@ -687,17 +687,14 @@ fun TodayScreen(
+     // Keyed by day; `caloriesByDay` feeds the SELECTED-day value the dashboard card + Key-Metrics tile both
+     // read — day-scoped like every other card, and like steps.
+     var caloriesByDay by remember { mutableStateOf<Map<String, Double>>(emptyMap()) }
+-    LaunchedEffect(days) {
++    // victor:energy — the resolved series IS the day model's active energy (steps + workouts + after-burn +
++    // unlogged activity), the figure Food, Health, Compare and the coach share; the phone's own activeKcal no
++    // longer wins its day. Keyed on the model's version too (a meal, a session, a phone refresh).
++    val energyVersion by com.noop.energy.DayEnergyModel.version.collectAsStateWithLifecycle()
++    LaunchedEffect(days, energyVersion) {
+         caloriesByDay = runCatching {
+-            val onDevice = viewModel.repo.resolvedSeries("active_kcal", "my-whoop", "0000-00-00", "9999-99-99",
++            viewModel.repo.resolvedSeries("active_kcal", "my-whoop", "0000-00-00", "9999-99-99",
+                 strapDeviceId = viewModel.activeStrapId).points.associate { it.day to it.value }
+-            val imported = LinkedHashMap<String, Double>()
+-            for (r in viewModel.repo.appleDaily("apple-health", "0000-01-01", "9999-12-31") +
+-                viewModel.repo.appleDaily("health-connect", "0000-01-01", "9999-12-31")) {
+-                r.activeKcal?.takeIf { it > 0 }?.let { imported.putIfAbsent(r.day, it) }
+-            }
+-            (onDevice.keys + imported.keys)
+-                .mapNotNull { day -> (imported[day] ?: onDevice[day])?.let { day to it } }.toMap()
+         }.getOrDefault(emptyMap())
+     }
+ 
+diff --git a/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt b/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt
+index 659c9b4b..8a1b0241 100644
+--- a/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/WorkoutsScreen.kt
+@@ -315,7 +315,7 @@ fun WorkoutsScreen(vm: AppViewModel) {
+             postLogNote?.let { item { PostLogNoteBanner(it) } }
+             item { EffortHero(rows = windowRows, effectiveRange = resolved, groups = groups) }
+             item { SummarySection(rows = windowRows, effectiveRange = resolved, groups = groups) }
+-            item { CalorieHeatmapSection(recentDays) }
++            item { CalorieHeatmapSection(vm, recentDays) }
+             item { BreakdownSection(groups = groups, rows = windowRows) }
+             item { ZonesSection(windowRows) }
+             if (recoveryTrend.isNotEmpty()) {
+@@ -811,11 +811,15 @@ private fun HeroStat(title: String, value: String, tint: Color, modifier: Modifi
+ // [ActivityHeatmap] (parity with the Swift twin); this composable is just the Compose renderer. Hidden
+ // entirely when there's no daily-calorie data yet.
+ @Composable
+-private fun CalorieHeatmapSection(recentDays: List<com.noop.data.DailyMetric>) {
+-    val values = remember(recentDays) {
+-        recentDays.mapNotNull { d -> d.activeKcalEst?.let { d.day to it } }
+-            .groupBy({ it.first }, { it.second })
+-            .mapValues { (_, v) -> v.max() }
++private fun CalorieHeatmapSection(vm: AppViewModel, recentDays: List<com.noop.data.DailyMetric>) {
++    // victor:energy — the ACTIVE calories the day model counts (the strap's own figure was resting + active, so
++    // the grid sat almost flat). Re-read when the strap's days or the model's inputs move.
++    val energyVersion by com.noop.energy.DayEnergyModel.version.collectAsStateWithLifecycle()
++    val values by androidx.compose.runtime.produceState(emptyMap<String, Double>(), recentDays, energyVersion) {
++        value = runCatching {
++            vm.repo.resolvedSeries("active_kcal", "my-whoop", "0000-00-00", "9999-99-99", strapDeviceId = vm.activeStrapId)
++                .points.associate { it.day to it.value }
++        }.getOrDefault(emptyMap())
+     }
+     val today = remember { java.time.LocalDate.now().toString() }
+     val grid = remember(values, today) { ActivityHeatmap.build(values, today) }
+@@ -1239,7 +1243,9 @@ private fun SessionsSection(
+         }
+     }
+ 
+-    selectedRow?.let { row ->
++    selectedRow?.let { opened ->
++        // victor:energy — the sheet follows the list: a re-estimate rewrites the row (kcal, Effort) while it is open.
++        val row = rows.firstOrNull { it.deviceId == opened.deviceId && it.startTs == opened.startTs && it.sport == opened.sport } ?: opened
+         WorkoutDetailSheet(vm = vm, row = row, onDismiss = { selectedRow = null })
+     }
+ }
+diff --git a/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt b/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
+index 75f4f6a4..da5a22ae 100644
+--- a/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
++++ b/android/app/src/test/java/com/noop/food/VictorWiringAuditTest.kt
+@@ -23,6 +23,9 @@ class VictorWiringAuditTest {
+     private fun code(rel: String): String =
+         File(mainRoot(), rel).readText().lines().joinToString("\n") { it.substringBefore("//") }
+ 
++    /** [code] with the block comments gone too, for the audits that name a symbol a KDoc may mention. */
++    private fun bareCode(rel: String): String = code(rel).replace(Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL), "")
++
+     @Test
+     fun everyForkSurfaceUsesTheOneToday() {
+         // "Today" is FoodDays.today() (04:00 roll, as upstream's Today); a calendar date flips the coach, the meal
+@@ -46,7 +49,7 @@ class VictorWiringAuditTest {
+             lines.forEachIndexed { i, line ->
+                 if (!line.contains("produceState")) return@forEachIndexed
+                 val body = lines.subList(i, minOf(i + 4, lines.size)).joinToString("\n")
+-                if (body.contains("FoodEnergy.load") || body.contains("FoodAdaptive.load")) {
++                if (body.contains("DayEnergyModel.day(") || body.contains("DayEnergyModel.range(") || body.contains("FoodAdaptive.load")) {
+                     loads++
+                     assertTrue("$f:${i + 1} loads the burn without the energy inputs key", line.contains("inputs"))
+                 }
+@@ -75,4 +78,52 @@ class VictorWiringAuditTest {
+             .map { it.name }.toSet()
+         assertEquals(setOf("VictorCoachExtras.kt", "VictorPersonLines.kt"), callers)
+     }
++
++    // victor:energy — one energy-out figure everywhere: no screen, prompt or card reads the strap's whole-day
++    // estimate (DailyMetric.activeKcalEst) or the phone's active calories (AppleDaily.activeKcal) on its own;
++    // they reach the day model, which keeps those two as diagnostics.
++    @Test
++    fun noCalorieSurfaceReadsTheStrapOrThePhoneEstimateDirectly() {
++        val scanned = listOf("ui", "food", "ai", "weekly", "training", "day", "goals", "widget")
++        // The device arbitration screen and the Apple Health import's own screen show their sources as such.
++        val allowed = setOf("ui/DevicesScreen.kt", "ui/AppleHealthScreen.kt")
++        val offenders = scanned.flatMap { dir ->
++            File(mainRoot(), dir).walkTopDown().filter { it.isFile && it.name.endsWith(".kt") }.toList()
++        }.map { it.relativeTo(mainRoot()).path }
++            .filter { it !in allowed }
++            .filter { rel ->
++                val c = bareCode(rel)
++                // The phone's figure lives on AppleDaily rows: `.activeKcal` on anything else is the model's own field.
++                c.contains("activeKcalEst") || (c.contains("AppleDaily") || c.contains("appleDaily(")) && Regex("""\.activeKcal\b""").containsMatchIn(c)
++            }
++        assertEquals(emptyList<String>(), offenders)
++    }
++
++    @Test
++    fun everyCalorieSurfaceGoesThroughTheDayModel() {
++        // The repository's active_kcal series (Today's tile and sparkline, Health, Compare, the Workouts heat map).
++        assertTrue(code("data/WhoopRepository.kt").contains("EnergyHooks.activeSeries(key, from, to)"))
++        // The workout lists (Workouts, Today's latest workouts, the detail sheet, totals) and the coach's workouts block.
++        assertTrue(code("ui/AppViewModel.kt").contains("EnergyHooks.priced("))
++        assertTrue(code("ai/AiCoach.kt").contains("EnergyHooks.priced(visibleWorkoutRows("))
++        // The coach's 30-day "active energy" and the Coupled card's calories.
++        assertTrue(code("ai/AiCoach.kt").contains("activeKcalByDay[it.day]"))
++        assertTrue(code("ui/CoupledScreen.kt").contains("DayEnergyModel.day("))
++        // Installed once, by the application.
++        assertTrue(code("NoopApplication.kt").contains("DayEnergyModel.install(this)"))
++        // The old resolver and the "Claude adds X" arithmetic are gone from the sources.
++        val stale = mainRoot().walkTopDown().filter { it.isFile && it.name.endsWith(".kt") }
++            .map { it.relativeTo(mainRoot()).path }
++            .filter { rel -> code(rel).let { it.contains("FoodEnergy.") || it.contains("TrainingEnergy.extra") || it.contains("EnergySource.") } }
++            .toList()
++        assertEquals(emptyList<String>(), stale)
++    }
++
++    @Test
++    fun theWorkoutDetailSheetFollowsTheListAfterAReEstimate() {
++        // The sheet used to hold the row object it opened with, so "Re-estimate" changed the list behind it and
++        // not the figures on screen until it was reopened.
++        val c = code("ui/WorkoutsScreen.kt")
++        assertTrue(c.contains("rows.firstOrNull { it.deviceId == opened.deviceId && it.startTs == opened.startTs && it.sport == opened.sport } ?: opened"))
++    }
+ }
+-- 
+2.54.0
+

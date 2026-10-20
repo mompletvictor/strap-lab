@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 16:03:33 +0200
+Subject: [PATCH] fix(effort): Explore's summary skips the day in progress;
+ water-goal comment beside its code
+
+Explore's mean, min, max and change for Effort and steps leave out today's half-day (its point still
+plots), as Trends already does. The water goal's comment moves down to the line it describes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ android/app/src/main/java/com/noop/ui/TodayScreen.kt      | 8 ++++----
+ .../app/src/main/java/com/noop/ui/TrendsExploreScreen.kt  | 4 +++-
+ 2 files changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/ui/TodayScreen.kt b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
+index f32f21fe..1cbe0528 100644
+--- a/android/app/src/main/java/com/noop/ui/TodayScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
+@@ -738,9 +738,6 @@ fun TodayScreen(
+             runCatching { HydrationStore.total(viewModel.repo) }.getOrDefault(0.0)
+         } else 0.0
+     }
+-    // The day's Effort/strain (0..100) drives the goal's effort bump. Prefer the live in-progress Effort
+-    // for today (floored at the stored value, mirroring the Effort gauge) so the goal reflects a hard day
+-    // as it accrues; null leaves the bump at 0. Computed below where liveTodayStrain is in scope.
+ 
+     // "How your scores work" guide, opened from the per-score ⓘ affordances and the one-time
+     // first-run card. `guideSection` carries which score to deep-link to (null = open at the top);
+@@ -1059,7 +1056,10 @@ fun TodayScreen(
+         live = if (selectedDayOffset == 0) liveTodayStrain else null,
+         stored = displayMetric?.strain,
+     )
+-    val hydrationGoalMl = if (!hydrationEnabled) 0 else HydrationGoal.dailyGoalMl(profileStore.sex, effortForDay)   // victor:effort — the live Effort, as the goal's comment says
++    // The day's Effort/strain (0..100) drives the goal's effort bump. Prefer the live in-progress Effort
++    // for today (floored at the stored value, mirroring the Effort gauge) so the goal reflects a hard day
++    // as it accrues; null leaves the bump at 0. Computed here, where that Effort is in scope.
++    val hydrationGoalMl = if (!hydrationEnabled) 0 else HydrationGoal.dailyGoalMl(profileStore.sex, effortForDay)   // victor:effort
+ 
+     // Recovery cold-start: recovery is null until the HRV baseline crosses the seed gate
+     // (Baselines.minNightsSeed valid nights). Show honest "calibrating, N of 4 nights" progress
+diff --git a/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt b/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt
+index ca982f99..bc2166f2 100644
+--- a/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt
+@@ -778,7 +778,9 @@ private fun StatRow(
+     windowed: List<SeriesPoint>,
+     effectiveRange: ExploreRange,
+ ) {
+-    val values = windowed.map { it.value }
++    val values = windowed.map { it.value }.let { v ->   // victor:effort — Effort and steps accrue through the day: today's half-day out of the summary (it still plots)
++        if (metric.key in setOf("strain", "steps", "steps_est")) com.noop.training.VictorDayEffort.finishedDays(v, windowed.map { it.day }) else v
++    }
+     val s = statOf(values)
+     val latest = series.lastOrNull()
+ 
+-- 
+2.54.0
+

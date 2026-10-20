@@ -1,0 +1,1023 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 16:53:19 +0200
+Subject: [PATCH] feat(energy): unlogged activity, one active series and priced
+ rows for the screens
+
+The day model gains the component the audit found missing once upstream's detector turned out to only
+SUGGEST workouts (#2187): a minute outside every window whose mean heart rate reaches resting + 50 % of
+the reserve earns its Keytel net above basal, less what its own strap steps already earn (never below
+zero), so an unlogged run or ride counts while a brisk walk adds nothing beyond its steps
+(UnloggedMinutes; cached per minute as mean bpm + ticks, weight-free). Enters the active energy.
+
+Also: `series()` (the repository's active_kcal points, clamped to the last 120 known days),
+`workouts()` composes only the days that have rows, EnergyHooks / EnergyRows for upstream's seams,
+`install(app)`; the day's heart rate is read once per stale day (windows are slices of it); `version`
+moves only for non-stream changes (a live heart-rate stream would otherwise loop the screens); the
+profile's "never filled in" comes from ProfileStore's new flags.
+
+Tests: an unlogged run adds, 105 bpm adds nothing, a minute with steps and a high pulse earns the
+larger not the sum, minutes inside a window are left alone; the Robolectric pass covers the resolved
+series, priced rows, a meal logged and deleted, a weigh-in that moves its day and the days after only.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../java/com/noop/energy/DayEnergyModel.kt    | 175 ++++++++++++++----
+ .../main/java/com/noop/energy/EnergyCache.kt  |  23 +++
+ .../main/java/com/noop/energy/EnergyModel.kt  |  42 ++++-
+ .../java/com/noop/energy/UnloggedMinutes.kt   | 101 ++++++++++
+ .../com/noop/energy/DayEnergyModelTest.kt     | 114 +++++++++---
+ .../java/com/noop/energy/EnergyCacheTest.kt   |   2 +
+ .../java/com/noop/energy/EnergyFixtures.kt    |  57 ++++++
+ .../java/com/noop/energy/EnergyModelTest.kt   |  39 ++++
+ .../com/noop/energy/UnloggedMinutesTest.kt    |  82 ++++++++
+ 9 files changed, 569 insertions(+), 66 deletions(-)
+ create mode 100644 android/app/src/main/java/com/noop/energy/UnloggedMinutes.kt
+ create mode 100644 android/app/src/test/java/com/noop/energy/EnergyFixtures.kt
+ create mode 100644 android/app/src/test/java/com/noop/energy/UnloggedMinutesTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt b/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
+index 4a545c14..df08dddd 100644
+--- a/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
++++ b/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
+@@ -1,12 +1,14 @@
+ package com.noop.energy
+ 
+ import android.content.Context
++import com.noop.NoopApplication
+ import com.noop.ai.AiCoach
+ import com.noop.analytics.ScaleBody
+ import com.noop.analytics.StepsCounter
+ import com.noop.analytics.StrainScorer
+ import com.noop.data.AppleDaily
+ import com.noop.data.DailyMetric
++import com.noop.data.HrSample
+ import com.noop.data.StepSample
+ import com.noop.data.WhoopRepository
+ import com.noop.data.WorkoutRow
+@@ -21,6 +23,7 @@ import com.noop.ui.ProfileStore
+ import com.noop.ui.WorkoutEditing
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.StateFlow
+ import kotlinx.coroutines.flow.asStateFlow
+@@ -42,11 +45,15 @@ import kotlin.math.roundToLong
+  * victor:energy — the loader of the day-energy model: gathers each day's inputs from the stores (profile,
+  * scale, daily rows, workouts of every source, exercise log, food log, phone aggregates), reduces the raw
+  * streams through the cache ([EnergyCacheFile]) and composes with [EnergyModel]. Everything a screen
+- * shows about energy out comes from [day] or [range]; [version] moves when a result may have changed.
++ * shows about energy out comes from [day], [range], [series] (the repository's `active_kcal` series) or
++ * [workouts] (a list's rows); [version] moves when a non-stream input changed.
+  *
+  * Reads: one pass over the stores per call, and the raw streams only for days whose cache is missing or
+  * stale — the last [RECENT_DAYS] days are probed by stream fingerprint on every read, older ones only
+- * rebuild when their window set, heart-rate parameters or the model version change.
++ * rebuild when their window set, heart-rate parameters or the model version change. New strap data is
++ * seen by the screens through upstream's own flows (the daily rows, the sync counters), which every
++ * energy card already keys on; [version] deliberately stays still for it, or a live heart-rate stream
++ * would have the screens reloading in a loop.
+  */
+ object DayEnergyModel {
+ 
+@@ -62,7 +69,7 @@ object DayEnergyModel {
+     private var cache: MutableMap<String, DayRaw>? = null
+ 
+     private val _version = MutableStateFlow(0)
+-    /** Bumps when a day's figures may have changed: new strap data reduced, a meal, a session, a phone refresh. */
++    /** Bumps when a day's figures may have changed without new strap data: a meal, a session, a phone refresh, a reset. */
+     val version: StateFlow<Int> = _version.asStateFlow()
+ 
+     /** One day, composed with the step history before it. Null only when [day] is not a date. */
+@@ -86,7 +93,37 @@ object DayEnergyModel {
+         to: String,
+         nowEpochS: Long = System.currentTimeMillis() / 1000L,
+     ): Map<String, DayEnergy> = withContext(Dispatchers.IO) {
+-        mutex.withLock { compute(ctx.applicationContext, repo, strapId, from, to, nowEpochS) }
++        mutex.withLock { compute(ctx.applicationContext, repo, strapId, EnergyDays.days(from, to), nowEpochS, lookback = true) }
++    }
++
++    /** How far back the resolved `active_kcal` series reaches: enough for every trend, bounded so a first read after an update stays short. */
++    const val SERIES_DAYS = 120L
++
++    /**
++     * The model's active energy as a resolved series, for the repository's `active_kcal` readers (Today's
++     * Calories tile, Health, Compare): one point per day with a figure. An open-ended window ("0000-00-00")
++     * is clamped to the last [SERIES_DAYS] days the store knows about, so a tile never asks for ten
++     * thousand years and the first read after an update reduces months, not the whole history.
++     */
++    suspend fun series(
++        ctx: Context,
++        repo: WhoopRepository,
++        strapId: String,
++        from: String,
++        to: String,
++        nowEpochS: Long = System.currentTimeMillis() / 1000L,
++    ): List<WhoopRepository.ResolvedMetricPoint> {
++        val today = EnergyDays.dayOf(nowEpochS)
++        val first = runCatching { repo.daysMerged(strapId).firstOrNull()?.day }.getOrNull()
++            ?: runCatching { FoodStore.load(ctx).minOfOrNull { it.day } }.getOrNull()
++            ?: today
++        val lo = maxOf(from, first, EnergyDays.plusDays(today, -SERIES_DAYS))
++        val hi = minOf(to, today)
++        if (lo > hi) return emptyList()
++        val source = "${WhoopRepository.WHOOP_SOURCE}-noop"
++        return range(ctx, repo, strapId, lo, hi, nowEpochS).values.mapNotNull { e ->
++            e.activeKcal?.let { WhoopRepository.ResolvedMetricPoint(e.day, it, source, "active_kcal") }
++        }
+     }
+ 
+     /**
+@@ -102,8 +139,12 @@ object DayEnergyModel {
+     ): Map<WorkoutKey, WorkoutEnergy> {
+         if (rows.isEmpty()) return emptyMap()
+         val zone = ZoneId.systemDefault()
+-        val days = rows.map { EnergyDays.dayOf(it.startTs, zone) }
+-        val computed = range(ctx, repo, strapId, days.min(), days.max(), nowEpochS)
++        val days = rows.map { EnergyDays.dayOf(it.startTs, zone) }.toSortedSet().toList()
++        // Only the days that have a row, without the step history a day's estimate needs: a window's figure
++        // never depends on it, and a year of workouts must not reduce every day in between.
++        val computed = withContext(Dispatchers.IO) {
++            mutex.withLock { compute(ctx.applicationContext, repo, strapId, days, nowEpochS, lookback = false) }
++        }
+         val out = HashMap<WorkoutKey, WorkoutEnergy>()
+         for (r in rows) lookup(computed, r, zone)?.let { out[WorkoutKey.of(r)] = it }
+         return out
+@@ -134,8 +175,7 @@ object DayEnergyModel {
+ 
+     /**
+      * Follow the stores whose change moves a day's figures without any stream arriving: the exercise log,
+-     * the food log, a phone refresh and a workout row rewritten with a session's figures. Call once from
+-     * the application; strap syncs are seen through the fingerprints on the next read.
++     * the food log, a phone refresh and a workout row rewritten with a session's figures.
+      */
+     fun watch(scope: CoroutineScope) {
+         scope.launch { TrainingStore.sessions.drop(1).collect { _version.update { it + 1 } } }
+@@ -144,6 +184,19 @@ object DayEnergyModel {
+         scope.launch { TrainingAnalyzer.rowsChanged.drop(1).collect { _version.update { it + 1 } } }
+     }
+ 
++    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
++
++    /**
++     * Called once by the application: wires the repository's `active_kcal` series to [series] and starts
++     * [watch]. The active strap id is resolved at call time, as the coach does.
++     */
++    fun install(app: NoopApplication) {
++        val strapId = { app.sourceCoordinator.activeDeviceId.value ?: app.activeDeviceId }
++        EnergyHooks.activeSeries = { from, to -> series(app, app.repository, strapId(), from, to) }
++        EnergyHooks.pricedRows = { rows -> EnergyRows.priced(app, app.repository, strapId(), rows) }
++        watch(appScope)
++    }
++
+     // ── Inputs ─────────────────────────────────────────────────────────────────────────────────────
+ 
+     private class Profile(
+@@ -165,20 +218,19 @@ object DayEnergyModel {
+ 
+     /**
+      * The profile with "never filled in" told apart from its defaults: ProfileStore answers 75 kg / 178 cm /
+-     * 30 y for an empty store, and this model must show "no profile" instead. Read the flags BEFORE
+-     * ProfileStore's date of birth, whose getter writes a default when none is stored.
++     * 30 y for an empty store, and this model must show "no profile" instead. The flags are read BEFORE
++     * the date of birth, whose getter writes a default when none is stored.
+      */
+     private fun profile(ctx: Context): Profile {
+-        val prefs = ctx.getSharedPreferences(ProfileStore.PREFS, Context.MODE_PRIVATE)
+-        val weightSet = prefs.contains("weight_kg")
+-        val heightSet = prefs.contains("height_cm")
+-        val ageSet = prefs.contains("date_of_birth") || prefs.contains("age")
+         val p = ProfileStore.from(ctx)
++        val weightSet = p.isWeightSet
++        val heightSet = p.isHeightSet
++        val birthSet = p.isBirthSet
+         return Profile(
+             sex = p.sex,
+             weightKg = if (weightSet) p.weightKg else null,
+             heightCm = if (heightSet) p.heightCm else null,
+-            dob = if (ageSet) Instant.ofEpochMilli(p.dateOfBirthMillis).atZone(ZoneId.systemDefault()).toLocalDate() else null,
++            dob = if (birthSet) Instant.ofEpochMilli(p.dateOfBirthMillis).atZone(ZoneId.systemDefault()).toLocalDate() else null,
+             hrMaxOverride = p.hrMaxOverride,
+             ticksPerStep = p.stepTicksPerStep,
+         )
+@@ -248,17 +300,24 @@ object DayEnergyModel {
+ 
+     // ── The pass ───────────────────────────────────────────────────────────────────────────────────
+ 
++    /**
++     * Compose [wanted] (sorted). With [lookback] the [STEPS_MEMORY_DAYS] days before the first are composed
++     * too, unreturned, so a day without steps can borrow its neighbours' median; without it only [wanted].
++     */
+     private suspend fun compute(
+         ctx: Context,
+         repo: WhoopRepository,
+         strapId: String,
+-        from: String,
+-        to: String,
++        wanted: List<String>,
+         nowEpochS: Long,
++        lookback: Boolean,
+     ): Map<String, DayEnergy> {
++        if (wanted.isEmpty()) return emptyMap()
+         val zone = ZoneId.systemDefault()
+-        val lookFrom = EnergyDays.plusDays(from, -STEPS_MEMORY_DAYS)
+-        val blendFrom = EnergyDays.plusDays(from, -27L - STEPS_MEMORY_DAYS)
++        val from = wanted.first()
++        val to = wanted.last()
++        val lookFrom = if (lookback) EnergyDays.plusDays(from, -STEPS_MEMORY_DAYS) else from
++        val blendFrom = EnergyDays.plusDays(lookFrom, -27L)
+         val today = EnergyDays.dayOf(nowEpochS, zone)
+         val recentFrom = EnergyDays.plusDays(today, -RECENT_DAYS)
+         val days = cache ?: EnergyCacheFile.read(ctx).also { cache = it }
+@@ -293,7 +352,9 @@ object DayEnergyModel {
+         var changed = false
+         val priorSteps = ArrayList<Double>()
+         val out = LinkedHashMap<String, DayEnergy>()
+-        for (day in EnergyDays.days(lookFrom, to)) {
++        val toCompose = if (lookback) EnergyDays.days(lookFrom, to) else wanted
++        val wantedSet = wanted.toSet()
++        for (day in toCompose) {
+             val startS = EnergyDays.startEpochS(day, zone)
+             val endS = EnergyDays.endEpochS(day, zone)
+             val restingHr = restingByDay.floorEntry(day)?.value
+@@ -311,27 +372,33 @@ object DayEnergyModel {
+                 cached!!
+             } else {
+                 // Steps: the day's samples, re-read only when their witness moved; else the cached ticks.
+-                val samples = if (stepsStale) runCatching { stepSamplesUnion(repo, strapId, startS, endS - 1) }.getOrDefault(emptyList()) else emptyList()
++                // The unlogged minutes need the steps per minute too, so a heart-rate change re-reads them as well.
++                val samples = if (stepsStale || hrStale) runCatching { stepSamplesUnion(repo, strapId, startS, endS - 1) }.getOrDefault(emptyList()) else emptyList()
+                 val dayTicks = if (stepsStale) ticks(samples, startS, endS - 1) else cached!!.strapTicks
++                // Heart rate: the whole day once; every window is a slice of it, and the rest is the unlogged minutes.
++                val dayHr: List<HrSample> = if (hrStale) runCatching { repo.hrSamplesUnion(strapId, startS, endS - 1, SAMPLE_LIMIT) }.getOrDefault(emptyList()) else emptyList()
+                 val reduced = windows.map { w ->
+                     val old = cached?.window(w.startTs, w.endTs, w.row.sport)
+                     val hr = when {
+                         !hrStale && old != null -> old.hr
+                         w.durationS <= 0L -> HrIntegral.empty(restingHr, hrMax ?: HrIntegral.EMPTY_HRMAX)
+-                        else -> {
+-                            val hrSamples = runCatching { repo.hrSamplesUnion(strapId, w.startTs, w.endTs, SAMPLE_LIMIT) }.getOrDefault(emptyList())
+-                            HrIntegral.of(hrSamples, w.startTs, w.endTs, restingHr, hrMax)
+-                        }
++                        else -> HrIntegral.of(dayHr, w.startTs, w.endTs, restingHr, hrMax)
+                     }
+                     val wTicks = if (stepsStale || old == null) ticks(samples, w.startTs, w.endTs) else old.strapTicks
+                     WindowRaw(w.startTs, w.endTs, w.row.sport, hr, wTicks)
+                 }
+-                DayRaw(day, setup, hrKey ?: cached?.hrKey ?: "", stepsKey ?: cached?.stepsKey ?: "", dayTicks, reduced).also {
++                val unlogged = if (hrStale) {
++                    val byMinute = UnloggedMinutes.ticksByMinute(samples)
++                    UnloggedMinutes.of(dayHr, byMinute, windows, startS, endS, restingHr, hrMax).map { UnloggedRaw(it.minute, it.meanBpm, it.steps) }
++                } else {
++                    cached!!.unlogged
++                }
++                val hasHr = if (hrStale) dayHr.isNotEmpty() else cached!!.hasHr
++                DayRaw(day, setup, hrKey ?: cached?.hrKey ?: "", stepsKey ?: cached?.stepsKey ?: "", dayTicks, reduced, hasHr, unlogged).also {
+                     days[day] = it
+-                    // Only a reduction whose CONTENT moved is a change worth announcing or writing: a live
+-                    // heart-rate stream outside any window moves today's witness on every read and nothing
+-                    // else, and a version bump on each of those would have a screen reloading in a loop.
+-                    if (cached == null || cached.strapTicks != it.strapTicks || cached.windows != it.windows) changed = true
++                    // The file is rewritten only for a reduction whose CONTENT moved: a live heart-rate stream
++                    // outside any window moves today's witness on every read and nothing else.
++                    if (cached == null || !cached.sameContentAs(it)) changed = true
+                 }
+             }
+             val age = profile.ageOn(day)
+@@ -360,6 +427,9 @@ object DayEnergyModel {
+                 },
+                 meals = mealsByDay[day] ?: emptyList(),
+                 priorStepsKcal = priorSteps.takeLast(STEPS_MEMORY_DAYS.toInt()),
++                unlogged = if (raw.hasHr) raw.unlogged.map { UnloggedMinute(it.minute, it.meanBpm, profile.steps(it.ticks)) } else null,
++                restingHr = restingHr,
++                hrMax = hrMax,
+                 diagnostics = EnergyDiagnostics(
+                     strapTotalKcal = strapTotalByDay[day],
+                     phoneActiveKcal = phone[day]?.activeKcal,
+@@ -368,12 +438,47 @@ object DayEnergyModel {
+             )
+             val energy = EnergyModel.compose(inputs)
+             energy.steps?.takeIf { it.source != StepsSource.ESTIMATED }?.let { priorSteps += it.kcal }
+-            if (day >= from) out[day] = energy
+-        }
+-        if (changed) {
+-            runCatching { EnergyCacheFile.write(ctx, days) }
+-            _version.update { it + 1 }
++            if (day in wantedSet) out[day] = energy
+         }
++        if (changed) runCatching { EnergyCacheFile.write(ctx, days) }
+         return out
+     }
+ }
++
++/**
++ * victor:energy — the two seams upstream's code reaches the model through, set by [DayEnergyModel.install]:
++ * `WhoopRepository.resolvedSeries("active_kcal")` and the workout lists. Null until installed (tests, a
++ * repository built on its own), when upstream's own figures stand.
++ */
++object EnergyHooks {
++    @Volatile var activeSeries: (suspend (from: String, to: String) -> List<WhoopRepository.ResolvedMetricPoint>)? = null
++    @Volatile var pricedRows: (suspend (rows: List<WorkoutRow>) -> List<WorkoutRow>)? = null
++
++    /** The model's points for an `active_kcal` / `energy_kcal` read, or null when not installed or on failure. */
++    suspend fun activeSeries(key: String, from: String, to: String): List<WhoopRepository.ResolvedMetricPoint>? {
++        if (key != "active_kcal" && key != "energy_kcal") return null
++        val f = activeSeries ?: return null
++        return runCatching { f(from, to) }.getOrNull()
++    }
++
++    /** [rows] with each workout's kcal replaced by the model's gross figure, or [rows] as given when not installed. */
++    suspend fun priced(rows: List<WorkoutRow>): List<WorkoutRow> {
++        val f = pricedRows ?: return rows
++        return runCatching { f(rows) }.getOrDefault(rows)
++    }
++}
++
++/** victor:energy — workout rows as the lists show them: their kcal is the model's gross figure. */
++object EnergyRows {
++
++    /**
++     * Each row with `energyKcal` = the model's gross for its window; null where the model has no figure
++     * (no profile, a row collapsed into another), so the list says "–" rather than an estimate the day does
++     * not count. Everything else on the row is untouched.
++     */
++    suspend fun priced(ctx: Context, repo: WhoopRepository, strapId: String, rows: List<WorkoutRow>): List<WorkoutRow> {
++        if (rows.isEmpty()) return rows
++        val energy = DayEnergyModel.workouts(ctx, repo, strapId, rows)
++        return rows.map { r -> r.copy(energyKcal = energy[WorkoutKey.of(r)]?.grossKcal) }
++    }
++}
+diff --git a/android/app/src/main/java/com/noop/energy/EnergyCache.kt b/android/app/src/main/java/com/noop/energy/EnergyCache.kt
+index 8c93440c..15218a37 100644
+--- a/android/app/src/main/java/com/noop/energy/EnergyCache.kt
++++ b/android/app/src/main/java/com/noop/energy/EnergyCache.kt
+@@ -26,6 +26,9 @@ data class WindowRaw(
+     val strapTicks: Int?,
+ )
+ 
++/** One minute of unlogged activity as reduced: its mean bpm and raw strap ticks (calibrated at read time). */
++data class UnloggedRaw(val minute: Long, val meanBpm: Double, val ticks: Int)
++
+ data class DayRaw(
+     val day: String,
+     val setupKey: String,
+@@ -34,9 +37,16 @@ data class DayRaw(
+     /** Raw strap ticks over the logical day (uncalibrated); null when the strap has no samples that day. */
+     val strapTicks: Int?,
+     val windows: List<WindowRaw>,
++    /** Whether the strap recorded any heart rate in the day: without it there is no unlogged activity to speak of. */
++    val hasHr: Boolean = false,
++    val unlogged: List<UnloggedRaw> = emptyList(),
+ ) {
+     fun window(startTs: Long, endTs: Long, sport: String): WindowRaw? =
+         windows.firstOrNull { it.startTs == startTs && it.endTs == endTs && it.sport == sport }
++
++    /** The reduction's content, keys aside: what decides whether a day's figures may have moved. */
++    fun sameContentAs(o: DayRaw): Boolean =
++        strapTicks == o.strapTicks && windows == o.windows && hasHr == o.hasHr && unlogged == o.unlogged
+ }
+ 
+ /** JSON codec for the cache. Pure, so the round trip is JVM-testable. Unknown fields are ignored. */
+@@ -50,6 +60,11 @@ internal object EnergyCacheCodec {
+                 .put("hr_key", raw.hrKey)
+                 .put("steps_key", raw.stepsKey)
+             raw.strapTicks?.let { d.put("ticks", it) }
++            if (raw.hasHr) d.put("has_hr", true)
++            if (raw.unlogged.isNotEmpty()) {
++                // Compact: one [minute, mean bpm, ticks] triple per qualifying minute.
++                d.put("unlogged", JSONArray().apply { raw.unlogged.forEach { put(JSONArray().put(it.minute).put(it.meanBpm).put(it.ticks)) } })
++            }
+             val ws = JSONArray()
+             for (w in raw.windows) {
+                 val h = w.hr
+@@ -102,6 +117,12 @@ internal object EnergyCacheCodec {
+                     strapTicks = if (wo.has("ticks")) wo.optInt("ticks") else null,
+                 )
+             }
++            val un = d.optJSONArray("unlogged") ?: JSONArray()
++            val unlogged = (0 until un.length()).mapNotNull { i ->
++                val t = un.optJSONArray(i) ?: return@mapNotNull null
++                if (t.length() < 3) return@mapNotNull null
++                UnloggedRaw(t.optLong(0), t.optDouble(1), t.optInt(2))
++            }
+             out[day] = DayRaw(
+                 day = day,
+                 setupKey = d.optString("setup"),
+@@ -109,6 +130,8 @@ internal object EnergyCacheCodec {
+                 stepsKey = d.optString("steps_key"),
+                 strapTicks = if (d.has("ticks")) d.optInt("ticks") else null,
+                 windows = windows,
++                hasHr = d.optBoolean("has_hr", false),
++                unlogged = unlogged,
+             )
+         }
+         return out
+diff --git a/android/app/src/main/java/com/noop/energy/EnergyModel.kt b/android/app/src/main/java/com/noop/energy/EnergyModel.kt
+index 1e2ce0e4..20644c48 100644
+--- a/android/app/src/main/java/com/noop/energy/EnergyModel.kt
++++ b/android/app/src/main/java/com/noop/energy/EnergyModel.kt
+@@ -11,14 +11,14 @@ import kotlin.math.min
+  * victor:energy — ONE day-energy model every screen reads from, so the Food balance, Today's calories,
+  * the Workouts list, the week and the coach can never disagree:
+  *
+- *     burned = basal (24 h) + free steps + workouts (net) + post-exercise (EPOC) + digestion (TEF)
+- *     active = free steps + workouts (net) + EPOC
++ *     burned = basal (24 h) + free steps + workouts (net) + post-exercise (EPOC) + unlogged activity + digestion (TEF)
++ *     active = free steps + workouts (net) + EPOC + unlogged activity
+  *
+  * Each component comes from one source and nothing is counted twice: steps inside a workout window are
+  * not free steps, the basal of a window is subtracted from its gross, the strap's and the phone's step
+- * counts compete (the larger wins) and never add, heart rate outside a window earns nothing. A missing
+- * input is null, never 0 — only EPOC without a workout is a real zero. The science and the audit behind
+- * it: CONTEXT/modelo-energia.md.
++ * counts compete (the larger wins) and never add, and heart rate outside a window counts only what its
++ * minute's steps do not already earn ([UnloggedMinutes]). A missing input is null, never 0 — only EPOC
++ * without a workout is a real zero. The science and the audit behind it: CONTEXT/modelo-energia.md.
+  */
+ 
+ /** The natural key of a workout row (its deviceId aside): what pairs a row with its energy. */
+@@ -39,7 +39,17 @@ enum class EnergyMethod {
+     /** The calories the import carried (Samsung Health, Strava, a file). */
+     EXTERNAL,
+     /** Strap steps in the window (walking). */
+-    STEPS,
++    STEPS;
++
++    /** For the prompts (English, like the rest of the coach's data). */
++    val englishName: String
++        get() = when (this) {
++            HEART_RATE -> "by heart rate"
++            CLAUDE -> "Claude's estimate from the exercises"
++            MET -> "by the sport's MET"
++            EXTERNAL -> "as imported"
++            STEPS -> "by steps"
++        }
+ }
+ 
+ /** What a day lacks; the screens say it rather than show a silent zero. */
+@@ -106,6 +116,11 @@ data class DayInputs(
+     val meals: List<FoodEntry>,
+     /** The free-steps kcal of the previous days that had steps (up to 14), for the estimate when the day has none. */
+     val priorStepsKcal: List<Double> = emptyList(),
++    /** Minutes of unlogged activity ([UnloggedMinutes]); null when the strap recorded no heart rate that day. */
++    val unlogged: List<UnloggedMinute>? = null,
++    /** The day's resting HR and effective HRmax the heart-rate rules used (null: upstream's 60 / 220). */
++    val restingHr: Double? = null,
++    val hrMax: Double? = null,
+     val diagnostics: EnergyDiagnostics = EnergyDiagnostics(),
+ )
+ 
+@@ -157,10 +172,13 @@ data class DayEnergy(
+     val workouts: List<WorkoutEnergy>,
+     val workoutsNetKcal: Double,
+     val epocKcal: Double,
++    /** Activity outside the windows the strap saw ([UnloggedMinutes]); null when it recorded no heart rate that day. */
++    val unloggedKcal: Double?,
++    val unloggedMinutes: Int,
+     val tefKcal: Double?,
+     /** Burned so far today, or the whole day for a past day; null without a profile. */
+     val totalKcal: Double?,
+-    /** Steps + workouts + EPOC. */
++    /** Steps + workouts + EPOC + unlogged activity. */
+     val activeKcal: Double?,
+     /** Where today closes if nothing more happens: total plus the basal of the hours left. */
+     val projectedKcal: Double?,
+@@ -358,8 +376,14 @@ object EnergyModel {
+         val tef = EnergyEquations.tef(inputs.meals.flatMap { it.items })
+         if (tef == null) missing += EnergyMissing.MEALS
+ 
++        val unlogged = if (bmrRate == null || inputs.unlogged == null) {
++            null
++        } else {
++            UnloggedMinutes.kcal(inputs.unlogged, body.sex, body.weightKg!!, body.heightCm!!, body.ageYears!!, bmrRate, inputs.restingHr, inputs.hrMax)
++        }
++
+         val basal = bmr?.times(fraction)
+-        val active = if (bmrRate == null) null else (steps?.kcal ?: 0.0) + workoutsNet + epoc
++        val active = if (bmrRate == null) null else (steps?.kcal ?: 0.0) + workoutsNet + epoc + (unlogged ?: 0.0)
+         val total = if (basal == null || active == null) null else basal + active + (tef ?: 0.0)
+         val projected = if (total == null || bmr == null) total else total + bmr * (1.0 - fraction)
+         return DayEnergy(
+@@ -373,6 +397,8 @@ object EnergyModel {
+             workouts = workouts,
+             workoutsNetKcal = workoutsNet,
+             epocKcal = epoc,
++            unloggedKcal = unlogged,
++            unloggedMinutes = inputs.unlogged?.size ?: 0,
+             tefKcal = tef,
+             totalKcal = total,
+             activeKcal = active,
+diff --git a/android/app/src/main/java/com/noop/energy/UnloggedMinutes.kt b/android/app/src/main/java/com/noop/energy/UnloggedMinutes.kt
+new file mode 100644
+index 00000000..b8c12c50
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/energy/UnloggedMinutes.kt
+@@ -0,0 +1,101 @@
++package com.noop.energy
++
++import com.noop.analytics.Calories
++import com.noop.analytics.StepsCounter
++import com.noop.data.HrSample
++import com.noop.data.StepSample
++
++/**
++ * victor:energy — activity the wearer did not log: a minute OUTSIDE every workout window whose mean heart
++ * rate is at or above resting + 50 % of the reserve (upstream's whole-day gate) earns the Keytel net of
++ * that minute, less what its own strap steps already earn — so a brisk walk adds nothing beyond its
++ * steps, while a run, a ride or a bout on the bag nobody logged still counts. Upstream's detector only
++ * SUGGESTS workouts (#2187), so without this an unlogged run would be worth its footsteps alone.
++ */
++data class UnloggedMinute(
++    /** Epoch minute (epoch seconds / 60). */
++    val minute: Long,
++    val meanBpm: Double,
++    /** Calibrated strap steps counted in the minute. */
++    val steps: Int,
++)
++
++object UnloggedMinutes {
++
++    /** Strap ticks per epoch minute, each increment attributed to the later sample as [StepsCounter] does. */
++    fun ticksByMinute(samples: List<StepSample>): Map<Long, Int> {
++        val sorted = samples.sortedBy { it.ts }
++        if (sorted.size < 2) return emptyMap()
++        val classed = StepsCounter.hasActivityClasses(sorted)
++        val out = HashMap<Long, Int>()
++        for (i in 1 until sorted.size) {
++            val delta = (sorted[i].counter - sorted[i - 1].counter) and 0xFFFF
++            if (!StepsCounter.shouldCountDelta(sorted[i].activityClass, classed)) continue
++            if (!StepsCounter.isPlausibleDelta(sorted[i - 1].ts, sorted[i].ts, delta)) continue
++            out.merge(sorted[i].ts / 60L, delta, Int::plus)
++        }
++        return out
++    }
++
++    /**
++     * The qualifying minutes of a day: inside [startS, endS), outside every [windows] span (a minute that
++     * touches one is left out), mean bpm at or above the gate. [ticksByMinute] are raw ticks; [steps]
++     * calibrates them. [hrMax] null keeps upstream's 220 fallback, [restingHr] null its 60.
++     */
++    fun of(
++        hr: List<HrSample>,
++        ticksByMinute: Map<Long, Int>,
++        windows: List<Window>,
++        startS: Long,
++        endS: Long,
++        restingHr: Double?,
++        hrMax: Double?,
++        steps: (Int) -> Int = { it },
++    ): List<UnloggedMinute> {
++        val effMax = hrMax ?: HrIntegral.EMPTY_HRMAX
++        val effRest = restingHr ?: 60.0
++        val gate = effRest + Calories.dayActiveHRRFraction * (effMax - effRest)
++        val sums = HashMap<Long, LongArray>()   // minute -> [bpm sum, count]
++        for (s in hr) {
++            if (s.ts < startS || s.ts >= endS) continue
++            val m = s.ts / 60L
++            val acc = sums.getOrPut(m) { LongArray(2) }
++            acc[0] = acc[0] + s.bpm
++            acc[1] = acc[1] + 1
++        }
++        return sums.entries.asSequence()
++            .map { (m, acc) -> Triple(m, acc[0].toDouble() / acc[1], m) }
++            .filter { (m, mean, _) -> mean >= gate && windows.none { w -> w.durationS > 0 && m * 60L <= w.endTs && m * 60L + 59L >= w.startTs } }
++            .map { (m, mean, _) -> UnloggedMinute(m, mean, steps(ticksByMinute[m] ?: 0)) }
++            .sortedBy { it.minute }
++            .toList()
++    }
++
++    /**
++     * What the minutes add to the day: per minute, the Keytel net above basal less its steps' own energy,
++     * never below zero. Uses the day's weight, age and resting / max heart rate like the windows do.
++     */
++    fun kcal(
++        minutes: List<UnloggedMinute>,
++        sex: String,
++        weightKg: Double,
++        heightCm: Double,
++        ageYears: Double,
++        bmrRatePerS: Double,
++        restingHr: Double?,
++        hrMax: Double?,
++    ): Double {
++        if (minutes.isEmpty()) return 0.0
++        val effMax = hrMax ?: HrIntegral.EMPTY_HRMAX
++        val coeffs = Calories.resolveCoeffs(sex)
++        val vo2 = Calories.vo2maxFor(effMax, restingHr)
++        var total = 0.0
++        for (m in minutes) {
++            val gross = Calories.activeKcalPerS(coeffs, m.meanBpm, effMax, weightKg, ageYears, vo2) * 60.0
++            val net = (gross - bmrRatePerS * 60.0).coerceAtLeast(0.0)
++            val stepsKcal = EnergyEquations.stepsKcal(m.steps, weightKg, heightCm)
++            total += (net - stepsKcal).coerceAtLeast(0.0)
++        }
++        return total
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/energy/DayEnergyModelTest.kt b/android/app/src/test/java/com/noop/energy/DayEnergyModelTest.kt
+index 5ffd0938..388e08f4 100644
+--- a/android/app/src/test/java/com/noop/energy/DayEnergyModelTest.kt
++++ b/android/app/src/test/java/com/noop/energy/DayEnergyModelTest.kt
+@@ -10,10 +10,14 @@ import com.noop.data.StepSample
+ import com.noop.data.WhoopDatabase
+ import com.noop.data.WhoopRepository
+ import com.noop.data.WorkoutRow
++import com.noop.food.FoodEntry
++import com.noop.food.FoodItem
++import com.noop.food.FoodStore
+ import com.noop.ui.ProfileStore
+ import kotlinx.coroutines.runBlocking
+ import org.junit.After
+ import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNotNull
+ import org.junit.Assert.assertNull
+ import org.junit.Assert.assertTrue
+ import org.junit.Before
+@@ -30,8 +34,9 @@ import java.time.temporal.ChronoUnit
+ 
+ /**
+  * victor:energy — the loader over a real (in-memory) store: the strap's steps inside the run are not free
+- * steps, the run logged by the strap and by the phone is one run, heart rate outside it earns nothing,
+- * the phone's count competes with the strap's, and the cache serves the second read.
++ * steps, the run logged by the strap and by the phone is one run, heart rate outside it counts only above
++ * the gate and never twice with its steps, the phone's count competes with the strap's, the cache serves
++ * the second read, and every surface (the resolved series, a priced row, the coach) reads the same figure.
+  */
+ @RunWith(RobolectricTestRunner::class)
+ @Config(sdk = [34], manifest = Config.NONE)
+@@ -53,10 +58,16 @@ class DayEnergyModelTest {
+         db = Room.inMemoryDatabaseBuilder(ctx, WhoopDatabase::class.java).allowMainThreadQueries().build()
+         repo = WhoopRepository(db)
+         DayEnergyModel.invalidate(ctx)
++        EnergyHooks.activeSeries = null
++        EnergyHooks.pricedRows = null
+     }
+ 
+     @After
+-    fun tearDown() = db.close()
++    fun tearDown() {
++        EnergyHooks.activeSeries = null
++        EnergyHooks.pricedRows = null
++        db.close()
++    }
+ 
+     private fun profile() {
+         val p = ProfileStore.from(ctx)
+@@ -74,10 +85,10 @@ class DayEnergyModelTest {
+         repo.upsertMetricSeries(
+             listOf(MetricSeriesRow("health-connect", "2026-10-01", "weight", 82.0), MetricSeriesRow("health-connect", day, "weight", 80.0)),
+         )
+-        repo.upsertDailyMetrics(listOf(DailyMetric("my-whoop", day, restingHr = 55)))
++        repo.upsertDailyMetrics(listOf(DailyMetric("my-whoop", day, restingHr = 55, activeKcalEst = 2100.0)))
+         repo.upsertWorkouts(
+             listOf(
+-                WorkoutRow("my-whoop", runStart, runEnd, "Running", "my-whoop", avgHr = 150, maxHr = 160),
++                WorkoutRow("my-whoop", runStart, runEnd, "Running", "my-whoop", avgHr = 150, maxHr = 160, energyKcal = 999.0),
+                 WorkoutRow("health-connect", runStart + 30, runEnd, "Running", "health-connect", energyKcal = 500.0),
+             ),
+         )
+@@ -118,27 +129,33 @@ class DayEnergyModelTest {
+         assertEquals(10.0 * 81.8 + 6.25 * 180 - 5 * ageThatDay + 5, e.bmrKcal!!, 0.1)
+         assertNull(e.tefKcal)
+         assertEquals(setOf(EnergyMissing.MEALS), e.missing)
++        // The strap was worn and nothing outside the run passed the gate: a real zero, not unknown.
++        assertEquals(0.0, e.unloggedKcal!!, 0.0)
+         assertEquals(e.bmrKcal!! + e.steps!!.kcal + run.netKcal + run.epocKcal, e.totalKcal!!, 1e-6)
+         assertEquals(1.0, e.fraction, 0.0)
++        // The strap's own estimate stays a diagnostic.
++        assertEquals(2100.0, e.diagnostics.strapTotalKcal!!, 0.0)
+ 
+-        // The reduction was cached and announced; a second read is served from it, quietly.
+-        assertTrue(DayEnergyModel.version.value > before)
++        // New strap data never moves the version (the screens follow upstream's day rows for that); the reduction was cached.
++        assertEquals(before, DayEnergyModel.version.value)
+         assertTrue(File(File(ctx.filesDir, "energy"), "days.json").exists())
+-        val afterFirst = DayEnergyModel.version.value
+         assertEquals(e, DayEnergyModel.day(ctx, repo, "my-whoop", day, now))
+-        assertEquals(afterFirst, DayEnergyModel.version.value)
+-
+-        // Hard pulse outside the window lands (a late offload): re-reduced, worth nothing, and nothing to announce.
+-        repo.insertHr((start + 8 * 3600..start + 8 * 3600 + 1800).map { HrSample("my-whoop", it, 170) })
+-        val again = DayEnergyModel.day(ctx, repo, "my-whoop", day, now)!!
+-        assertEquals(e, again)
+-        assertEquals(afterFirst, DayEnergyModel.version.value)
+-        // Pulse INSIDE the window lands (the odd seconds, harder): the run is repriced and announced.
++
++        // A brisk walk outside the window at 110 bpm (under resting + 50 % of the reserve): nothing extra.
++        repo.insertHr((start + 8 * 3600..start + 8 * 3600 + 1800).map { HrSample("my-whoop", it, 110) })
++        assertEquals(e.totalKcal!!, DayEnergyModel.day(ctx, repo, "my-whoop", day, now)!!.totalKcal!!, 1e-6)
++
++        // An unlogged run at 170 bpm from 12:00 to 12:30: it counts, on top of everything else.
++        repo.insertHr((start + 9 * 3600..start + 9 * 3600 + 1800).map { HrSample("my-whoop", it, 170) })
++        val withRun = DayEnergyModel.day(ctx, repo, "my-whoop", day, now)!!
++        assertTrue(withRun.unloggedKcal!! > 200.0)
++        assertEquals(31, withRun.unloggedMinutes)   // 30 minutes plus the one the last sample starts
++        assertEquals(e.totalKcal!! + withRun.unloggedKcal!!, withRun.totalKcal!!, 1e-6)
++
++        // Pulse INSIDE the window lands (the odd seconds, harder): the run is repriced.
+         repo.insertHr((runStart + 1..runEnd step 2).map { HrSample("my-whoop", it, 170) })
+         val denser = DayEnergyModel.day(ctx, repo, "my-whoop", day, now)!!
+         assertTrue(denser.workouts.single().grossKcal > run.grossKcal)
+-        assertTrue(DayEnergyModel.version.value > afterFirst)
+-        val afterDenser = DayEnergyModel.version.value
+ 
+         // The phone counted more over the calendar day: its free steps win, the strap's run steps still come off.
+         repo.upsertAppleDaily(listOf(AppleDaily("health-connect", day, steps = 12_000, activeKcal = 700.0, basalKcal = 1800.0)))
+@@ -147,8 +164,7 @@ class DayEnergyModelTest {
+         assertEquals(12_000 - 3600, phone.steps!!.freeSteps)
+         assertEquals(700.0, phone.diagnostics.phoneActiveKcal!!, 0.0)   // diagnostics only, never in the total
+         val repriced = denser.workouts.single()
+-        assertEquals(phone.bmrKcal!! + phone.steps!!.kcal + repriced.netKcal + repriced.epocKcal, phone.totalKcal!!, 1e-6)
+-        assertEquals(afterDenser, DayEnergyModel.version.value)   // the phone row is read fresh: no reduction moved
++        assertEquals(phone.bmrKcal!! + phone.steps!!.kcal + repriced.netKcal + repriced.epocKcal + phone.unloggedKcal!!, phone.totalKcal!!, 1e-6)
+     }
+ 
+     @Test
+@@ -158,16 +174,68 @@ class DayEnergyModelTest {
+         assertNull(e.totalKcal)
+         assertTrue(EnergyMissing.PROFILE in e.missing)
+         assertTrue(e.workouts.isEmpty())
++        // Priced rows then carry no figure rather than the strap's heart-rate one.
++        val priced = EnergyRows.priced(ctx, repo, "my-whoop", listOf(WorkoutRow("my-whoop", runStart, runEnd, "Running", "my-whoop", energyKcal = 999.0)))
++        assertNull(priced.single().energyKcal)
+     }
+ 
+     @Test
+-    fun aScreensRowsFindTheirEnergyByKeyOrByOverlap() = runBlocking {
++    fun everySurfaceReadsTheSameFigure() = runBlocking {
+         profile()
+         seedDay()
+-        val strapRow = WorkoutRow("my-whoop", runStart, runEnd, "Running", "my-whoop")
+-        val phoneRow = WorkoutRow("health-connect", runStart + 30, runEnd, "Running", "health-connect")
++        val e = DayEnergyModel.day(ctx, repo, "my-whoop", day, now)!!
++        // The resolved series the Calories tile, Health and Compare read, once the hook is installed.
++        assertEquals(2100.0, repo.resolvedSeries("active_kcal", "my-whoop", day, day, strapDeviceId = "my-whoop").points.single().value, 0.0)   // not installed: upstream's
++        EnergyHooks.activeSeries = { f, t -> DayEnergyModel.series(ctx, repo, "my-whoop", f, t, now) }
++        val series = repo.resolvedSeries("active_kcal", "my-whoop", "0000-00-00", "9999-99-99", strapDeviceId = "my-whoop").points
++        assertEquals(e.activeKcal!!, series.single { it.day == day }.value, 1e-9)
++        assertEquals(e.activeKcal!!, repo.resolvedSeries("energy_kcal", "my-whoop", day, day).points.single().value, 1e-9)
++        // The rows a list shows: the model's gross for the window, by key or by overlap, both sources alike.
++        val strapRow = WorkoutRow("my-whoop", runStart, runEnd, "Running", "my-whoop", energyKcal = 999.0)
++        val phoneRow = WorkoutRow("health-connect", runStart + 30, runEnd, "Running", "health-connect", energyKcal = 500.0)
++        val priced = EnergyRows.priced(ctx, repo, "my-whoop", listOf(strapRow, phoneRow))
++        assertEquals(e.workouts.single().grossKcal, priced[0].energyKcal!!, 1e-9)
++        assertEquals(e.workouts.single().grossKcal, priced[1].energyKcal!!, 1e-9)
+         val byKey = DayEnergyModel.workouts(ctx, repo, "my-whoop", listOf(strapRow, phoneRow), now)
+         assertEquals(2, byKey.size)
+         assertEquals(byKey.getValue(WorkoutKey.of(strapRow)), byKey.getValue(WorkoutKey.of(phoneRow)))
+     }
++
++    @Test
++    fun aMealLoggedOrDeletedMovesTheDigestionAndTheBalance() = runBlocking {
++        profile()
++        seedDay()
++        val fasting = DayEnergyModel.day(ctx, repo, "my-whoop", day, now)!!
++        assertNull(fasting.tefKcal)
++        val meal = FoodEntry(
++            id = "m1", timestamp = (start + 10 * 3600) * 1000L, day = day, note = "",
++            items = listOf(FoodItem("día", "todo", 2600.0, 160.0, 280.0, 85.0)),
++            kcal = 2600.0, proteinG = 160.0, carbsG = 280.0, fatG = 85.0, thumbnailPaths = emptyList(),
++        )
++        try {
++            FoodStore.save(ctx, repo, meal, null)
++            val fed = DayEnergyModel.day(ctx, repo, "my-whoop", day, now)!!
++            assertEquals(259.3, fed.tefKcal!!, 0.1)
++            assertEquals(fasting.totalKcal!! + 259.3, fed.totalKcal!!, 0.1)
++            assertNotNull(fed.balance(2600.0))
++            assertTrue(EnergyMissing.MEALS !in fed.missing)
++            // Half the steak eaten: half the digestion.
++            FoodStore.save(ctx, repo, meal.copy(items = listOf(FoodItem("día", "todo", 1300.0, 80.0, 140.0, 42.5, eaten = 0.5)), kcal = 1300.0, proteinG = 80.0, carbsG = 140.0, fatG = 42.5), null)
++            assertEquals(129.65, DayEnergyModel.day(ctx, repo, "my-whoop", day, now)!!.tefKcal!!, 0.1)
++        } finally {
++            FoodStore.delete(ctx, repo, meal.id)
++        }
++        assertNull(DayEnergyModel.day(ctx, repo, "my-whoop", day, now)!!.tefKcal)
++    }
++
++    @Test
++    fun aWeighInRepricesItsDayAndTheDaysAfterOnly() = runBlocking {
++        profile()
++        seedDay()
++        val before = DayEnergyModel.day(ctx, repo, "my-whoop", day, now)!!
++        val dayAfter = DayEnergyModel.day(ctx, repo, "my-whoop", "2026-10-11", now)!!
++        repo.upsertMetricSeries(listOf(MetricSeriesRow("health-connect", "2026-10-11", "weight", 90.0)))
++        assertEquals(before.bmrKcal!!, DayEnergyModel.day(ctx, repo, "my-whoop", day, now)!!.bmrKcal!!, 0.0)
++        assertTrue(DayEnergyModel.day(ctx, repo, "my-whoop", "2026-10-11", now)!!.bmrKcal!! > dayAfter.bmrKcal!!)
++    }
+ }
+diff --git a/android/app/src/test/java/com/noop/energy/EnergyCacheTest.kt b/android/app/src/test/java/com/noop/energy/EnergyCacheTest.kt
+index 76612b46..da1d7540 100644
+--- a/android/app/src/test/java/com/noop/energy/EnergyCacheTest.kt
++++ b/android/app/src/test/java/com/noop/energy/EnergyCacheTest.kt
+@@ -18,6 +18,8 @@ class EnergyCacheTest {
+             WindowRaw(1L, 2L, "Running", HrIntegral(3601, 61, 150.0, 3601.0, 540_150.0, 0.0, 55.0, 189.8), 1200),
+             WindowRaw(3L, 4L, "Yoga", HrIntegral.empty(null, 220.0), null),
+         ),
++        hasHr = true,
++        unlogged = listOf(UnloggedRaw(29_873_700L, 161.5, 0), UnloggedRaw(29_873_701L, 158.0, 12)),
+     )
+ 
+     @Test
+diff --git a/android/app/src/test/java/com/noop/energy/EnergyFixtures.kt b/android/app/src/test/java/com/noop/energy/EnergyFixtures.kt
+new file mode 100644
+index 00000000..f8f2d83c
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/energy/EnergyFixtures.kt
+@@ -0,0 +1,57 @@
++package com.noop.energy
++
++/** victor:energy — a [DayEnergy] with the figures a test wants, for the screens' and the coach's pure halves. */
++object EnergyFixtures {
++
++    fun day(
++        day: String = "2026-10-16",
++        totalKcal: Double? = 2600.0,
++        bmrKcal: Double? = 1800.0,
++        fraction: Double = 1.0,
++        stepsKcal: Double = 300.0,
++        stepsSource: StepsSource = StepsSource.STRAP,
++        workoutsNetKcal: Double = 0.0,
++        epocKcal: Double = 0.0,
++        unloggedKcal: Double? = 0.0,
++        tefKcal: Double? = null,
++        missing: Set<EnergyMissing> = emptySet(),
++        workouts: List<WorkoutEnergy> = emptyList(),
++    ): DayEnergy {
++        val basal = bmrKcal?.times(fraction)
++        val active = if (totalKcal == null) null else stepsKcal + workoutsNetKcal + epocKcal + (unloggedKcal ?: 0.0)
++        return DayEnergy(
++            day = day,
++            fraction = fraction,
++            bmrKcal = bmrKcal,
++            basalKcal = basal,
++            weightKg = 80.0,
++            basalBlend = 1.0,
++            steps = if (totalKcal == null) null else StepsEnergy(if (stepsSource == StepsSource.ESTIMATED) null else 7000, stepsSource, stepsKcal, 9000, null, 2000),
++            workouts = workouts,
++            workoutsNetKcal = workoutsNetKcal,
++            epocKcal = epocKcal,
++            unloggedKcal = unloggedKcal,
++            unloggedMinutes = 0,
++            tefKcal = tefKcal,
++            totalKcal = totalKcal,
++            activeKcal = active,
++            projectedKcal = if (totalKcal == null || bmrKcal == null) totalKcal else totalKcal + bmrKcal * (1.0 - fraction),
++            missing = missing,
++            diagnostics = EnergyDiagnostics(),
++        )
++    }
++
++    fun workout(
++        startTs: Long,
++        endTs: Long,
++        sport: String = "Strength",
++        grossKcal: Double = 490.0,
++        netKcal: Double = 392.0,
++        epocKcal: Double = 47.0,
++        method: EnergyMethod = EnergyMethod.MET,
++    ): WorkoutEnergy = WorkoutEnergy(
++        key = WorkoutKey(startTs, sport), sport = sport, category = SportCategory.of(sport), source = "my-whoop",
++        startTs = startTs, endTs = endTs, durationS = endTs - startTs, grossKcal = grossKcal, netKcal = netKcal,
++        epocKcal = epocKcal, method = method, coverage = 1.0, meanBpm = 118.0, meanHrr = 0.45, trimmed = false, assumed = false,
++    )
++}
+diff --git a/android/app/src/test/java/com/noop/energy/EnergyModelTest.kt b/android/app/src/test/java/com/noop/energy/EnergyModelTest.kt
+index 1e6f6d0f..a4cd6178 100644
+--- a/android/app/src/test/java/com/noop/energy/EnergyModelTest.kt
++++ b/android/app/src/test/java/com/noop/energy/EnergyModelTest.kt
+@@ -294,4 +294,43 @@ class EnergyModelTest {
+         assertEquals(100, SportCategory.assumedCadence("Walking"))
+         assertNull(SportCategory.assumedCadence("Cycling"))
+     }
++
++    @Test
++    fun unloggedActivityEntersTheActiveAndTheTotal() {
++        val run = (0 until 30).map { UnloggedMinute(dayStart / 60 + 600 + it, 160.0, 0) }
++        val base = EnergyModel.compose(example())
++        val withRun = EnergyModel.compose(example().copy(unlogged = run, restingHr = 55.0, hrMax = 194.0))
++        assertTrue(withRun.unloggedKcal!! > 250.0)
++        assertEquals(30, withRun.unloggedMinutes)
++        assertEquals(base.totalKcal!! + withRun.unloggedKcal!!, withRun.totalKcal!!, 1e-6)
++        assertEquals(base.activeKcal!! + withRun.unloggedKcal!!, withRun.activeKcal!!, 1e-6)
++        // The strap recorded no heart rate that day: unknown, not zero; a worn strap with nothing above the gate: a real zero.
++        assertNull(EnergyModel.compose(example()).unloggedKcal)
++        assertEquals(0.0, EnergyModel.compose(example().copy(unlogged = emptyList())).unloggedKcal!!, 0.0)
++        // A minute that its steps already pay for adds nothing.
++        val walked = listOf(UnloggedMinute(dayStart / 60 + 600, 130.0, 3000))
++        assertEquals(0.0, EnergyModel.compose(example().copy(unlogged = walked, restingHr = 55.0, hrMax = 194.0)).unloggedKcal!!, 0.0)
++    }
++
++    @Test
++    fun aWeighInMovesItsDayAndTheDaysAfterNotTheDaysBefore() {
++        val readings = listOf("2026-10-10" to 82.0)
++        val before = EnergyModel.compose(example(body = body.copy(weightKg = EnergyEquations.weightOn("2026-10-09", readings) ?: 80.0)))
++        val on = EnergyModel.compose(example(body = body.copy(weightKg = EnergyEquations.weightOn("2026-10-10", readings) ?: 80.0)))
++        val later = listOf("2026-10-10" to 82.0, "2026-10-12" to 90.0)
++        assertEquals(before.bmrKcal!!, EnergyModel.compose(example(body = body.copy(weightKg = EnergyEquations.weightOn("2026-10-09", later) ?: 80.0))).bmrKcal!!, 0.0)
++        assertEquals(on.bmrKcal!!, EnergyModel.compose(example(body = body.copy(weightKg = EnergyEquations.weightOn("2026-10-11", later) ?: 80.0))).bmrKcal!!, 0.0)
++        assertTrue(EnergyModel.compose(example(body = body.copy(weightKg = EnergyEquations.weightOn("2026-10-12", later) ?: 80.0))).bmrKcal!! > on.bmrKcal!!)
++    }
++
++    @Test
++    fun aMealEditedOrDeletedMovesTheDigestionAndTheBalance() {
++        val logged = EnergyModel.compose(example())
++        val edited = EnergyModel.compose(example(meals = listOf(meal(p = 200.0, c = 200.0, f = 70.0, kcal = 2230.0))))
++        assertNotEquals(logged.tefKcal!!, edited.tefKcal!!, 1.0)
++        assertNotEquals(logged.balance(2600.0)!!, edited.balance(2230.0)!!, 1.0)
++        val deleted = EnergyModel.compose(example(meals = emptyList()))
++        assertNull(deleted.tefKcal)
++        assertEquals(logged.totalKcal!! - logged.tefKcal!!, deleted.totalKcal!!, 1e-6)
++    }
+ }
+diff --git a/android/app/src/test/java/com/noop/energy/UnloggedMinutesTest.kt b/android/app/src/test/java/com/noop/energy/UnloggedMinutesTest.kt
+new file mode 100644
+index 00000000..81056d6c
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/energy/UnloggedMinutesTest.kt
+@@ -0,0 +1,82 @@
++package com.noop.energy
++
++import com.noop.analytics.Calories
++import com.noop.data.HrSample
++import com.noop.data.StepSample
++import com.noop.data.WorkoutRow
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/**
++ * victor:energy — activity nobody logged: a run outside any window counts, a brisk walk adds nothing beyond
++ * its steps, a minute with both earns the larger not the sum, and a minute inside a window is left alone.
++ */
++class UnloggedMinutesTest {
++
++    private val start = 1_792_422_000L   // 2026-10-19 17:00 Madrid
++    private val end = start + 3600       // the logical-day slice under test
++    private val resting = 55.0
++    private val hrMax = 194.0
++    private val bmrRate = 2021.7 / 86_400.0
++
++    private fun hr(bpm: Int, from: Long, to: Long) = (from until to).map { HrSample("my-whoop", it, bpm) }
++
++    /** One tick a second over [from, to) on a cumulative counter, classed as walking. */
++    private fun walking(from: Long, to: Long, counterAt: Int) =
++        (from until to).mapIndexed { i, ts -> StepSample("my-whoop", ts, (counterAt + i) and 0xFFFF, activityClass = 1) }
++
++    private fun kcal(minutes: List<UnloggedMinute>) = UnloggedMinutes.kcal(minutes, "male", 80.0, 180.0, 26.0, bmrRate, resting, hrMax)
++
++    @Test
++    fun anUnloggedRunCounts() {
++        // 30 min at 160 bpm (75 % HRR), no steps recorded: 30 minutes of Keytel net.
++        val minutes = UnloggedMinutes.of(hr(160, start, start + 1800), emptyMap(), emptyList(), start, end, resting, hrMax)
++        assertEquals(30, minutes.size)
++        assertEquals(160.0, minutes.first().meanBpm, 0.0)
++        val gross = Calories.activeKcalPerS(Calories.male, 160.0, hrMax, 80.0, 26.0, Calories.vo2maxFor(hrMax, resting)) * 1800
++        assertEquals(gross - bmrRate * 1800, kcal(minutes), 1e-6)
++        assertTrue(kcal(minutes) > 250.0)
++    }
++
++    @Test
++    fun aBriskWalkUnderTheGateAddsNothing() {
++        // 105 bpm is under resting + 50 % of the reserve (124.5): its steps already pay for it.
++        val minutes = UnloggedMinutes.of(hr(105, start, start + 1800), emptyMap(), emptyList(), start, end, resting, hrMax)
++        assertTrue(minutes.isEmpty())
++        assertEquals(0.0, kcal(minutes), 0.0)
++    }
++
++    @Test
++    fun aMinuteWithStepsAndAHighPulseEarnsTheLargerNotTheSum() {
++        // 130 bpm (54 % HRR) with 120 steps in the minute: the steps' energy comes off the pulse's.
++        val ticks = UnloggedMinutes.ticksByMinute(walking(start, start + 60, 100))   // 59 counted increments
++        val minute = UnloggedMinutes.of(hr(130, start, start + 60), ticks, emptyList(), start, end, resting, hrMax).single()
++        assertEquals(59, minute.steps)
++        val netHr = Calories.activeKcalPerS(Calories.male, 130.0, hrMax, 80.0, 26.0, Calories.vo2maxFor(hrMax, resting)) * 60 - bmrRate * 60
++        val stepsKcal = EnergyEquations.stepsKcal(59, 80.0, 180.0)
++        assertEquals((netHr - stepsKcal).coerceAtLeast(0.0), kcal(listOf(minute)), 1e-9)
++        assertTrue(kcal(listOf(minute)) < netHr)
++        // Enough steps for the minute: the pulse adds nothing on top.
++        assertEquals(0.0, kcal(listOf(minute.copy(steps = 5000))), 0.0)
++    }
++
++    @Test
++    fun minutesInsideAWindowAreNotUnlogged() {
++        val row = WorkoutRow("my-whoop", start + 600, start + 1200, "Running", "my-whoop")
++        val window = EnergyModel.windows(listOf(row)).single()
++        val minutes = UnloggedMinutes.of(hr(160, start, start + 1800), emptyMap(), listOf(window), start, end, resting, hrMax)
++        // 30 minutes of pulse, 10 of them in the window (and the minute touching its end): none of those count.
++        assertTrue(minutes.none { it.minute * 60 in (start + 600)..(start + 1200) })
++        assertEquals(19, minutes.size)
++    }
++
++    @Test
++    fun theStepsOfAMinuteAreTheCountersIncrementsInIt() {
++        val ticks = UnloggedMinutes.ticksByMinute(walking(start, start + 180, 10))
++        assertEquals(mapOf(start / 60 to 59, start / 60 + 1 to 60, start / 60 + 2 to 60), ticks)
++        // Unclassed legacy samples count everything; a still-classed sample counts nothing.
++        val still = listOf(StepSample("my-whoop", start, 10, activityClass = 0), StepSample("my-whoop", start + 1, 20, activityClass = 0))
++        assertTrue(UnloggedMinutes.ticksByMinute(still).isEmpty())
++    }
++}
+-- 
+2.54.0
+

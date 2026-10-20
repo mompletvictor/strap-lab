@@ -1,0 +1,709 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 16:53:19 +0200
+Subject: [PATCH] =?UTF-8?q?fix(food):=20whole=20days=20only=20in=20every?=
+ =?UTF-8?q?=20average;=20=C2=ABTu=20gasto=20real=C2=BB=20with=20Hall's=20k?=
+ =?UTF-8?q?cal=20per=20kg=20and=20the=20current=20streak?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A logged day is complete when it has a dinner or reaches 75 % of the median of the logged days in the 28
+before it (FoodDays.isComplete / completeDays). Partly logged days stay on the charts and leave the
+history's averages and average balance, the per-meal averages, the weekly points (whose burn now averages
+the same complete days, B17), «Tu gasto real», the coach's FOOD LOG average and ENERGY BALANCE, and are
+marked in the week's prompt. "Semana" is the seven days before today plus today, as the coach's (B5).
+The burn is plotted on logged days only: without meals the model has no digestion term, so an unlogged
+day would draw a dip that is only a missing log.
+
+«Tu gasto real»: the engine's slope re-centred on Hall 2008's kcal per kg (p = 10.4 / (10.4 + fat mass),
+9 400·(1 − p) + 1 800·p; 0.25 without a scale), weigh-ins from three days before the current logging
+streak (B19), compared with the model's total over the same complete days, on the logical "today".
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../main/java/com/noop/food/FoodAdaptive.kt   | 87 +++++++++++++++---
+ .../java/com/noop/food/FoodCoachContext.kt    | 22 +++--
+ .../main/java/com/noop/food/FoodHistory.kt    | 89 ++++++++++++-------
+ .../src/main/java/com/noop/food/FoodModels.kt | 33 +++++++
+ .../java/com/noop/food/FoodAdaptiveTest.kt    | 50 ++++++++---
+ .../com/noop/food/FoodCompleteDaysTest.kt     | 41 +++++++++
+ .../java/com/noop/food/FoodHistoryTest.kt     | 61 ++++++++-----
+ 7 files changed, 303 insertions(+), 80 deletions(-)
+ create mode 100644 android/app/src/test/java/com/noop/food/FoodCompleteDaysTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/food/FoodAdaptive.kt b/android/app/src/main/java/com/noop/food/FoodAdaptive.kt
+index bc2b9589..ae1da933 100644
+--- a/android/app/src/main/java/com/noop/food/FoodAdaptive.kt
++++ b/android/app/src/main/java/com/noop/food/FoodAdaptive.kt
+@@ -6,16 +6,19 @@ import com.noop.analytics.AdaptiveExpenditureEngine
+ import com.noop.analytics.AdaptiveExpenditureEstimate
+ import com.noop.analytics.ScaleBody
+ import com.noop.data.WhoopRepository
++import com.noop.energy.DayEnergyModel
+ import com.noop.ingest.HealthConnectImporter
++import com.noop.ingest.ScaleImport
+ import java.time.LocalDate
+ 
+ /**
+  * victor:food — the check on the estimated burn: what the wearer REALLY spends, from what they log
+  * eating and how their weight moves (upstream's [AdaptiveExpenditureEngine], otherwise unused). Shown next
+- * to the app's own average estimate over the same days, so a burn estimate that runs high or low shows.
++ * to the day model's average over the same days, so a burn estimate that runs high or low shows. Kept as a
++ * check, never an input: the model is not corrected by it.
+  */
+ internal sealed interface AdaptiveState {
+-    /** [appAverageKcal]: the app's [FoodEnergy] burn averaged over the same logged days, when known. */
++    /** [appAverageKcal]: the day model's burn averaged over the same complete logged days, when known. */
+     data class Ready(val estimate: AdaptiveExpenditureEstimate, val appAverageKcal: Double?) : AdaptiveState
+ 
+     /** Not enough history yet: logged-intake days and distinct weigh-in days in the lookback. */
+@@ -27,21 +30,77 @@ internal object FoodAdaptive {
+     /** The engine reads at most six weeks. */
+     const val LOOKBACK_DAYS = 42L
+ 
++    /** Unlogged days in a row that still continue the current logging streak. */
++    const val STREAK_GAP_DAYS = 3L
++
++    /** Weigh-ins this many days before the streak's first logged day still count: the trend needs a start. */
++    const val WEIGHT_LEAD_DAYS = 3L
++
+     /**
+-     * Pure. One input row per day that has a logged intake or a weigh-in, over the lookback. Today is left
+-     * out: its intake is still growing and would read as a day of under-eating.
++     * Pure. The first day of the current streak of logged days, walking back from yesterday and allowing
++     * [STREAK_GAP_DAYS] unlogged days between logged ones; null with nothing logged in the lookback.
+      */
+-    fun days(entries: List<FoodEntry>, weights: List<Pair<String, Double>>, today: LocalDate): List<AdaptiveExpenditureDay> {
++    fun streakStart(loggedDays: Collection<String>, today: LocalDate): String? {
++        val set = loggedDays.toSet()
++        val floor = today.minusDays(LOOKBACK_DAYS)
++        var d = today.minusDays(1)
++        var gap = 0L
++        var first: LocalDate? = null
++        while (!d.isBefore(floor)) {
++            if (d.toString() in set) {
++                first = d
++                gap = 0
++            } else if (++gap > STREAK_GAP_DAYS) {
++                break
++            }
++            d = d.minusDays(1)
++        }
++        return first?.toString()
++    }
++
++    /**
++     * Pure. One input row per day that has a complete logged intake or a weigh-in, over the lookback. Today
++     * is left out (its intake is still growing), a day whose log is not the whole day too ([FoodDays.isComplete]:
++     * it would read as under-eating), and weigh-ins before the current streak (less [WEIGHT_LEAD_DAYS]), so a
++     * daily scale does not demand 30 logged days of 42 before the card can answer.
++     */
++    fun days(
++        entries: List<FoodEntry>,
++        weights: List<Pair<String, Double>>,
++        today: LocalDate,
++        complete: Set<String> = FoodDays.completeDays(entries),
++    ): List<AdaptiveExpenditureDay> {
+         val from = today.minusDays(LOOKBACK_DAYS).toString()
+         val until = today.toString()
+-        val intake = entries.filter { it.day >= from && it.day < until }
++        val intake = entries.filter { it.day >= from && it.day < until && it.day in complete }
+             .groupBy { it.day }
+             .mapValues { (_, list) -> FoodTotals.ofEntries(list).kcal }
+             .filterValues { it > 0 }
+-        val weight = weights.filter { it.first >= from && it.first < until && it.second > 0 }.toMap()
++        val weightFrom = streakStart(intake.keys, today)?.let { maxOf(from, LocalDate.parse(it).minusDays(WEIGHT_LEAD_DAYS).toString()) } ?: from
++        val weight = weights.filter { it.first >= weightFrom && it.first < until && it.second > 0 }.toMap()
+         return (intake.keys + weight.keys).sorted().map { AdaptiveExpenditureDay(it, intake[it], weight[it]) }
+     }
+ 
++    /**
++     * Pure. The energy of a kilogram of body-weight change (Hall 2008): the leaner the person, the larger the
++     * lean share of a change and the fewer kcal per kg. 7,700 only holds with more than ~30 kg of fat;
++     * without a fat mass, a lean-share of 0.25 (≈6,200 kcal/kg) is assumed.
++     */
++    fun kcalPerKg(fatMassKg: Double?): Double {
++        val p = fatMassKg?.takeIf { it > 0 }?.let { 10.4 / (10.4 + it) } ?: 0.25
++        return 9_400.0 * (1.0 - p) + 1_800.0 * p
++    }
++
++    /**
++     * Pure. The engine's estimate re-centred on [kcalPerKg] instead of its fixed 7,700, keeping its own
++     * interval width (the water and under-logging margins do not depend on the density).
++     */
++    fun withDensity(est: AdaptiveExpenditureEstimate, kcalPerKg: Double): AdaptiveExpenditureEstimate {
++        val centre = est.meanIntakeKcal - est.weightSlopeKgPerDay * kcalPerKg
++        val margin = est.estimatedDailyKcal - est.lowerKcal
++        return est.copy(estimatedDailyKcal = centre, lowerKcal = centre - margin, upperKcal = centre + margin)
++    }
++
+     /** Pure. How far the history is from the engine's gates (shown while it cannot answer). */
+     fun building(days: List<AdaptiveExpenditureDay>): AdaptiveState.Building =
+         AdaptiveState.Building(
+@@ -56,19 +115,25 @@ internal object FoodAdaptive {
+         return days.filter { it.day >= first && (it.caloriesIn ?: 0.0) > 0 }.map { it.day }
+     }
+ 
+-    suspend fun load(ctx: Context, repo: WhoopRepository, strapId: String, today: LocalDate = LocalDate.now()): AdaptiveState {
++    suspend fun load(ctx: Context, repo: WhoopRepository, strapId: String, today: LocalDate = LocalDate.parse(FoodDays.today())): AdaptiveState {
+         val entries = runCatching { FoodStore.load(ctx) }.getOrDefault(emptyList())
+         val weights = runCatching {
+             repo.metricSeries(HealthConnectImporter.HC_DEVICE, ScaleBody.KEY_WEIGHT, today.minusDays(LOOKBACK_DAYS).toString(), today.toString())
+                 .map { it.day to it.value }
+         }.getOrDefault(emptyList())
+         val days = days(entries, weights, today)
+-        val estimate = AdaptiveExpenditureEngine.estimate(days) ?: return building(days)
++        val raw = AdaptiveExpenditureEngine.estimate(days) ?: return building(days)
++        val fatMass = runCatching { ScaleImport.snapshot(repo) }.getOrNull()?.let { s ->
++            val fat = s.bodyFat?.value ?: return@let null
++            val weight = s.weight?.value ?: return@let null
++            fat / 100.0 * weight
++        }
++        val estimate = withDensity(raw, kcalPerKg(fatMass))
+         val window = windowIntakeDays(days, estimate)
+         val energy = if (window.isEmpty()) emptyMap() else runCatching {
+-            FoodEnergy.loadRange(ctx, repo, strapId, window.first(), window.last())
++            DayEnergyModel.range(ctx, repo, strapId, window.first(), window.last())
+         }.getOrDefault(emptyMap())
+-        val burns = window.mapNotNull { energy[it]?.burnedKcal }
++        val burns = window.mapNotNull { energy[it]?.totalKcal }
+         return AdaptiveState.Ready(estimate, burns.takeIf { it.isNotEmpty() }?.average())
+     }
+ }
+diff --git a/android/app/src/main/java/com/noop/food/FoodCoachContext.kt b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
+index dcc75168..6c5a84f1 100644
+--- a/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
++++ b/android/app/src/main/java/com/noop/food/FoodCoachContext.kt
+@@ -25,14 +25,23 @@ object FoodCoachContext {
+      * Pure. Example: `FOOD LOG (photo estimates): today 1850 kcal (P 120 g, C 180 g, F 60 g) from 3 meals
+      * (breakfast 400, lunch 900, dinner 550 kcal); previous 7 days avg 2100 kcal/day (P 110 g, C 240 g, F 70 g)
+      * over 6 logged days`, then one indented line per meal of today with its foods (`  lunch: Lentejas, Pan`).
+-     * Today is left out of the average because it is still in progress.
++     * Today is left out of the average because it is still in progress; so is a day whose log is not the whole
++     * day ([FoodDays.isComplete]), which is counted and named instead.
+      */
+-    internal fun line(entries: List<FoodEntry>, today: LocalDate, scores: Map<String, MealScore> = emptyMap()): String? {
++    internal fun line(
++        entries: List<FoodEntry>,
++        today: LocalDate,
++        scores: Map<String, MealScore> = emptyMap(),
++        complete: Set<String> = FoodDays.completeDays(entries),
++    ): String? {
+         val todayKey = today.toString()
+         val todayEntries = entries.filter { it.day == todayKey }
+         val from = today.minusDays(WINDOW_DAYS).toString()
+-        val prior = entries.filter { it.day >= from && it.day < todayKey }.groupBy { it.day }
+-        if (todayEntries.isEmpty() && prior.isEmpty()) return null
++        val priorAll = entries.filter { it.day >= from && it.day < todayKey }.groupBy { it.day }
++        // Only whole days make an average: a day with just breakfast logged is not a day of under-eating.
++        val prior = priorAll.filterKeys { it in complete }
++        val partial = priorAll.size - prior.size
++        if (todayEntries.isEmpty() && priorAll.isEmpty()) return null
+ 
+         val parts = ArrayList<String>(2)
+         val meals = FoodDays.groupedByMeal(todayEntries)
+@@ -53,7 +62,10 @@ object FoodCoachContext {
+                 days.map { it.carbsG }.average(), days.map { it.fatG }.average(),
+             )
+             val d = prior.size
+-            parts += "previous $WINDOW_DAYS days avg ${avg.kcal.roundToInt()} kcal/day (${macros(avg)}) over $d logged ${if (d == 1) "day" else "days"}"
++            parts += "previous $WINDOW_DAYS days avg ${avg.kcal.roundToInt()} kcal/day (${macros(avg)}) over $d complete ${if (d == 1) "day" else "days"}" +
++                (if (partial > 0) " ($partial partly logged ${if (partial == 1) "day" else "days"} left out)" else "")
++        } else if (partial > 0) {
++            parts += "previous $WINDOW_DAYS days: $partial partly logged ${if (partial == 1) "day" else "days"} only, no average"
+         }
+         // What was eaten, not only how much: one line per meal of today with its foods.
+         val foods = meals.mapNotNull { (meal, list) ->
+diff --git a/android/app/src/main/java/com/noop/food/FoodHistory.kt b/android/app/src/main/java/com/noop/food/FoodHistory.kt
+index c898470e..263055c6 100644
+--- a/android/app/src/main/java/com/noop/food/FoodHistory.kt
++++ b/android/app/src/main/java/com/noop/food/FoodHistory.kt
+@@ -18,6 +18,7 @@ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.produceState
++import androidx.compose.runtime.remember
+ import androidx.compose.runtime.saveable.rememberSaveable
+ import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Alignment
+@@ -36,6 +37,8 @@ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.unit.dp
+ import com.noop.R
+ import com.noop.day.DayCalendar
++import com.noop.energy.DayEnergy
++import com.noop.energy.DayEnergyModel
+ import com.noop.ui.AppViewModel
+ import com.noop.ui.Metrics
+ import com.noop.ui.NoopCard
+@@ -51,16 +54,23 @@ import java.time.temporal.TemporalAdjusters
+ import java.util.Locale
+ import kotlin.math.max
+ 
+-/** victor:food — one day of the history: what was eaten (null = nothing logged) and burned (null = unknown). */
+-internal data class HistoryDay(val day: LocalDate, val eaten: FoodTotals?, val burnedKcal: Double?)
++/**
++ * victor:food — one day of the history: what was eaten (null = nothing logged), burned (null = unknown, or
++ * nothing logged: see [FoodHistory.days]) and whether the day's log is [complete] ([FoodDays.isComplete]).
++ */
++internal data class HistoryDay(val day: LocalDate, val eaten: FoodTotals?, val burnedKcal: Double?, val complete: Boolean = false)
+ 
+-/** Averages over the logged days, today left out (it is still going). */
++/** Averages over the complete logged days, today left out (it is still going). */
+ internal data class HistorySummary(val loggedDays: Int, val avgKcal: Double?, val avgProteinG: Double?, val avgBalance: Double?)
+ 
+ /** victor:food — the Food tab's history: how intake (and its balance) moved, and where it comes from. */
+ internal object FoodHistory {
+ 
+-    /** How far back the history goes; past a month the charts plot weekly averages ([weekly]). */
++    /**
++     * How far back the history goes: the [days] before today (today is shown too, as the day in progress),
++     * so "Week" averages the seven days before today, as the coach does. Past a month the charts plot weekly
++     * averages ([weekly]).
++     */
+     enum class Range(val days: Int, val weekly: Boolean) {
+         WEEK(7, false),
+         MONTH(30, false),
+@@ -71,8 +81,9 @@ internal object FoodHistory {
+ 
+     /**
+      * Pure. What the charts plot: the days themselves, or for a long [Range.weekly] range one point per
+-     * week (starting on the locale's first weekday) holding the averages of its logged days. Today stays
+-     * out of a weekly average: half a day would drag the current week down.
++     * week (starting on the locale's first weekday) holding the averages of its COMPLETE logged days, eaten
++     * and burned over the same days. Today stays out of a weekly average: half a day would drag the current
++     * week down.
+      */
+     fun points(days: List<HistoryDay>, weekly: Boolean, today: LocalDate, locale: Locale): List<HistoryDay> {
+         if (!weekly) return days
+@@ -81,39 +92,49 @@ internal object FoodHistory {
+             .groupBy { it.day.with(TemporalAdjusters.previousOrSame(first)) }
+             .toSortedMap()
+             .map { (start, week) ->
+-                val eaten = week.mapNotNull { it.eaten }
+-                val burned = week.mapNotNull { it.burnedKcal }
++                val whole = week.filter { it.complete && it.eaten != null }
++                val burned = whole.mapNotNull { it.burnedKcal }
+                 HistoryDay(
+                     start,
+-                    eaten.takeIf { it.isNotEmpty() }?.let { list ->
++                    whole.takeIf { it.isNotEmpty() }?.let { list ->
+                         FoodTotals(
+-                            list.map { it.kcal }.average(),
+-                            list.map { it.proteinG }.average(),
+-                            list.map { it.carbsG }.average(),
+-                            list.map { it.fatG }.average(),
++                            list.map { it.eaten!!.kcal }.average(),
++                            list.map { it.eaten!!.proteinG }.average(),
++                            list.map { it.eaten!!.carbsG }.average(),
++                            list.map { it.eaten!!.fatG }.average(),
+                         ).rounded()
+                     },
+                     burned.takeIf { it.isNotEmpty() }?.average(),
++                    complete = whole.isNotEmpty(),
+                 )
+             }
+     }
+ 
+-    /** Pure. The [range] days ending today, oldest first; burn only where it means something (see below). */
+-    fun days(entries: List<FoodEntry>, energy: Map<String, FoodEnergy>, today: LocalDate, range: Range): List<HistoryDay> {
++    /**
++     * Pure. The [range] days before today plus today, oldest first. The burn is plotted only on logged days:
++     * without meals the model has no digestion term, so an unlogged day's figure would sit ~10 % under its
++     * neighbours and read as a quieter day. [complete] are the days whose log is the whole day.
++     */
++    fun days(
++        entries: List<FoodEntry>,
++        energy: Map<String, DayEnergy>,
++        today: LocalDate,
++        range: Range,
++        complete: Set<String> = FoodDays.completeDays(entries),
++    ): List<HistoryDay> {
+         val byDay = entries.groupBy { it.day }
+-        return (range.days - 1 downTo 0).map { back ->
++        return (range.days downTo 0).map { back ->
+             val d = today.minusDays(back.toLong())
+             val key = d.toString()
+             val eaten = byDay[key]?.let { FoodTotals.ofEntries(it) }
+-            // A resting-only figure says nothing on its own: plot it only where it backs a balance.
+-            val burned = energy[key]?.takeIf { it.source != EnergySource.BASAL || eaten != null }?.burnedKcal
+-            HistoryDay(d, eaten, burned)
++            val burned = if (eaten == null) null else energy[key]?.totalKcal
++            HistoryDay(d, eaten, burned, complete = key in complete)
+         }
+     }
+ 
+-    /** Pure. Today never counts: its intake is half a day. */
++    /** Pure. Today never counts (its intake is half a day), nor does a day whose log is not the whole day. */
+     fun summary(days: List<HistoryDay>, today: LocalDate): HistorySummary {
+-        val logged = days.filter { it.day != today && it.eaten != null }
++        val logged = days.filter { it.day != today && it.eaten != null && it.complete }
+         if (logged.isEmpty()) return HistorySummary(0, null, null, null)
+         val balances = logged.mapNotNull { d -> d.burnedKcal?.let { d.eaten!!.kcal - it } }
+         return HistorySummary(
+@@ -124,9 +145,14 @@ internal object FoodHistory {
+         )
+     }
+ 
+-    /** Pure. Average kcal of each meal type over the days it was logged, in the order of the day. */
+-    fun mealAverages(entries: List<FoodEntry>, from: LocalDate, today: LocalDate): List<Pair<MealType, Double>> {
+-        val inRange = entries.filter { it.day >= from.toString() && it.day < today.toString() }
++    /** Pure. Average kcal of each meal type over the complete days it was logged on, in the order of the day. */
++    fun mealAverages(
++        entries: List<FoodEntry>,
++        from: LocalDate,
++        today: LocalDate,
++        complete: Set<String> = FoodDays.completeDays(entries),
++    ): List<Pair<MealType, Double>> {
++        val inRange = entries.filter { it.day >= from.toString() && it.day < today.toString() && it.day in complete }
+         return MealType.entries.mapNotNull { meal ->
+             val perDay = inRange.filter { it.meal == meal }.groupBy { it.day }.values.map { list -> list.sumOf { it.kcal } }
+             perDay.takeIf { it.isNotEmpty() }?.let { meal to it.average() }
+@@ -136,8 +162,8 @@ internal object FoodHistory {
+ 
+ /**
+  * victor:food — the Historial view of the Food tab: a range picker, the averages, and three charts
+- * (eaten vs burned with the goal, macros, kcal by meal). Burn comes from [FoodEnergy.loadRange], the same
+- * resolver as every other balance in the app.
++ * (eaten vs burned with the goal, macros, kcal by meal). Burn comes from [DayEnergyModel.range], the same
++ * model as every other balance in the app.
+  */
+ @OptIn(ExperimentalLayoutApi::class)
+ @Composable
+@@ -147,14 +173,15 @@ internal fun FoodHistorySection(vm: AppViewModel, entries: List<FoodEntry>, kcal
+     var range by rememberSaveable { mutableStateOf(FoodHistory.Range.MONTH) }
+     var showBurned by rememberSaveable { mutableStateOf(true) }
+     val locale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
+-    val from = today.minusDays(range.days.toLong() - 1)
++    val from = today.minusDays(range.days.toLong())
+     val inputs = energyInputs(vm)
+-    val energy by produceState(emptyMap<String, FoodEnergy>(), range, entries, inputs) {
++    val energy by produceState(emptyMap<String, DayEnergy>(), range, entries, inputs) {
+         value = withContext(Dispatchers.IO) {
+-            runCatching { FoodEnergy.loadRange(ctx, vm.repo, vm.activeStrapId, from.toString(), today.toString()) }.getOrDefault(emptyMap())
++            runCatching { DayEnergyModel.range(ctx, vm.repo, vm.activeStrapId, from.toString(), today.toString()) }.getOrDefault(emptyMap())
+         }
+     }
+-    val days = FoodHistory.days(entries, energy, today, range)
++    val complete = remember(entries) { FoodDays.completeDays(entries) }
++    val days = FoodHistory.days(entries, energy, today, range, complete)
+     val summary = FoodHistory.summary(days, today)
+     val points = FoodHistory.points(days, range.weekly, today, locale)
+ 
+@@ -203,7 +230,7 @@ internal fun FoodHistorySection(vm: AppViewModel, entries: List<FoodEntry>, kcal
+             )
+             AxisDates(points)
+         }
+-        val meals = FoodHistory.mealAverages(entries, from, today)
++        val meals = FoodHistory.mealAverages(entries, from, today, complete)
+         if (meals.isNotEmpty()) {
+             ChartCard(uiString(R.string.victor_food_history_meals_title)) { MealBars(meals) }
+         }
+diff --git a/android/app/src/main/java/com/noop/food/FoodModels.kt b/android/app/src/main/java/com/noop/food/FoodModels.kt
+index 78bc3922..bf151d00 100644
+--- a/android/app/src/main/java/com/noop/food/FoodModels.kt
++++ b/android/app/src/main/java/com/noop/food/FoodModels.kt
+@@ -165,6 +165,39 @@ object FoodDays {
+         entries.groupBy { it.day }
+             .toSortedMap(compareByDescending { it })
+             .map { (day, list) -> day to list.sortedBy { it.timestamp } }
++
++    /** Days of logged intake a day's completeness is judged against, and the share of their median it must reach. */
++    const val COMPLETE_LOOKBACK_DAYS = 28L
++    const val COMPLETE_SHARE = 0.75
++
++    /**
++     * victor:energy — whether a logged day is the WHOLE day: it has a dinner, or its total reaches
++     * [COMPLETE_SHARE] of [medianKcal], the median of the days logged before it. A day with only breakfast
++     * logged is not a day of under-eating; it stays on the charts and out of every average.
++     */
++    fun isComplete(dayEntries: List<FoodEntry>, medianKcal: Double?): Boolean {
++        if (dayEntries.isEmpty()) return false
++        if (dayEntries.any { it.meal == MealType.DINNER }) return true
++        val median = medianKcal ?: return false
++        return FoodTotals.ofEntries(dayEntries).kcal >= COMPLETE_SHARE * median
++    }
++
++    /**
++     * The complete days of the log ([isComplete]): each logged day against the median of the logged days in
++     * the [COMPLETE_LOOKBACK_DAYS] days before it. Pure.
++     */
++    fun completeDays(entries: List<FoodEntry>): Set<String> {
++        val byDay = entries.groupBy { it.day }.toSortedMap()
++        val kcalByDay = byDay.mapValues { (_, list) -> FoodTotals.ofEntries(list).kcal }
++        val out = HashSet<String>()
++        for ((day, list) in byDay) {
++            val from = LocalDate.parse(day).minusDays(COMPLETE_LOOKBACK_DAYS).toString()
++            val prior = kcalByDay.filterKeys { it >= from && it < day }.values.sorted()
++            val median = prior.takeIf { it.isNotEmpty() }?.let { if (it.size % 2 == 1) it[it.size / 2] else (it[it.size / 2 - 1] + it[it.size / 2]) / 2.0 }
++            if (isComplete(list, median)) out += day
++        }
++        return out
++    }
+ }
+ 
+ /** Finite, non-negative, one decimal. */
+diff --git a/android/app/src/test/java/com/noop/food/FoodAdaptiveTest.kt b/android/app/src/test/java/com/noop/food/FoodAdaptiveTest.kt
+index 14ccab68..f2a03328 100644
+--- a/android/app/src/test/java/com/noop/food/FoodAdaptiveTest.kt
++++ b/android/app/src/test/java/com/noop/food/FoodAdaptiveTest.kt
+@@ -3,25 +3,27 @@ package com.noop.food
+ import com.noop.analytics.AdaptiveExpenditureEngine
+ import org.junit.Assert.assertEquals
+ import org.junit.Assert.assertNotNull
++import org.junit.Assert.assertNull
+ import org.junit.Assert.assertTrue
+ import org.junit.Test
+ import java.time.LocalDate
+ 
+-/** victor:food — feeding the intake + weight-trend expenditure engine from the food log and the scale. */
++/** victor:food — feeding the intake + weight-trend expenditure engine from the food log and the scale, Hall's kcal per kg. */
+ class FoodAdaptiveTest {
+ 
+     private val today = LocalDate.of(2026, 11, 30)
+ 
+-    private fun meal(day: LocalDate, kcal: Double) = FoodEntry(
+-        id = "$day-$kcal", timestamp = 0L, day = day.toString(), note = "", items = emptyList(),
+-        kcal = kcal, proteinG = 0.0, carbsG = 0.0, fatG = 0.0, thumbnailPaths = emptyList(),
++    private fun meal(day: LocalDate, kcal: Double, meal: MealType = MealType.DINNER) = FoodEntry(
++        id = "$day-$kcal-$meal", timestamp = 0L, day = day.toString(), note = "", items = emptyList(),
++        kcal = kcal, proteinG = 0.0, carbsG = 0.0, fatG = 0.0, thumbnailPaths = emptyList(), meal = meal,
+     )
+ 
+     @Test
+-    fun oneRowPerDayWithTodayAndOldDaysLeftOut() {
++    fun oneRowPerDayWithTodayOldDaysAndPartialDaysLeftOut() {
+         val entries = listOf(
+             meal(today, 900.0), // still in progress
+             meal(today.minusDays(1), 800.0), meal(today.minusDays(1), 1200.0),
++            meal(today.minusDays(2), 400.0, MealType.BREAKFAST),   // breakfast only: not a day of under-eating
+             meal(today.minusDays(50), 2000.0), // beyond six weeks
+         )
+         val weights = listOf(today.minusDays(1).toString() to 78.4, today.minusDays(3).toString() to 78.9)
+@@ -36,14 +38,42 @@ class FoodAdaptiveTest {
+     }
+ 
+     @Test
+-    fun fourWeeksOfLogsGiveAnEstimateAndItsWindow() {
+-        // 2200 kcal/day eaten while losing 0.05 kg/day → about 2200 + 0.05·7700 = 2585 kcal/day burned.
++    fun weighInsBeforeTheCurrentStreakAreLeftOutSoADailyScaleDoesNotStallTheCard() {
++        // Logged for the last 10 days (a gap of two days inside the streak), weighed every day for 42.
++        val logged = (1L..12L).filter { it != 5L && it != 6L }.map { today.minusDays(it).toString() }
++        assertEquals(today.minusDays(12).toString(), FoodAdaptive.streakStart(logged, today))
++        // Four unlogged days in a row end the streak.
++        assertEquals(today.minusDays(4).toString(), FoodAdaptive.streakStart((1L..4L).map { today.minusDays(it).toString() } + today.minusDays(9).toString(), today))
++        assertNull(FoodAdaptive.streakStart(emptyList(), today))
++        val entries = logged.map { meal(LocalDate.parse(it), 2200.0) }
++        val weights = (1L..42L).map { today.minusDays(it).toString() to 80.0 }
++        val days = FoodAdaptive.days(entries, weights, today)
++        // Weigh-ins from three days before the streak's first day on: 12 + 3 = 15 days of rows, not 42.
++        assertEquals(today.minusDays(15).toString(), days.first().day)
++        assertEquals(15, days.count { it.weightKg != null })
++    }
++
++    @Test
++    fun theKcalPerKgFollowsTheFatMass() {
++        assertEquals(6_213.0, FoodAdaptive.kcalPerKg(14.4), 1.0)     // 18 % of 80 kg: Hall 2008 (≈6 200)
++        assertEquals(7_444.0, FoodAdaptive.kcalPerKg(30.0), 1.0)     // only with a lot of fat does 7 700 come close
++        assertEquals(7_500.0, FoodAdaptive.kcalPerKg(null), 0.0)     // no scale: a lean share of 0.25
++        assertEquals(7_500.0, FoodAdaptive.kcalPerKg(0.0), 0.0)
++    }
++
++    @Test
++    fun fourWeeksOfLogsGiveAnEstimateReCentredOnTheRightDensity() {
++        // 2200 kcal/day eaten while losing 0.05 kg/day: the engine says 2200 + 0.05·7700 = 2585; at 18 % fat it is 2200 + 0.05·6215 ≈ 2511.
+         val entries = (1L..28L).map { meal(today.minusDays(it), 2200.0) }
+         val weights = (1L..28L step 2).map { today.minusDays(it).toString() to 80.0 - 0.05 * (28 - it) }
+         val days = FoodAdaptive.days(entries, weights, today)
+-        val est = AdaptiveExpenditureEngine.estimate(days)
+-        assertNotNull(est)
+-        assertEquals(2585.0, est!!.estimatedDailyKcal, 1.0)
++        val raw = AdaptiveExpenditureEngine.estimate(days)
++        assertNotNull(raw)
++        assertEquals(2585.0, raw!!.estimatedDailyKcal, 1.0)
++        val est = FoodAdaptive.withDensity(raw, FoodAdaptive.kcalPerKg(14.4))
++        assertEquals(2511.0, est.estimatedDailyKcal, 1.0)
++        assertEquals(raw.upperKcal - raw.lowerKcal, est.upperKcal - est.lowerKcal, 1e-9)   // the interval keeps its width
++        assertEquals(est.estimatedDailyKcal - raw.estimatedDailyKcal, est.lowerKcal - raw.lowerKcal, 1e-9)
+         val window = FoodAdaptive.windowIntakeDays(days, est)
+         assertEquals(28, window.size)
+         assertTrue(window.all { it < today.toString() })
+diff --git a/android/app/src/test/java/com/noop/food/FoodCompleteDaysTest.kt b/android/app/src/test/java/com/noop/food/FoodCompleteDaysTest.kt
+new file mode 100644
+index 00000000..389f4d34
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/food/FoodCompleteDaysTest.kt
+@@ -0,0 +1,41 @@
++package com.noop.food
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/** victor:energy — which logged days are the whole day: a dinner, or 75 % of the usual total. */
++class FoodCompleteDaysTest {
++
++    private fun meal(day: String, kcal: Double, meal: MealType) = FoodEntry(
++        id = "$day-$kcal-$meal", timestamp = 0L, day = day, note = "", items = emptyList(),
++        kcal = kcal, proteinG = 0.0, carbsG = 0.0, fatG = 0.0, thumbnailPaths = emptyList(), meal = meal,
++    )
++
++    @Test
++    fun aDinnerMakesTheDayWholeAndSoDoesThreeQuartersOfTheUsualTotal() {
++        assertTrue(FoodDays.isComplete(listOf(meal("2026-10-10", 400.0, MealType.DINNER)), null))
++        assertFalse(FoodDays.isComplete(listOf(meal("2026-10-10", 400.0, MealType.BREAKFAST)), null))   // no history: only a dinner counts
++        assertTrue(FoodDays.isComplete(listOf(meal("2026-10-10", 1800.0, MealType.LUNCH)), 2400.0))      // 75 % of the median
++        assertFalse(FoodDays.isComplete(listOf(meal("2026-10-10", 1700.0, MealType.LUNCH)), 2400.0))
++        assertFalse(FoodDays.isComplete(emptyList(), 2400.0))
++    }
++
++    @Test
++    fun theMedianIsOfTheLoggedDaysInTheTwentyEightBefore() {
++        val entries = listOf(
++            meal("2026-09-01", 2000.0, MealType.DINNER),    // 39 days before the 10th: outside its window
++            meal("2026-09-20", 2400.0, MealType.DINNER),
++            meal("2026-09-25", 2600.0, MealType.DINNER),
++            meal("2026-10-01", 2000.0, MealType.DINNER),
++            meal("2026-10-05", 300.0, MealType.BREAKFAST),  // partial: still a logged day in the median (as logged)
++            meal("2026-10-10", 1800.0, MealType.LUNCH),     // lunch alone, 1 800 ≥ 0.75 × median(2400, 2600, 2000, 300) = 0.75 × 2200
++            meal("2026-10-11", 1400.0, MealType.LUNCH),     // under 0.75 × median(2400, 2600, 2000, 300, 1800) = 1 500
++        )
++        val complete = FoodDays.completeDays(entries)
++        assertEquals(setOf("2026-09-01", "2026-09-20", "2026-09-25", "2026-10-01", "2026-10-10"), complete)
++        assertFalse("2026-10-05" in complete)
++        assertFalse("2026-10-11" in complete)
++    }
++}
+diff --git a/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt b/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt
+index c09c8612..7b4f1055 100644
+--- a/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt
++++ b/android/app/src/test/java/com/noop/food/FoodHistoryTest.kt
+@@ -1,72 +1,85 @@
+ package com.noop.food
+ 
++import com.noop.energy.EnergyFixtures
+ import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
+ import org.junit.Assert.assertNull
+ import org.junit.Assert.assertTrue
+ import org.junit.Test
+ import java.time.LocalDate
+ 
+-/** victor:food — the history view's days, averages and per-meal breakdown. */
++/** victor:food — the history view's days, averages (complete days only) and per-meal breakdown. */
+ class FoodHistoryTest {
+ 
+     private val today = LocalDate.of(2026, 10, 17)
+ 
+-    private fun meal(day: LocalDate, kcal: Double, meal: MealType = MealType.LUNCH, p: Double = 30.0) = FoodEntry(
++    private fun meal(day: LocalDate, kcal: Double, meal: MealType = MealType.DINNER, p: Double = 30.0) = FoodEntry(
+         id = "$day-$kcal-$meal", timestamp = 0L, day = day.toString(), note = "", items = emptyList(),
+         kcal = kcal, proteinG = p, carbsG = 0.0, fatG = 0.0, thumbnailPaths = emptyList(), meal = meal,
+     )
+ 
+-    private fun burned(day: LocalDate, kcal: Double) =
+-        day.toString() to FoodEnergy.resolve(kcal, null, null, null, 1.0)!!
++    private fun burned(day: LocalDate, kcal: Double) = day.toString() to EnergyFixtures.day(day.toString(), totalKcal = kcal)
+ 
+     @Test
+-    fun daysEndTodayOldestFirstWithGapsForUnloggedDays() {
++    fun aWeekIsTheSevenDaysBeforeTodayPlusTodayOldestFirst() {
+         val entries = listOf(meal(today, 500.0), meal(today.minusDays(2), 2000.0))
+         val days = FoodHistory.days(entries, mapOf(burned(today.minusDays(2), 2600.0)), today, FoodHistory.Range.WEEK)
+-        assertEquals(7, days.size)
+-        assertEquals(today.minusDays(6), days.first().day)
++        assertEquals(8, days.size)                       // 7 past days (the coach's "previous 7 days") and today
++        assertEquals(today.minusDays(7), days.first().day)
+         assertEquals(today, days.last().day)
+-        assertNull(days[5].eaten) // yesterday: nothing logged
+-        assertEquals(2000.0, days[4].eaten!!.kcal, 0.0)
+-        assertEquals(2600.0, days[4].burnedKcal!!, 0.0)
+-        // Resting-only days without food draw no burn point; with food they do (they back a balance).
+-        val restOnly = mapOf(today.minusDays(1).toString() to FoodEnergy.resolve(null, null, null, 1800.0, 1.0)!!)
+-        assertNull(FoodHistory.days(emptyList(), restOnly, today, FoodHistory.Range.WEEK)[5].burnedKcal)
+-        assertEquals(1800.0, FoodHistory.days(listOf(meal(today.minusDays(1), 900.0)), restOnly, today, FoodHistory.Range.WEEK)[5].burnedKcal!!, 0.0)
++        assertNull(days[6].eaten)                         // yesterday: nothing logged
++        assertEquals(2000.0, days[5].eaten!!.kcal, 0.0)
++        assertEquals(2600.0, days[5].burnedKcal!!, 0.0)
++        assertTrue(days[5].complete)                      // a dinner makes the day whole
+     }
+ 
+     @Test
+-    fun longRangesPlotMondayWeeksOfLoggedDayAveragesWithoutToday() {
++    fun theBurnIsPlottedOnLoggedDaysOnly() {
++        // The model has a figure for every day, but without meals it lacks the digestion term (~10 %): plotting
++        // it on an unlogged day would draw a dip that is only a missing log.
++        val energy = mapOf(burned(today.minusDays(1), 2500.0), burned(today.minusDays(2), 2500.0))
++        val days = FoodHistory.days(listOf(meal(today.minusDays(1), 900.0)), energy, today, FoodHistory.Range.WEEK)
++        assertEquals(2500.0, days[6].burnedKcal!!, 0.0)
++        assertNull(days[5].burnedKcal)
++    }
++
++    @Test
++    fun longRangesPlotMondayWeeksOfCompleteDayAveragesWithoutToday() {
+         val es = java.util.Locale("es", "ES")
+-        // Saturday 17 Oct 2026. Week of Mon 5 Oct: two logged days; week of Mon 12: one day plus today.
++        // Saturday 17 Oct 2026. Week of Mon 5 Oct: two complete days and one partial; week of Mon 12: one day plus today.
+         val entries = listOf(
+             meal(LocalDate.of(2026, 10, 5), 2000.0, p = 100.0),
+             meal(LocalDate.of(2026, 10, 7), 2400.0, p = 140.0),
++            meal(LocalDate.of(2026, 10, 8), 300.0, MealType.BREAKFAST),   // breakfast only: not the whole day
+             meal(LocalDate.of(2026, 10, 13), 1800.0),
+             meal(today, 300.0),
+         )
+-        val energy = mapOf(burned(LocalDate.of(2026, 10, 5), 2500.0), burned(LocalDate.of(2026, 10, 6), 2700.0))
++        val energy = mapOf(burned(LocalDate.of(2026, 10, 5), 2500.0), burned(LocalDate.of(2026, 10, 6), 2700.0), burned(LocalDate.of(2026, 10, 8), 2600.0))
+         val days = FoodHistory.days(entries, energy, today, FoodHistory.Range.QUARTER)
+         val weeks = FoodHistory.points(days, weekly = true, today = today, locale = es)
+         assertEquals(LocalDate.of(2026, 10, 12), weeks.last().day)
+         assertEquals(1800.0, weeks.last().eaten!!.kcal, 0.0) // today's 300 left out
+         val w5 = weeks.first { it.day == LocalDate.of(2026, 10, 5) }
+-        assertEquals(2200.0, w5.eaten!!.kcal, 0.0)
++        assertEquals(2200.0, w5.eaten!!.kcal, 0.0)           // the partial 8th is not in the average
+         assertEquals(120.0, w5.eaten!!.proteinG, 0.0)
+-        assertEquals(2600.0, w5.burnedKcal!!, 0.0)
++        // Burned averaged over the SAME complete logged days: the 5th alone (the 6th has no meals, the 8th is partial).
++        assertEquals(2500.0, w5.burnedKcal!!, 0.0)
+         assertTrue(weeks.all { it.day.dayOfWeek == java.time.DayOfWeek.MONDAY })
+         assertEquals(days, FoodHistory.points(days, weekly = false, today = today, locale = es))
+     }
+ 
+     @Test
+-    fun averagesLeaveTodayOut() {
++    fun averagesLeaveTodayAndPartialDaysOut() {
+         val entries = listOf(
+             meal(today, 400.0, p = 20.0),
+             meal(today.minusDays(1), 2200.0, p = 150.0),
+             meal(today.minusDays(2), 1800.0, p = 110.0),
++            meal(today.minusDays(3), 600.0, MealType.LUNCH, p = 40.0),   // lunch only, under 75 % of the others: partial
+         )
+-        val energy = mapOf(burned(today.minusDays(1), 2500.0), burned(today.minusDays(2), 2400.0))
+-        val s = FoodHistory.summary(FoodHistory.days(entries, energy, today, FoodHistory.Range.WEEK), today)
++        val energy = mapOf(burned(today.minusDays(1), 2500.0), burned(today.minusDays(2), 2400.0), burned(today.minusDays(3), 2400.0))
++        val days = FoodHistory.days(entries, energy, today, FoodHistory.Range.WEEK)
++        assertFalse(days.first { it.day == today.minusDays(3) }.complete)
++        val s = FoodHistory.summary(days, today)
+         assertEquals(2, s.loggedDays)
+         assertEquals(2000.0, s.avgKcal!!, 0.0)
+         assertEquals(130.0, s.avgProteinG!!, 0.0)
+@@ -75,13 +88,15 @@ class FoodHistoryTest {
+     }
+ 
+     @Test
+-    fun mealAveragesArePerLoggedDayInDayOrder() {
++    fun mealAveragesArePerCompleteDayInDayOrder() {
+         val d1 = today.minusDays(1)
+         val d2 = today.minusDays(2)
++        val d3 = today.minusDays(3)
+         val entries = listOf(
+             meal(d1, 300.0, MealType.DINNER), meal(d1, 200.0, MealType.DINNER), // 500 on d1
+             meal(d2, 700.0, MealType.DINNER),
+             meal(d1, 450.0, MealType.BREAKFAST),
++            meal(d3, 900.0, MealType.BREAKFAST),                               // breakfast alone: partial, left out
+             meal(today, 999.0, MealType.BREAKFAST), // today: left out
+         )
+         val avg = FoodHistory.mealAverages(entries, today.minusDays(29), today)
+-- 
+2.54.0
+

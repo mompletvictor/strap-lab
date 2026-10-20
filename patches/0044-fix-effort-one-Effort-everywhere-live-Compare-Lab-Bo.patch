@@ -1,0 +1,664 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 15:56:05 +0200
+Subject: [PATCH] =?UTF-8?q?fix(effort):=20one=20Effort=20everywhere=20?=
+ =?UTF-8?q?=E2=80=94=20live,=20Compare,=20Lab=20Book,=20widget,=20fitness?=
+ =?UTF-8?q?=20age?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The day's Effort with the gym extra (training/VictorDayEffort) reached Today and Trends but not every
+reader. Now:
+
+- Fitness Age / VO2max: the scheduled pass adds the extra to its fresh rows, as the "refresh" button's
+  merged rows already had it, so the two no longer write different ages for the same week.
+- Compare and Lab Book: resolvedSeries("strain") carries the extra.
+- Today: the live Effort (ring, tile, chart badge) carries it too, recomputed when an analysis lands;
+  the water goal follows the live Effort, as its comment said.
+- Widget: its Effort is today's row, never the last scored day's (the carry-over stays for Charge/Rest).
+- Banister Effort: the extra is inverted and mapped back with the day's own denominator.
+- Means of the day in progress: the coach's 30-day Effort and steps, Trends' Effort mean and move, and the
+  week digest skip today's half-day; its point still plots. Trends and Explore re-read with new data.
+- Illness heads-up: a hard day is the day BEFORE the judged night with Effort in WHOOP's High band (14/21),
+  not two workouts logged today.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../app/src/main/java/com/noop/ai/AiCoach.kt  |   6 +-
+ .../com/noop/analytics/IntelligenceEngine.kt  |   2 +-
+ .../com/noop/ble/WhoopConnectionService.kt    |   2 +-
+ .../java/com/noop/data/WhoopRepository.kt     |   4 +-
+ .../java/com/noop/training/TrainingStore.kt   |  10 +-
+ .../java/com/noop/training/VictorDayEffort.kt |  62 ++++++-
+ .../src/main/java/com/noop/ui/AppViewModel.kt |   8 +-
+ .../src/main/java/com/noop/ui/TodayScreen.kt  |   9 +-
+ .../java/com/noop/ui/TrendsExploreScreen.kt   |   2 +-
+ .../src/main/java/com/noop/ui/TrendsScreen.kt |  12 +-
+ .../main/java/com/noop/ui/WeeklyDigestCard.kt |   3 +-
+ .../com/noop/training/VictorDayEffortTest.kt  |  54 ++++++
+ .../noop/training/VictorEffortReadersTest.kt  | 164 ++++++++++++++++++
+ 13 files changed, 308 insertions(+), 30 deletions(-)
+ create mode 100644 android/app/src/test/java/com/noop/training/VictorEffortReadersTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/ai/AiCoach.kt b/android/app/src/main/java/com/noop/ai/AiCoach.kt
+index 1b31f8f7..33d4888f 100644
+--- a/android/app/src/main/java/com/noop/ai/AiCoach.kt
++++ b/android/app/src/main/java/com/noop/ai/AiCoach.kt
+@@ -418,6 +418,8 @@ class AiCoach(
+         // daysMerged() returns oldest-first; take the most recent up to 30 for averages, 14 for the table.
+         val last30 = days.takeLast(30)
+         val last14 = days.takeLast(14)
++        // victor:effort — Effort and steps accrue through the day: their means skip the day still in progress.
++        val done30 = com.noop.ui.logicalDayKeyNow().let { today -> last30.filter { it.day < today } }
+ 
+         val sb = StringBuilder()
+         sb.append("USER DATA (most recent first; figures rounded; a dash means not recorded that day).\n\n")
+@@ -449,7 +451,7 @@ class AiCoach(
+         // --- 30-day averages ---
+         sb.append("\n30-day averages (over ${last30.size} days):\n")
+         sb.append("  charge ${avgInt(last30) { it.recovery }}%, ")
+-        sb.append("effort ${avg1(last30) { it.strain }}, ")
++        sb.append("effort ${avg1(done30) { it.strain }}, ")
+         sb.append("rest ${avg1(last30) { d -> d.totalSleepMin?.div(60.0) }}h, ")
+         sb.append("HRV ${avgInt(last30) { it.avgHrv }}ms, ")
+         sb.append("RHR ${avgInt(last30) { d -> d.restingHr?.toDouble() }}bpm\n")
+@@ -457,7 +459,7 @@ class AiCoach(
+         sb.append("  SpO₂ ${avgInt(last30) { it.spo2Pct }}%, ")
+         sb.append("respiration ${avg1(last30) { it.respRateBpm }}/min, ")
+         sb.append("skin-temp deviation ${avg1(last30) { it.skinTempDevC }}°C, ")
+-        sb.append("steps ${avgInt(last30) { d -> d.steps?.toDouble() }}/day, ")
++        sb.append("steps ${avgInt(done30) { d -> d.steps?.toDouble() }}/day, ")
+         sb.append("active energy ${avgInt(last30) { it.activeKcalEst }}kcal/day\n")
+ 
+         // --- Recent workouts (derived from logged exercise counts + day strain) ---
+diff --git a/android/app/src/main/java/com/noop/analytics/IntelligenceEngine.kt b/android/app/src/main/java/com/noop/analytics/IntelligenceEngine.kt
+index 9683d3f2..4675c384 100644
+--- a/android/app/src/main/java/com/noop/analytics/IntelligenceEngine.kt
++++ b/android/app/src/main/java/com/noop/analytics/IntelligenceEngine.kt
+@@ -2115,7 +2115,7 @@ object IntelligenceEngine {
+         // SAME rule (no drift).
+         val faGateByDay = LinkedHashMap<String, DailyMetric>()
+         for (d in faPriorDaily) faGateByDay[d.day] = d
+-        for (d in dailies) faGateByDay[d.day] = d
++        for (d in com.noop.training.VictorDayEffort.apply(dailies, com.noop.training.VictorDayEffort.boosts.value)) faGateByDay[d.day] = d   // victor:training — the gym extra, as daysMerged (above, and the refresh button) carries it
+         val faGate7 = faGateByDay.values.sortedBy { it.day }.takeLast(7)
+         val faPts = fitnessAgeRows(faGate7, profile, computedId, saturdayKeyOnOrBefore(newestDay))
+         // Strap-log proof: the RHR-night count the engine sees for the gate , should equal the "N of last 7
+diff --git a/android/app/src/main/java/com/noop/ble/WhoopConnectionService.kt b/android/app/src/main/java/com/noop/ble/WhoopConnectionService.kt
+index dd0e5b39..06c063d0 100644
+--- a/android/app/src/main/java/com/noop/ble/WhoopConnectionService.kt
++++ b/android/app/src/main/java/com/noop/ble/WhoopConnectionService.kt
+@@ -129,7 +129,7 @@ internal class NotifyDayStateCache(
+             todayRecovery = todayRow?.recovery,
+             widgetRecovery = anchorRow?.recovery?.roundToInt(),
+             widgetRest = anchorRow?.let { RestScorer.restFromDaily(it)?.roundToInt() },
+-            widgetEffort = anchorRow?.strain?.roundToInt(),
++            widgetEffort = todayRow?.strain?.roundToInt(),   // victor:effort — today's Effort, never a prior day's
+             illness = if (illnessEnabled && todayRow != null && days.lastOrNull()?.day == todayRow.day) {
+                 illnessEvaluator(days)
+             } else null,
+diff --git a/android/app/src/main/java/com/noop/data/WhoopRepository.kt b/android/app/src/main/java/com/noop/data/WhoopRepository.kt
+index c3a49309..8c7bdd3e 100644
+--- a/android/app/src/main/java/com/noop/data/WhoopRepository.kt
++++ b/android/app/src/main/java/com/noop/data/WhoopRepository.kt
+@@ -2240,7 +2240,9 @@ class WhoopRepository(
+         // Book / any resolver read agrees with the mergeDaily dashboards instead of re-surfacing the
+         // schedule target the merge already rejects.
+         val perCandidate = candidates.map { it to resolvedRows(it, from, to) }
+-        val points = resolveFirstWins(perCandidate)
++        val points = resolveFirstWins(perCandidate).let { p ->   // victor:training — the gym extra, as the merged readers carry it
++            if (key != "strain") p else p.map { it.copy(value = com.noop.training.VictorDayEffort.onDay(it.day, it.value, com.noop.training.VictorDayEffort.boosts.value)) }
++        }
+         // #1705: skin_temp is bimodal — a CSV import writes ABSOLUTE °C into skinTempDevC while the
+         // computed pipeline writes a baseline DEVIATION, and the candidate list unions the imported and
+         // computed identities, so first-wins can resolve older days to one kind and recent days to the
+diff --git a/android/app/src/main/java/com/noop/training/TrainingStore.kt b/android/app/src/main/java/com/noop/training/TrainingStore.kt
+index 8d10086b..2b2493f9 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingStore.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingStore.kt
+@@ -2,6 +2,8 @@ package com.noop.training
+ 
+ import android.content.Context
+ import com.noop.data.WorkoutRow
++import com.noop.ui.NoopPrefs
++import com.noop.ui.ProfileStore
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.SupervisorJob
+@@ -250,7 +252,7 @@ object TrainingStore {
+         }
+         cache = loaded
+         _sessions.value = loaded
+-        VictorDayEffort.update(loaded)
++        publish(ctx, loaded)
+         return loaded
+     }
+ 
+@@ -266,6 +268,12 @@ object TrainingStore {
+         }
+         cache = sessions
+         _sessions.value = sessions
++        publish(ctx, sessions)
++    }
++
++    /** The day's Effort follows the log, on the axis this device scores the day with. */
++    private fun publish(ctx: Context, sessions: List<TrainingSession>) {
++        runCatching { VictorDayEffort.setAxis(NoopPrefs.effortMethod(ctx), ProfileStore.from(ctx).sex) }
+         VictorDayEffort.update(sessions)
+     }
+ }
+diff --git a/android/app/src/main/java/com/noop/training/VictorDayEffort.kt b/android/app/src/main/java/com/noop/training/VictorDayEffort.kt
+index 7484132b..87f45f89 100644
+--- a/android/app/src/main/java/com/noop/training/VictorDayEffort.kt
++++ b/android/app/src/main/java/com/noop/training/VictorDayEffort.kt
+@@ -5,8 +5,10 @@ import com.noop.data.DailyMetric
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.StateFlow
+ import kotlinx.coroutines.flow.asStateFlow
++import java.time.LocalDate
+ import java.time.ZoneId
+ import kotlin.math.exp
++import kotlin.math.ln
+ 
+ /**
+  * victor:training — the muscular load of analysed gym sessions, added to the DAY's Effort, the way WHOOP's
+@@ -16,9 +18,9 @@ import kotlin.math.exp
+  * The axis is logarithmic, so efforts are not added: each session's extra load is
+  * TRIMP(Claude's effort) − TRIMP(its heart-rate effort), the day's extras are summed, added to the day's
+  * own TRIMP and mapped back. A session without a heart-rate effort counts its whole effort as extra.
+- * Applied where the merged daily rows are read (one line in each of WhoopRepository's three merged
+- * readers), so the Today ring, its tiles, Trends and the coach all read the same number; nothing is
+- * written back, so a later analysis simply replaces it.
++ * Applied where the Effort is read: WhoopRepository's three merged readers and its resolved series (Compare,
++ * Lab Book), Today's live Effort, the widget and the Fitness Age pass, so every screen reads the same number;
++ * nothing is written back, so a later analysis simply replaces it.
+  */
+ object VictorDayEffort {
+ 
+@@ -29,6 +31,22 @@ object VictorDayEffort {
+     @Volatile private var sessions: List<TrainingSession> = emptyList()
+     @Volatile private var unpaired: Set<String> = emptySet()
+ 
++    /**
++     * The log-map denominator the day's Effort is scored with: Edwards' unless "Banister Effort" is on
++     * ([StrainScorer.logMapDenominator]). The extra is inverted and mapped back on that same axis; Edwards'
++     * on a Banister day scaled it wrong. Set by [setAxis].
++     */
++    @Volatile var denominator: Double = StrainScorer.strainDenominator
++        private set
++
++    /** The device's Effort recipe and the profile's sex (Banister's ceiling depends on it). */
++    fun setAxis(method: StrainScorer.Method, sex: String, zone: ZoneId = ZoneId.systemDefault()) {
++        val d = StrainScorer.logMapDenominator(method, sex)
++        if (d == denominator) return
++        denominator = d
++        update(sessions, zone)
++    }
++
+     fun update(sessions: List<TrainingSession>, zone: ZoneId = ZoneId.systemDefault()) {
+         this.sessions = sessions
+         _boosts.value = extraTrimpByDay(sessions.filter { it.id !in unpaired }, zone)
+@@ -54,14 +72,18 @@ object VictorDayEffort {
+     }
+ 
+     /** Pure: an Effort with [extraTrimp] more load on the same 0-100 axis. */
+-    fun withExtra(effort: Double?, extraTrimp: Double): Double {
+-        val base = trimpOf(effort ?: 0.0)
+-        return StrainScorer.trimpToStrain(base + extraTrimp.coerceAtLeast(0.0)).coerceIn(0.0, StrainScorer.maxStrain)
++    fun withExtra(effort: Double?, extraTrimp: Double, denominator: Double = this.denominator): Double {
++        val base = trimpOf(effort ?: 0.0, denominator)
++        return StrainScorer.trimpToStrain(base + extraTrimp.coerceAtLeast(0.0), denominator).coerceIn(0.0, StrainScorer.maxStrain)
+     }
+ 
+-    /** Pure: the inverse of [StrainScorer.trimpToStrain] on the default denominator. */
+-    fun trimpOf(effort: Double): Double =
+-        (exp(effort.coerceIn(0.0, StrainScorer.maxStrain) * StrainScorer.lnStrainDenominator / StrainScorer.maxStrain) - 1.0).coerceAtLeast(0.0)
++    /** Pure: one day's Effort with that day's extra, for the readers that see the Effort as a series. */
++    fun onDay(day: String, effort: Double, boosts: Map<String, Double>): Double =
++        boosts[day]?.takeIf { it > 0 }?.let { withExtra(effort, it) } ?: effort
++
++    /** Pure: the inverse of [StrainScorer.trimpToStrain] on [denominator]. */
++    fun trimpOf(effort: Double, denominator: Double = this.denominator): Double =
++        (exp(effort.coerceIn(0.0, StrainScorer.maxStrain) * ln(denominator) / StrainScorer.maxStrain) - 1.0).coerceAtLeast(0.0)
+ 
+     /** Pure: per day, the load Claude's efforts add above what the heart rate already measured. */
+     fun extraTrimpByDay(sessions: List<TrainingSession>, zone: ZoneId): Map<String, Double> {
+@@ -75,4 +97,26 @@ object VictorDayEffort {
+         }
+         return out
+     }
++
++    /**
++     * Pure: whether the day before the latest row's night was hard, for the illness heads-up. The night it
++     * judges is the latest row's, so the session that explains a high heart rate or a low HRV is the DAY
++     * BEFORE's; and "hard" is that day's Effort (extra included, as merged rows carry it) in WHOOP's High band,
++     * 14 of 21 (upstream's CoachSuggestions.HIGH_STRAIN), not a count of workouts.
++     */
++    fun hardDayBefore(days: List<DailyMetric>): Boolean {
++        val latest = days.lastOrNull() ?: return false
++        val before = runCatching { LocalDate.parse(latest.day).minusDays(1).toString() }.getOrNull() ?: return false
++        val effort = days.lastOrNull { it.day == before }?.strain ?: return false
++        return effort >= StrainScorer.effortValueFromWhoopStrain(HARD_DAY_WHOOP)
++    }
++
++    private const val HARD_DAY_WHOOP = 14.0
++
++    /**
++     * Pure: a window's Effort values without the day still in progress (the logical day, and the local one past
++     * midnight). Effort accrues through the day, so its half-day would drag a mean down; its point still plots.
++     */
++    fun finishedDays(values: List<Double>, dates: List<String>, todayKey: String = com.noop.ui.logicalDayKeyNow()): List<Double> =
++        values.filterIndexed { i, _ -> dates.getOrNull(i)?.let { it < todayKey } ?: true }
+ }
+diff --git a/android/app/src/main/java/com/noop/ui/AppViewModel.kt b/android/app/src/main/java/com/noop/ui/AppViewModel.kt
+index 71982464..76784f9f 100644
+--- a/android/app/src/main/java/com/noop/ui/AppViewModel.kt
++++ b/android/app/src/main/java/com/noop/ui/AppViewModel.kt
+@@ -1132,7 +1132,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
+                             // Rest = the sleep_performance composite from THIS row's banked stage figures
+                             // (pure, honest-null until last night is scored); Effort = the 0–100 strain. (#516)
+                             restPct = anchorRow?.let { RestScorer.restFromDaily(it)?.roundToInt() },
+-                            effortPct = anchorRow?.strain?.roundToInt(),
++                            effortPct = resolveTodayRow(days, logicalKey, localKey)?.strain?.roundToInt(),   // victor:effort — today's Effort, never a prior day's
+                             heartRate = live.heartRate,
+                             // The ACTIVE device's charge (#2075): a ring reports its own and does not
+                             // funnel into live.batteryPct, so publishing that put the strap's number on
+@@ -2943,6 +2943,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
+      *  which the toggle's own copy promises. Twin of the iOS onChange handler. */
+     fun setBanisterEffort(enabled: Boolean) {
+         NoopPrefs.setBanisterEffort(appContext, enabled)
++        com.noop.training.VictorDayEffort.setAxis(NoopPrefs.effortMethod(appContext), profileStore.sex)   // victor:training — the gym extra on the new axis
+         viewModelScope.launch { rescoreAfterEdit() }
+     }
+ 
+@@ -2997,12 +2998,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
+     /**
+      * Same-day confounder context for [IllnessSignalEngine] from the day's journal — alcohol / hard-or-late
+      * workout / "feeling unwell" suppress an anomaly so a hangover or a late session never reads as illness.
+-     * Lightweight: derived from the latest day's exercise count + the cached "unwell" flag we can see here.
++     * Lightweight: derived from the Effort of the day before the latest night + the cached "unwell" flag we can see here.
+      * (A fuller journal-tag read lands with the Mind pillar; this keeps the v5 pass honest without new I/O.)
+      */
+     private fun illnessJournalContext(days: List<DailyMetric>): IllnessSignalEngine.Context {
+-        val latest = days.lastOrNull()
+-        val hardOrLate = (latest?.exerciseCount ?: 0) >= 2
++        val hardOrLate = com.noop.training.VictorDayEffort.hardDayBefore(days)   // victor:effort — the day before the night, by its Effort
+         return IllnessSignalEngine.Context(
+             hardOrLateWorkout = hardOrLate,
+             alreadyUnwell = false,
+diff --git a/android/app/src/main/java/com/noop/ui/TodayScreen.kt b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
+index 03f25678..f32f21fe 100644
+--- a/android/app/src/main/java/com/noop/ui/TodayScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/TodayScreen.kt
+@@ -741,9 +741,6 @@ fun TodayScreen(
+     // The day's Effort/strain (0..100) drives the goal's effort bump. Prefer the live in-progress Effort
+     // for today (floored at the stored value, mirroring the Effort gauge) so the goal reflects a hard day
+     // as it accrues; null leaves the bump at 0. Computed below where liveTodayStrain is in scope.
+-    val hydrationGoalMl = remember(displayMetric, profileStore) {
+-        if (!hydrationEnabled) 0 else HydrationGoal.dailyGoalMl(profileStore.sex, displayMetric?.strain)
+-    }
+ 
+     // "How your scores work" guide, opened from the per-score ⓘ affordances and the one-time
+     // first-run card. `guideSection` carries which score to deep-link to (null = open at the top);
+@@ -1022,7 +1019,8 @@ fun TodayScreen(
+     // fabricated number. Any past day → null (the gauge uses the stored strain). Keyed on the same inputs
+     // as the day-scoped loads so it reloads as the selector moves and as a sync/import grows the HR window.
+     var liveTodayStrain by remember { mutableStateOf<Double?>(null) }
+-    LaunchedEffect(days, selectedDayKey, selectedDayOffset, activeDayCycle, dayCycleMode) {
++    val effortBoosts by com.noop.training.VictorDayEffort.boosts.collectAsStateWithLifecycle()   // victor:training
++    LaunchedEffect(days, selectedDayKey, selectedDayOffset, activeDayCycle, dayCycleMode, effortBoosts) {
+         liveTodayStrain = if (selectedDayOffset == 0) {
+             val zone = ZoneId.systemDefault()
+             val now = System.currentTimeMillis() / 1000
+@@ -1047,7 +1045,7 @@ fun TodayScreen(
+                 restingHR = restingHr,
+                 method = NoopPrefs.effortMethod(context),
+                 sex = profileStore.sex,
+-            )
++            )?.let { com.noop.training.VictorDayEffort.onDay(selectedDayKey, it, effortBoosts) }   // victor:training — the gym extra, as the stored row carries it
+         } else {
+             null
+         }
+@@ -1061,6 +1059,7 @@ fun TodayScreen(
+         live = if (selectedDayOffset == 0) liveTodayStrain else null,
+         stored = displayMetric?.strain,
+     )
++    val hydrationGoalMl = if (!hydrationEnabled) 0 else HydrationGoal.dailyGoalMl(profileStore.sex, effortForDay)   // victor:effort — the live Effort, as the goal's comment says
+ 
+     // Recovery cold-start: recovery is null until the HRV baseline crosses the seed gate
+     // (Baselines.minNightsSeed valid nights). Show honest "calibrating, N of 4 nights" progress
+diff --git a/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt b/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt
+index 3ffc1cd8..ca982f99 100644
+--- a/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/TrendsExploreScreen.kt
+@@ -261,7 +261,7 @@ fun TrendsExploreScreen(vm: AppViewModel) {
+     // `recentDays` so the screen is populated on the first frame; the default (shallow-range) refresh keeps
+     // using the cheap bounded flow, so the cap is NOT raised (#797 stays fixed). Same merge as the dashboard.
+     var fullHistory by remember { mutableStateOf<List<DailyMetric>?>(null) }
+-    LaunchedEffect(deviceId) {
++    LaunchedEffect(deviceId, recentDays) {   // victor:effort — re-read when a sync or a gym analysis lands, not only on open
+         fullHistory = runCatching { vm.repo.daysMerged(deviceId) }.getOrNull()
+     }
+ 
+diff --git a/android/app/src/main/java/com/noop/ui/TrendsScreen.kt b/android/app/src/main/java/com/noop/ui/TrendsScreen.kt
+index fed74247..885dec41 100644
+--- a/android/app/src/main/java/com/noop/ui/TrendsScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/TrendsScreen.kt
+@@ -100,7 +100,7 @@ fun TrendsScreen(vm: AppViewModel) {
+     // Full history loaded once for the long (1Y / ALL) ranges; falls back to the flow
+     // until it lands so the screen is populated on first frame when any data exists.
+     var fullHistory by remember { mutableStateOf<List<DailyMetric>?>(null) }
+-    LaunchedEffect(Unit) {
++    LaunchedEffect(reactiveDays) {   // victor:effort — re-read when a sync or a gym analysis lands, not only on open
+         // Merged: imported WHOOP days win; on-device computed days gap-fill the trends. Reads the registry's
+         // ACTIVE strap id so daysMerged resolves the active-id ∪ canonical "my-whoop" union (SPINE / #814) ,
+         // a re-added strap's data and the canonical import both surface; a single-WHOOP install is unchanged.
+@@ -305,6 +305,7 @@ fun TrendsScreen(vm: AppViewModel) {
+                     higherIsBetter = null,
+                     resolved = strain,
+                     fmt = { UnitFormatter.effortDisplay(it, effortScale) },
++                    partialToday = true,   // victor:effort
+                 )
+             }
+         }
+@@ -485,7 +486,7 @@ private fun WeekInReviewCard(
+     modifier: Modifier = Modifier,
+ ) {
+     val chargeAvg = charge.values.averageOrNull()
+-    val effortAvg = effort.values.averageOrNull() // stored 0–100 internal Effort scale
++    val effortAvg = com.noop.training.VictorDayEffort.finishedDays(effort.values, effort.dates).averageOrNull() // stored 0–100 internal Effort scale; victor:effort — today's half-day out
+     val restAvg = rest.values.averageOrNull()
+     if (chargeAvg == null && effortAvg == null && restAvg == null) return
+ 
+@@ -997,6 +998,7 @@ internal fun TrendHostCard(card: HostedCard, days: List<DailyMetric>, effortScal
+             higherIsBetter = null,
+             resolved = remember(days) { resolveMetric(days, range) { it.strain } },
+             fmt = { UnitFormatter.effortDisplay(it, effortScale) },
++            partialToday = true,   // victor:effort
+         )
+         else -> Unit
+     }
+@@ -1013,8 +1015,10 @@ private fun MetricTrendCard(
+     tint: Color? = null,
+     tipColor: Color = color,
+     higherIsBetter: Boolean? = null,
++    partialToday: Boolean = false,   // victor:effort — Effort: the mean and the move skip the day in progress
+ ) {
+-    val avg = resolved.values.averageOrNull()
++    val meanOf = if (partialToday) com.noop.training.VictorDayEffort.finishedDays(resolved.values, resolved.dates) else resolved.values
++    val avg = meanOf.averageOrNull()
+     ChartCard(
+         title = title,
+         subtitle = null,
+@@ -1025,7 +1029,7 @@ private fun MetricTrendCard(
+         values = resolved.values,
+         dates = resolved.dates,
+         formatY = fmt,
+-        change = periodChange(resolved.values),
++        change = periodChange(meanOf),
+         higherIsBetter = higherIsBetter,
+         changeFmt = fmt,
+         footer = listOf(
+diff --git a/android/app/src/main/java/com/noop/ui/WeeklyDigestCard.kt b/android/app/src/main/java/com/noop/ui/WeeklyDigestCard.kt
+index 91efe322..d5fab461 100644
+--- a/android/app/src/main/java/com/noop/ui/WeeklyDigestCard.kt
++++ b/android/app/src/main/java/com/noop/ui/WeeklyDigestCard.kt
+@@ -81,9 +81,10 @@ fun buildWeeklyDigest(
+     val rest = HashMap<String, Double>()
+     val rhr = HashMap<String, Double>()
+     val hrv = HashMap<String, Double>()
++    val today = logicalDayKeyNow()   // victor:effort
+     for (d in days) {
+         d.recovery?.let { charge[d.day] = it }
+-        d.strain?.let { effort[d.day] = it }
++        d.strain?.takeIf { d.day < today }?.let { effort[d.day] = it }   // victor:effort — today's half-day out of the week's mean
+         // Rest = the sleep-performance composite recomputed on the persisted day.
+         RestScorer.restFromDaily(d)?.let { rest[d.day] = it }
+         d.restingHr?.let { rhr[d.day] = it.toDouble() }
+diff --git a/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt b/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt
+index eaee3a69..fc43cd11 100644
+--- a/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt
++++ b/android/app/src/test/java/com/noop/training/VictorDayEffortTest.kt
+@@ -2,7 +2,9 @@ package com.noop.training
+ 
+ import com.noop.analytics.StrainScorer
+ import com.noop.data.DailyMetric
++import org.junit.After
+ import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
+ import org.junit.Assert.assertSame
+ import org.junit.Assert.assertTrue
+ import org.junit.Test
+@@ -51,6 +53,58 @@ class VictorDayEffortTest {
+         assertSame(days, VictorDayEffort.apply(days, emptyMap()))
+     }
+ 
++    @After
++    fun backToEdwards() {
++        VictorDayEffort.setAxis(StrainScorer.Method.EDWARDS, "male")
++    }
++
++    /**
++     * With "Banister Effort" on, the day, the session's heart-rate effort and Claude's effort all sit on
++     * Banister's axis: the extra has to be summed in Banister TRIMP and mapped back with Banister's
++     * denominator. Inputs are given as TRIMPs, so the expected day does not lean on the inverse under test.
++     */
++    @Test
++    fun onABanisterDayTheExtraIsSummedOnBanistersAxis() {
++        for (sex in listOf("male", "female")) {
++            VictorDayEffort.setAxis(StrainScorer.Method.BANISTER, sex)
++            val d = StrainScorer.logMapDenominator(StrainScorer.Method.BANISTER, sex)
++            assertEquals(d, VictorDayEffort.denominator, 0.0)
++            val (dayTrimp, hrTrimp, claudeTrimp) = Triple(200.0, 150.0, 1500.0)
++            val extra = VictorDayEffort.extraTrimpByDay(
++                listOf(session(StrainScorer.trimpToStrain(claudeTrimp, d), StrainScorer.trimpToStrain(hrTrimp, d))), madrid,
++            ).getValue("2026-10-19")
++            val day = VictorDayEffort.withExtra(StrainScorer.trimpToStrain(dayTrimp, d), extra)
++            assertEquals(sex, StrainScorer.trimpToStrain(dayTrimp - hrTrimp + claudeTrimp, d), day, 1e-6)
++        }
++    }
++
++    /**
++     * The illness heads-up judges the latest row's night, so the session that explains it is the day
++     * BEFORE's, and "hard" is its Effort (WHOOP's High band, 14 of 21), not today's count of workouts.
++     */
++    @Test
++    fun aHardDayIsTheDayBeforeTheNightByItsEffort() {
++        fun row(day: String, strain: Double?, workouts: Int? = null) =
++            DailyMetric("my-whoop", day, strain = strain, exerciseCount = workouts)
++        val high = StrainScorer.effortValueFromWhoopStrain(14.0)
++        assertTrue(VictorDayEffort.hardDayBefore(listOf(row("2026-10-18", high), row("2026-10-19", 4.0))))
++        assertFalse(VictorDayEffort.hardDayBefore(listOf(row("2026-10-18", high - 1.0), row("2026-10-19", 4.0))))
++        // Two workouts TODAY, after the night: they explain nothing about it.
++        assertFalse(VictorDayEffort.hardDayBefore(listOf(row("2026-10-18", 20.0, 1), row("2026-10-19", 30.0, 2))))
++        // A gap: the hard day was two days before the night.
++        assertFalse(VictorDayEffort.hardDayBefore(listOf(row("2026-10-17", 90.0), row("2026-10-19", 4.0))))
++        assertFalse(VictorDayEffort.hardDayBefore(emptyList()))
++    }
++
++    /** Means skip the day in progress (and anything after it); every earlier point stays. */
++    @Test
++    fun finishedDaysLeaveOutTheDayInProgress() {
++        assertEquals(
++            listOf(40.0, 50.0),
++            VictorDayEffort.finishedDays(listOf(40.0, 50.0, 6.0), listOf("2026-10-18", "2026-10-19", "2026-10-20"), "2026-10-20"),
++        )
++    }
++
+     @Test
+     fun theSameWorkoutLoggedTwiceAddsItsLoadOnce() {
+         val once = VictorDayEffort.extraTrimpByDay(listOf(session(55.0, 15.0)), madrid)
+diff --git a/android/app/src/test/java/com/noop/training/VictorEffortReadersTest.kt b/android/app/src/test/java/com/noop/training/VictorEffortReadersTest.kt
+new file mode 100644
+index 00000000..d01676d2
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/training/VictorEffortReadersTest.kt
+@@ -0,0 +1,164 @@
++package com.noop.training
++
++import com.noop.ai.AiCoach
++import com.noop.analytics.IntelligenceEngine
++import com.noop.analytics.StepsEstimateEngine
++import com.noop.analytics.UserProfile
++import com.noop.analytics.WeeklyMetric
++import com.noop.ble.NotifyDayStateCache
++import com.noop.data.DailyMetric
++import com.noop.data.GravityWitness
++import com.noop.data.MetricSeriesRow
++import com.noop.data.WhoopDao
++import com.noop.data.WhoopRepository
++import com.noop.ui.buildWeeklyDigest
++import com.noop.ui.logicalDayKeyNow
++import kotlinx.coroutines.runBlocking
++import org.junit.After
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNotEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.lang.reflect.Proxy
++import java.time.DayOfWeek
++import java.time.LocalDate
++import java.time.ZoneId
++import kotlin.coroutines.Continuation
++import kotlin.coroutines.EmptyCoroutineContext
++
++/**
++ * victor:training — the day's Effort with the gym extra is ONE number: every reader that shows or uses it
++ * (Compare and Lab Book through the resolved series, the widget, the Fitness Age pass, the coach's means)
++ * reads what Today and Trends read.
++ */
++class VictorEffortReadersTest {
++
++    private val zone = ZoneId.systemDefault()
++
++    /** Claude puts a gym session at 55 where its heart rate said 15: the day's Effort goes up. */
++    private fun gym(day: String, n: Int = 0) = TrainingSession(
++        id = "gym-$day-$n", mode = TrainingMode.LOGGED,
++        startTs = LocalDate.parse(day).atTime(18, 0).atZone(zone).toEpochSecond(),
++        endTs = LocalDate.parse(day).atTime(19, 15).atZone(zone).toEpochSecond(),
++        sport = "Strength", description = "", exercises = emptyList(),
++        analysis = TrainingAnalysis(430.0, null, null, 263.0, "", 1L, hrStrain = 15.0, effort = 55.0),
++    )
++
++    @After
++    fun noSessions() {
++        VictorDayEffort.update(emptyList())
++    }
++
++    /** Compare and Lab Book read the series resolver: the Effort there carries the extra, other keys do not. */
++    @Test
++    fun theResolvedEffortSeriesCarriesTheExtra() = runBlocking {
++        val rows = listOf(
++            DailyMetric("my-whoop-noop", "2026-10-18", strain = 30.0, recovery = 60.0),
++            DailyMetric("my-whoop-noop", "2026-10-19", strain = 18.0, recovery = 18.0),
++        )
++        val dao = Proxy.newProxyInstance(WhoopDao::class.java.classLoader, arrayOf(WhoopDao::class.java)) { _, method, args ->
++            when (method.name) {
++                "metricSeries" -> emptyList<MetricSeriesRow>()
++                "dailyMetricsRange" -> rows.filter { it.deviceId == args!![0] }
++                else -> throw UnsupportedOperationException("resolver must not call ${method.name}")
++            }
++        } as WhoopDao
++        val repo = WhoopRepository(dao)
++        VictorDayEffort.update(listOf(gym("2026-10-19")))
++
++        val effort = repo.resolvedSeries("strain", "my-whoop", "2026-10-01", "2026-10-31").values.toMap()
++        assertEquals(30.0, effort.getValue("2026-10-18"), 0.0)
++        val merged = VictorDayEffort.apply(rows, VictorDayEffort.boosts.value)[1].strain!!
++        assertEquals(merged, effort.getValue("2026-10-19"), 1e-9)
++        assertTrue(effort.getValue("2026-10-19") > 50.0)
++        // Only the Effort: a Charge of 18 stays 18.
++        assertEquals(18.0, repo.resolvedSeries("recovery", "my-whoop", "2026-10-01", "2026-10-31").values.toMap().getValue("2026-10-19"), 0.0)
++    }
++
++    /**
++     * The widget's Effort is today's, even before today has a Charge: the carry-over to the last scored day
++     * is for what comes from the night (Charge, Rest), and yesterday's 62 must not read as today's.
++     */
++    @Test
++    fun theWidgetEffortIsTodaysWhileChargeCarriesOver() {
++        val days = listOf(
++            DailyMetric("my-whoop", "2026-10-19", recovery = 70.0, strain = 62.0, totalSleepMin = 420.0),
++            DailyMetric("my-whoop", "2026-10-20", strain = 4.0),
++        )
++        val state = NotifyDayStateCache { null }.resolve(days, "2026-10-20", "2026-10-20", illnessEnabled = false)
++        assertEquals(4, state.widgetEffort)
++        assertEquals(70, state.widgetRecovery)
++    }
++
++    /**
++     * The scheduled Fitness Age pass and the "refresh" button write the same point: the pass's fresh rows get
++     * the extra the button's merged rows already carry. Five gym days lift 18 to ~55, past the 30 that makes
++     * a day "active", so without the extra the pass would write a different age.
++     */
++    @Test
++    fun theFitnessAgePassCountsTheGymExtraLikeTheRefreshButton() {
++        val week = (13..19).map { "2026-10-$it" }
++        val dailies = week.map { DailyMetric("strap-noop", it, restingHr = 55, strain = 18.0) }
++        VictorDayEffort.update(week.take(5).map { gym(it) })
++        val profile = UserProfile(age = 26.0, sex = "male")
++
++        val written = ArrayList<MetricSeriesRow>()
++        val dao = Proxy.newProxyInstance(WhoopDao::class.java.classLoader, arrayOf(WhoopDao::class.java)) { _, method, args ->
++            when (method.name) {
++                "upsertMetricSeriesWithProvenance" -> {
++                    @Suppress("UNCHECKED_CAST")
++                    written.addAll(args!![0] as List<MetricSeriesRow>)
++                    Unit
++                }
++                "upsertMetricSeries" -> Unit
++                "appleDaily", "gravitySamples" -> emptyList<Any>()
++                "gravityWitnessInWindow" -> GravityWitness(0, 0L)
++                else -> throw UnsupportedOperationException("unexpected ${method.name}")
++            }
++        } as WhoopDao
++        val method = IntelligenceEngine::class.java.declaredMethods.single { it.name == "persistFitnessVitalityAndSteps" }
++        method.isAccessible = true
++        val continuation = object : Continuation<Unit> {
++            override val context = EmptyCoroutineContext
++            override fun resumeWith(result: Result<Unit>) = result.getOrThrow()
++        }
++        method.invoke(
++            IntelligenceEngine, WhoopRepository(dao), dailies, emptyList<DailyMetric>(), profile, "strap-noop",
++            "2026-10-19", { _: String -> }, 0L, 0L, null, listOf("strap" to 0), "strap", 1.5,
++            { _: StepsEstimateEngine.Calibration -> }, null, continuation,
++        )
++
++        fun age(rows: List<MetricSeriesRow>) = rows.single { it.key == "fitness_age" }.value
++        val withExtra = age(IntelligenceEngine.fitnessAgeRows(VictorDayEffort.apply(dailies, VictorDayEffort.boosts.value), profile, "strap-noop", "2026-10-17"))
++        val heartRateOnly = age(IntelligenceEngine.fitnessAgeRows(dailies, profile, "strap-noop", "2026-10-17"))
++        assertNotEquals(heartRateOnly, withExtra, 0.1)
++        assertEquals(withExtra, age(written), 1e-9)
++    }
++
++    /** The coach's 30-day Effort and steps means are of finished days; today's half-day stays in its table. */
++    @Test
++    fun theCoachMeansSkipTheDayInProgress() {
++        val today = LocalDate.parse(logicalDayKeyNow())
++        val days = (3 downTo 1).map { DailyMetric("my-whoop", today.minusDays(it.toLong()).toString(), strain = 50.0, steps = 10_000) } +
++            DailyMetric("my-whoop", today.toString(), strain = 5.0, steps = 500)
++        val dao = Proxy.newProxyInstance(WhoopDao::class.java.classLoader, arrayOf(WhoopDao::class.java)) { _, method, _ ->
++            throw UnsupportedOperationException("buildContext must not touch the repo (${method.name})")
++        } as WhoopDao
++        val ctx = AiCoach(WhoopRepository(dao)).buildContext(days)
++        assertTrue(ctx, ctx.contains("charge -%, effort 50, rest"))
++        assertTrue(ctx, ctx.contains("steps 10000/day"))
++        assertTrue(ctx, ctx.contains("${today}: charge -, effort 5, "))
++    }
++
++    /** Trends' week digest averages the finished days' Effort; today's half-day would drag it down. */
++    @Test
++    fun theWeekDigestEffortMeanSkipsTheDayInProgress() {
++        val today = LocalDate.parse(logicalDayKeyNow())
++        val finished = generateSequence(today.with(DayOfWeek.MONDAY)) { it.plusDays(1) }.takeWhile { it < today }.toList()
++        val days = finished.map { DailyMetric("my-whoop", it.toString(), strain = 50.0) } +
++            DailyMetric("my-whoop", today.toString(), strain = 5.0)
++        val effort = buildWeeklyDigest(days, today.toString()).metrics.single { it.metric == WeeklyMetric.EFFORT }.thisWeek
++        assertEquals(finished.size, effort.n)
++        if (finished.isNotEmpty()) assertEquals(50.0, effort.mean, 1e-9)
++    }
++}
+-- 
+2.54.0
+

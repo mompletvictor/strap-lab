@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 15:56:05 +0200
+Subject: [PATCH] fix(l10n): "Margen personal", not "Esfuerzo", on the
+ sleep-need bar
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The "Hours vs needed" bar's middle segment is need − 7 h (the 75th percentile of your nights); it never
+read the Effort. Our Spanish label now says what it is.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../app/src/main/res/values-es/strings_victor_l10n_screens.xml  | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/android/app/src/main/res/values-es/strings_victor_l10n_screens.xml b/android/app/src/main/res/values-es/strings_victor_l10n_screens.xml
+index c13eedee..e7042a63 100644
+--- a/android/app/src/main/res/values-es/strings_victor_l10n_screens.xml
++++ b/android/app/src/main/res/values-es/strings_victor_l10n_screens.xml
+@@ -881,7 +881,7 @@
+     <string name="victor_l10n_screens_sleep_metric_cards_ui_stage_light">Ligero</string>
+     <string name="victor_l10n_screens_sleep_metric_cards_ui_stages">Fases</string>
+     <string name="victor_l10n_screens_sleep_metric_cards_ui_stages_vs_typical">Fases vs lo habitual</string>
+-    <string name="victor_l10n_screens_sleep_metric_cards_ui_strain">Esfuerzo</string>
++    <string name="victor_l10n_screens_sleep_metric_cards_ui_strain">Margen personal</string>
+     <string name="victor_l10n_screens_sleep_metric_cards_ui_tile_consistency">Consistencia</string>
+     <string name="victor_l10n_screens_sleep_metric_cards_ui_tile_efficiency">Eficiencia</string>
+     <string name="victor_l10n_screens_sleep_metric_cards_ui_tile_hours_vs_needed">Horas vs necesarias</string>
+-- 
+2.54.0
+

@@ -1,0 +1,1513 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 16:53:19 +0200
+Subject: [PATCH] feat(energy): Food, the coach, the week and the workout
+ detail on the day model
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+FoodEnergy (the "largest candidate wins" resolver) and TrainingEnergy.extraKcal/extraByDay are gone;
+EnergySource with them. The food card shows the model's burn with one short tag of what it lacks (no
+steps · steps estimated · a workout without data), the workouts' share, and no burn at all without a
+profile; the balance comes from the same figure. The coach's TODAY carries the burn with its parts
+(basal, steps, workouts, after-burn, unlogged activity, digestion) and what is missing; ENERGY BALANCE
+reads whole days only; MEASURED names its kcal per kg. The week's prompt gives each workout the model's
+figure and how it was priced, and marks partly logged days. The workout detail shows the model's gross,
+the method (heart rate / Claude / MET / import / steps) and what it adds to the day; Claude's own
+estimate stays as a second line when it differs. The row keeps its kcal untouched (applyToRow takes the
+Effort only). Claude's kcal prompt: the pulse OVER-reads lifting (pressor response), Compendium 2024
+anchors (3.5 / 5.0 / 6.0 MET, HIIT 7-11), GROSS kcal; stored analyses are not re-run.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../java/com/noop/ai/VictorCoachExtras.kt     |  73 +++++---
+ .../main/java/com/noop/food/FoodDayCard.kt    |  70 ++++---
+ .../src/main/java/com/noop/food/FoodEnergy.kt | 171 ------------------
+ .../src/main/java/com/noop/food/FoodScreen.kt |  16 +-
+ .../java/com/noop/food/TodayFoodSection.kt    |   6 +-
+ .../main/java/com/noop/training/TrainingAi.kt |  16 +-
+ .../com/noop/training/TrainingAnalyzer.kt     |   9 +-
+ .../com/noop/training/TrainingCoachContext.kt |  24 ++-
+ .../noop/training/TrainingDetailSection.kt    |  48 +++--
+ .../java/com/noop/training/TrainingModels.kt  |  48 +----
+ .../main/java/com/noop/weekly/WeeklyReview.kt |  24 ++-
+ .../java/com/noop/weekly/WeeklyReviewer.kt    |  12 +-
+ .../res/values-es/strings_victor_food.xml     |  16 +-
+ .../res/values-es/strings_victor_training.xml |  12 +-
+ .../main/res/values/strings_victor_food.xml   |  16 +-
+ .../res/values/strings_victor_training.xml    |  12 +-
+ .../java/com/noop/ai/VictorCoachExtrasTest.kt |  43 +++--
+ .../test/java/com/noop/food/FoodEnergyTest.kt |  77 --------
+ .../test/java/com/noop/food/FoodLogTest.kt    |  36 +++-
+ .../java/com/noop/training/TrainingTest.kt    |  58 ++----
+ .../java/com/noop/weekly/WeeklyReviewTest.kt  |  24 ++-
+ 21 files changed, 341 insertions(+), 470 deletions(-)
+ delete mode 100644 android/app/src/main/java/com/noop/food/FoodEnergy.kt
+ delete mode 100644 android/app/src/test/java/com/noop/food/FoodEnergyTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+index f2a2791d..d55ffed6 100644
+--- a/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
++++ b/android/app/src/main/java/com/noop/ai/VictorCoachExtras.kt
+@@ -5,12 +5,14 @@ import com.noop.data.AppleDaily
+ import com.noop.data.DailyMetric
+ import com.noop.data.WhoopRepository
+ import com.noop.day.DayCoachContext
++import com.noop.energy.DayEnergy
++import com.noop.energy.DayEnergyModel
++import com.noop.energy.EnergyMissing
++import com.noop.energy.StepsSource
+ import com.noop.food.AdaptiveState
+-import com.noop.food.EnergySource
+ import com.noop.food.FoodAdaptive
+ import com.noop.food.FoodCoachContext
+ import com.noop.food.FoodDays
+-import com.noop.food.FoodEnergy
+ import com.noop.food.FoodStore
+ import com.noop.goals.VictorGoals
+ import com.noop.goals.VictorGoalsStore
+@@ -113,7 +115,7 @@ internal object VictorCoachExtras {
+                 repo.appleDaily("health-connect", today, today), today,
+             )
+         }.getOrNull()
+-        val energy = FoodEnergy.load(ctx, repo, strapId, today)
++        val energy = DayEnergyModel.day(ctx, repo, strapId, today)
+         val eaten = runCatching { FoodDays.totalsFor(FoodStore.load(ctx), today)?.kcal }.getOrNull()
+         return todayLine(today, LocalTime.now(), steps, energy, eaten)
+     }
+@@ -125,20 +127,27 @@ internal object VictorCoachExtras {
+     internal fun todaySteps(days: List<DailyMetric>, apple: List<AppleDaily>, healthConnect: List<AppleDaily>, today: String): Int? =
+         days.lastOrNull { it.day == today }?.steps ?: stepsForDay(apple, healthConnect, today)
+ 
+-    /** Pure: the TODAY line, or null when nothing about today is known yet. */
+-    internal fun todayLine(day: String, time: LocalTime, steps: Int?, energy: FoodEnergy?, eatenKcal: Double?): String? {
++    /**
++     * Pure: the TODAY line, or null when nothing about today is known yet. The burn is the day model's, with
++     * its parts in one bracket so the coach can say where it comes from, and what it lacks.
++     */
++    internal fun todayLine(day: String, time: LocalTime, steps: Int?, energy: DayEnergy?, eatenKcal: Double?): String? {
+         val parts = buildList {
+             steps?.let { add("steps $it") }
+-            energy?.let {
+-                val training = if (it.trainingKcal >= 1) ", including +${r(it.trainingKcal)} kcal from Claude's workout estimates (see TRAINING LOG)" else ""
+-                add("energy burned so far ${r(it.burnedKcal)} kcal (${sourceName(it.source)}$training)")
++            energy?.let { e ->
++                val total = e.totalKcal
++                if (total == null) {
++                    add("energy burned so far: unknown (profile incomplete: weight, height or date of birth missing)")
++                } else {
++                    add("energy burned so far ${r(total)} kcal (${breakdown(e)})")
++                }
+             }
+             if (eatenKcal != null) {
+                 add("eaten ${r(eatenKcal)} kcal (photo food log)")
+                 energy?.let { e ->
+-                    add("balance so far ${signed(e.balance(eatenKcal))} kcal")
+-                    if (e.isToday && e.dailyBasalKcal != null) {
+-                        add("if nothing more is eaten and no more exercise, the day closes at ${signed(e.projectedBalance(eatenKcal))} kcal")
++                    e.balance(eatenKcal)?.let { add("balance so far ${signed(it)} kcal") }
++                    if (e.isToday) {
++                        e.projectedBalance(eatenKcal)?.let { add("if nothing more is eaten and no more exercise, the day closes at ${signed(it)} kcal") }
+                     }
+                 }
+             }
+@@ -149,40 +158,56 @@ internal object VictorCoachExtras {
+         return "TODAY so far ($day, $clock): " + parts.joinToString("; ")
+     }
+ 
++    /** Pure: "basal 1010, steps 230, workouts 410, after-burn 49, unlogged activity 0, digestion 120; missing: steps". */
++    internal fun breakdown(e: DayEnergy): String {
++        val items = buildList {
++            e.basalKcal?.let { add("basal ${r(it)}") }
++            e.steps?.let { add("steps ${r(it.kcal)}" + if (it.source == StepsSource.ESTIMATED) " (estimated from recent days)" else "") }
++            add("workouts ${r(e.workoutsNetKcal)}")
++            add("after-burn ${r(e.epocKcal)}")
++            e.unloggedKcal?.let { add("unlogged activity ${r(it)}") }
++            e.tefKcal?.let { add("digestion ${r(it)}") }
++        }
++        val missing = e.missing.filter { it != EnergyMissing.PROFILE }.map {
++            when (it) {
++                EnergyMissing.STEPS -> "steps"
++                EnergyMissing.MEALS -> "meals (no digestion term)"
++                EnergyMissing.WORKOUT_DATA -> "a workout without heart rate or log (priced at its sport's MET)"
++                EnergyMissing.PROFILE -> "profile"
++            }
++        }
++        return items.joinToString(", ") + (if (missing.isEmpty()) "" else "; missing: " + missing.joinToString(", "))
++    }
++
+     private suspend fun weekBalanceLine(ctx: Context, repo: WhoopRepository, strapId: String, today: LocalDate): String? {
+         val entries = FoodStore.load(ctx)
+-        val energy = FoodEnergy.loadRange(ctx, repo, strapId, today.minusDays(7).toString(), today.minusDays(1).toString())
+-        val days = (1L..7L).map { today.minusDays(it).toString() }.mapNotNull { day ->
++        val complete = FoodDays.completeDays(entries)
++        val energy = DayEnergyModel.range(ctx, repo, strapId, today.minusDays(7).toString(), today.minusDays(1).toString())
++        val days = (1L..7L).map { today.minusDays(it).toString() }.filter { it in complete }.mapNotNull { day ->
+             val eaten = FoodDays.totalsFor(entries, day)?.kcal ?: return@mapNotNull null
+-            val burned = energy[day]?.burnedKcal ?: return@mapNotNull null
++            val burned = energy[day]?.totalKcal ?: return@mapNotNull null
+             Triple(day, eaten, burned)
+         }
+         return weekBalanceLine(days)
+     }
+ 
+-    /** Pure: (day, eaten, burned) for the past days that have both; null when none do. */
++    /** Pure: (day, eaten, burned) for the past COMPLETE food days that have both; null when none do. */
+     internal fun weekBalanceLine(days: List<Triple<String, Double, Double>>): String? {
+         if (days.isEmpty()) return null
+         val each = days.sortedBy { it.first }.joinToString("; ") { (d, e, b) -> "${d.substring(5)} ate ${r(e)} burned ${r(b)} (${signed(e - b)})" }
+         val avg = days.map { it.second - it.third }.average()
+-        return "ENERGY BALANCE previous 7 days (eaten − burned, days with food logged): $each; average ${signed(avg)} kcal/day"
++        return "ENERGY BALANCE previous 7 days (eaten − burned, whole logged days only): $each; average ${signed(avg)} kcal/day"
+     }
+ 
+     /** Pure: the measured-expenditure line when the history supports one. */
+     internal fun adaptiveLine(state: AdaptiveState): String? {
+         if (state !is AdaptiveState.Ready) return null
+         val e = state.estimate
+-        val app = state.appAverageKcal?.let { "; the app's own burn estimate averaged ${r(it)} kcal/day on the same days" }.orEmpty()
+-        return "MEASURED EXPENDITURE (from logged intake and the weight trend over ${e.windowDays} days, confidence " +
++        val app = state.appAverageKcal?.let { "; the day model's burn averaged ${r(it)} kcal/day on the same days" }.orEmpty()
++        return "MEASURED EXPENDITURE (from logged intake and the weight trend over ${e.windowDays} days, kcal per kg by body fat, confidence " +
+             "${e.confidence.name.lowercase()}): ~${r(e.estimatedDailyKcal)} kcal/day (${r(e.lowerKcal)}-${r(e.upperKcal)})$app"
+     }
+ 
+-    private fun sourceName(s: EnergySource) = when (s) {
+-        EnergySource.STRAP -> "strap heart-rate estimate, resting + activity"
+-        EnergySource.PHONE -> "phone total, resting + activity"
+-        EnergySource.BASAL -> "resting energy only"
+-    }
+-
+     private fun signed(v: Double): String = r(v).let { if (it > 0) "+$it" else "$it" }
+ 
+     private val HHMM = DateTimeFormatter.ofPattern("HH:mm")
+diff --git a/android/app/src/main/java/com/noop/food/FoodDayCard.kt b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
+index 4f57c2bb..f71ea167 100644
+--- a/android/app/src/main/java/com/noop/food/FoodDayCard.kt
++++ b/android/app/src/main/java/com/noop/food/FoodDayCard.kt
+@@ -16,6 +16,10 @@ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.graphics.Color
+ import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import com.noop.R
++import com.noop.energy.DayEnergy
++import com.noop.energy.DayEnergyModel
++import com.noop.energy.EnergyMissing
++import com.noop.energy.StepsSource
+ import com.noop.ingest.VictorHcRefresh
+ import com.noop.training.TrainingAnalyzer
+ import com.noop.training.TrainingStore
+@@ -33,7 +37,7 @@ import kotlin.math.abs
+ 
+ /**
+  * victor:food — one day's intake card: kcal, macros and the energy balance. Shared by the Food screen and
+- * the Today section so both show the same numbers from the same resolver ([FoodEnergy]). [kcalTarget] is
++ * the Today section so both show the same numbers from the same model ([DayEnergy]). [kcalTarget] is
+  * the daily target from the wearer's goals (VictorGoals). [onAdd] adds a button that opens the Food screen
+  * (Today only).
+  */
+@@ -41,7 +45,7 @@ import kotlin.math.abs
+ internal fun FoodDayCard(
+     totals: FoodTotals,
+     meals: Int,
+-    energy: FoodEnergy?,
++    energy: DayEnergy?,
+     title: String = uiString(R.string.victor_food_today),
+     kcalTarget: Int? = null,
+     onAdd: (() -> Unit)? = null,
+@@ -100,25 +104,29 @@ internal fun FoodDayCard(
+ }
+ 
+ /**
+- * Burned (so far, for today) and where the day stands. Today shows where it closes if nothing more is
+- * eaten; a past day shows its actual balance. With no meal logged there is no balance: nothing logged is
+- * not a fast ([balanceLine]).
++ * Burned (so far, for today) with what the model lacks, the workouts' share, and where the day stands. Today
++ * shows where it closes if nothing more is eaten; a past day shows its actual balance. With no meal logged
++ * there is no balance: nothing logged is not a fast ([balanceLine]). Without a profile there is no burn, and
++ * the line says what to fill in.
+  */
+ @Composable
+-private fun EnergyLines(intakeKcal: Double, meals: Int, energy: FoodEnergy?) {
++private fun EnergyLines(intakeKcal: Double, meals: Int, energy: DayEnergy?) {
+     energy ?: return
+     Column(verticalArrangement = Arrangement.spacedBy(Metrics.space2)) {
++        val total = energy.totalKcal
++        if (total == null) {
++            Text(uiString(R.string.victor_food_missing_profile), style = NoopType.subhead, color = Palette.metricAmber)
++            return@Column
++        }
++        val missing = missingLabel(energy)?.let { " · " + uiString(it) }.orEmpty()
+         Text(
+-            uiString(
+-                if (energy.isToday) R.string.victor_food_burned_so_far else R.string.victor_food_burned_day,
+-                whole(energy.burnedKcal),
+-                uiString(energySourceLabel(energy.source)),
+-            ),
++            uiString(if (energy.isToday) R.string.victor_food_burned_so_far else R.string.victor_food_burned_day, whole(total), missing),
+             style = NoopType.subhead,
+             color = Palette.textSecondary,
+         )
+-        if (energy.trainingKcal >= 1) {
+-            Text(uiString(R.string.victor_food_training_extra, whole(energy.trainingKcal)), style = NoopType.caption, color = Palette.textSecondary)
++        val workouts = energy.workoutsNetKcal + energy.epocKcal
++        if (workouts >= 1) {
++            Text(uiString(R.string.victor_food_workouts_kcal, whole(workouts)), style = NoopType.caption, color = Palette.textSecondary)
+         }
+         balanceLine(intakeKcal, meals, energy)?.let { (label, balance) ->
+             Text(
+@@ -131,12 +139,13 @@ private fun EnergyLines(intakeKcal: Double, meals: Int, energy: FoodEnergy?) {
+ }
+ 
+ /**
+- * Pure: the balance line's text and kcal (negative = deficit), or null with no meal logged, as the coach
+- * leaves it out then too: "if you eat nothing more, a deficit of 1,800" reads as a fast, not as nothing logged.
++ * Pure: the balance line's text and kcal (negative = deficit), or null with no meal logged (as the coach
++ * leaves it out then too: "if you eat nothing more, a deficit of 1,800" reads as a fast, not as nothing
++ * logged) or with no burn to balance against.
+  */
+-internal fun balanceLine(intakeKcal: Double, meals: Int, energy: FoodEnergy): Pair<Int, Double>? {
++internal fun balanceLine(intakeKcal: Double, meals: Int, energy: DayEnergy): Pair<Int, Double>? {
+     if (meals == 0) return null
+-    val balance = if (energy.isToday) energy.projectedBalance(intakeKcal) else energy.balance(intakeKcal)
++    val balance = (if (energy.isToday) energy.projectedBalance(intakeKcal) else energy.balance(intakeKcal)) ?: return null
+     val label = when {
+         energy.isToday && balance < 0 -> R.string.victor_food_projected_deficit
+         energy.isToday -> R.string.victor_food_projected_surplus
+@@ -147,9 +156,21 @@ internal fun balanceLine(intakeKcal: Double, meals: Int, energy: FoodEnergy): Pa
+ }
+ 
+ /**
+- * victor:food — what a day's burn ([FoodEnergy], [FoodAdaptive]) is read from besides the food log: the strap's
+- * day rows (a sync recomputes them), the full Health Connect import, the two-day refresh and the workout
+- * analyses. Every card that loads them keys on this, so its figures follow a sync without leaving the screen.
++ * Pure: the one short thing the burn lacks, or null when it is complete. Meals are not named here (the card
++ * shows them); the profile is handled by the caller (no burn at all).
++ */
++internal fun missingLabel(energy: DayEnergy): Int? = when {
++    energy.steps?.source == StepsSource.ESTIMATED -> R.string.victor_food_steps_estimated
++    EnergyMissing.STEPS in energy.missing -> R.string.victor_food_missing_steps
++    EnergyMissing.WORKOUT_DATA in energy.missing -> R.string.victor_food_workout_nodata
++    else -> null
++}
++
++/**
++ * victor:food — what a day's burn ([DayEnergyModel], [FoodAdaptive]) is read from besides the food log: the
++ * strap's day rows (a sync recomputes them), the full Health Connect import, the two-day refresh, the workout
++ * analyses and the model's own version (a meal, a session, a reset). Every card that loads them keys on this,
++ * so its figures follow a sync without leaving the screen.
+  */
+ @Composable
+ internal fun energyInputs(vm: AppViewModel): List<Any?> {
+@@ -158,13 +179,8 @@ internal fun energyInputs(vm: AppViewModel): List<Any?> {
+     val hcRefresh by VictorHcRefresh.version.collectAsStateWithLifecycle()
+     val sessions by TrainingStore.sessions.collectAsStateWithLifecycle()
+     val rows by TrainingAnalyzer.rowsChanged.collectAsStateWithLifecycle()
+-    return listOf(days, hcImport, hcRefresh, sessions, rows)
+-}
+-
+-internal fun energySourceLabel(source: EnergySource): Int = when (source) {
+-    EnergySource.STRAP -> R.string.victor_food_source_strap
+-    EnergySource.PHONE -> R.string.victor_food_source_phone
+-    EnergySource.BASAL -> R.string.victor_food_source_basal
++    val energy by DayEnergyModel.version.collectAsStateWithLifecycle()
++    return listOf(days, hcImport, hcRefresh, sessions, rows, energy)
+ }
+ 
+ @Composable
+diff --git a/android/app/src/main/java/com/noop/food/FoodEnergy.kt b/android/app/src/main/java/com/noop/food/FoodEnergy.kt
+deleted file mode 100644
+index ddb2af22..00000000
+--- a/android/app/src/main/java/com/noop/food/FoodEnergy.kt
++++ /dev/null
+@@ -1,171 +0,0 @@
+-package com.noop.food
+-
+-import android.content.Context
+-import com.noop.analytics.Calories
+-import com.noop.data.WhoopRepository
+-import com.noop.ingest.ScaleImport
+-import com.noop.training.TrainingEnergy
+-import com.noop.training.TrainingStore
+-import com.noop.ui.ProfileStore
+-import java.time.LocalDate
+-import java.time.LocalTime
+-import java.time.ZoneId
+-
+-/** victor:food — where a day's energy-out figure came from. */
+-internal enum class EnergySource {
+-    /** NOOP's on-device heart-rate estimate (resting + activity, Keytel), from the strap. */
+-    STRAP,
+-    /** The phone's own total (Samsung Health / Apple: active + resting), imported by Health Connect. */
+-    PHONE,
+-    /** Only the resting energy is known (no strap or phone figure for the day). */
+-    BASAL,
+-}
+-
+-/**
+- * victor:food — energy OUT for one day, so the food log can show a balance (eaten − burned). One
+- * resolver for every surface that shows it (the Food screen, the Today card and the AI Coach), so they
+- * can never disagree.
+- *
+- * Every candidate is a TOTAL (resting + activity), never a part that something else is added to: the
+- * strap's figure (`active_kcal`, upstream's DailyMetric.activeKcalEst) is already resting + activity, so
+- * adding a basal to it would count the resting energy twice. Of the candidates, the highest wins: each
+- * one only ever misses energy (the strap misses the hours it was off the wrist, the phone misses gym work
+- * it cannot see in steps), so the largest is the most complete picture of the day.
+- */
+-internal data class FoodEnergy(
+-    /** Burned so far today, or the whole day for a past day. */
+-    val burnedKcal: Double,
+-    val source: EnergySource,
+-    /** Resting energy for a whole day (kcal/day), used to project today; null when unknown. */
+-    val dailyBasalKcal: Double?,
+-    /** 1.0 for a past day, the elapsed share of today otherwise. */
+-    val dayFraction: Double,
+-    /** victor:training — part of [burnedKcal]: what Claude's workout estimates add above the heart-rate model. */
+-    val trainingKcal: Double = 0.0,
+-) {
+-    val isToday: Boolean get() = dayFraction < 1.0
+-
+-    /**
+-     * What today will have burned by midnight: so far, plus the rest of the day at rest. It assumes no
+-     * more exercise, so a later workout only makes the real deficit bigger.
+-     */
+-    val projectedKcal: Double
+-        get() = if (!isToday || dailyBasalKcal == null) burnedKcal else burnedKcal + dailyBasalKcal * (1.0 - dayFraction)
+-
+-    /** Eaten minus burned so far; negative is a deficit. */
+-    fun balance(intakeKcal: Double): Double = intakeKcal - burnedKcal
+-
+-    /** Eaten minus the end-of-day burn: where the day closes if nothing more is eaten. */
+-    fun projectedBalance(intakeKcal: Double): Double = intakeKcal - projectedKcal
+-
+-    companion object {
+-        /**
+-         * Pure: pick the day's total. [strapTotalKcal] and the phone figures are what each source has for
+-         * the day so far; [dailyBasalKcal] is a whole day's resting energy (scale BMR, else the profile's).
+-         * [trainingKcal] (victor:training) is what the day's workout estimates add over what any candidate
+-         * already holds for those windows ([com.noop.training.TrainingEnergy]), so it adds to each of them.
+-         * Null when nothing is known.
+-         */
+-        fun resolve(
+-            strapTotalKcal: Double?,
+-            phoneActiveKcal: Double?,
+-            phoneBasalKcal: Double?,
+-            dailyBasalKcal: Double?,
+-            dayFraction: Double,
+-            trainingKcal: Double = 0.0,
+-        ): FoodEnergy? {
+-            val f = dayFraction.coerceIn(0.0, 1.0)
+-            val basal = dailyBasalKcal?.takeIf { it > 0 }
+-            val strap = strapTotalKcal?.takeIf { it > 0 }
+-            val active = phoneActiveKcal?.takeIf { it > 0 }
+-            val phoneBasal = phoneBasalKcal?.takeIf { it > 0 }
+-            val phone = when {
+-                active != null && phoneBasal != null -> active + phoneBasal
+-                active != null && basal != null -> active + basal * f
+-                else -> phoneBasal
+-            }
+-            val best = listOfNotNull(
+-                strap?.let { it to EnergySource.STRAP },
+-                phone?.let { it to EnergySource.PHONE },
+-                basal?.let { it * f to EnergySource.BASAL },
+-            ).filter { it.first > 0 }.maxByOrNull { it.first } ?: return null
+-            val training = trainingKcal.takeIf { it.isFinite() && it > 0 } ?: 0.0
+-            return FoodEnergy(best.first + training, best.second, basal, f, training)
+-        }
+-
+-        /** Share of [day] elapsed at [now]: 1.0 for any past day. */
+-        fun dayFraction(day: String, now: LocalDate = LocalDate.now(), time: LocalTime = LocalTime.now()): Double =
+-            if (day < now.toString()) 1.0 else time.toSecondOfDay() / 86_400.0
+-
+-        /** A whole day's resting energy from the profile, with the same formula the strap's estimate uses. */
+-        internal fun profileBasalKcal(sex: String, weightKg: Double, heightCm: Double, age: Int): Double? {
+-            if (weightKg <= 0 || heightCm <= 0 || age <= 0) return null
+-            return (Calories.restingKcalPerS(Calories.resolveCoeffs(sex), weightKg, heightCm, age.toDouble()) * 86_400.0)
+-                .takeIf { it > 0 }
+-        }
+-
+-        /**
+-         * A whole day's resting energy: the smart scale's BMR, else the profile's. The one figure the balance,
+-         * the workout detail and the coach use for a session's resting share.
+-         */
+-        suspend fun dailyBasal(ctx: Context, repo: WhoopRepository): Double? =
+-            runCatching { ScaleImport.snapshot(repo)?.bmr?.value }.getOrNull()?.takeIf { it > 0 }
+-                ?: runCatching {
+-                    val p = ProfileStore.from(ctx)
+-                    profileBasalKcal(p.sex, p.weightKg, p.heightCm, p.age)
+-                }.getOrNull()
+-
+-        /** Read the day's energy. Best-effort: a failed read just leaves its candidate out. */
+-        suspend fun load(ctx: Context, repo: WhoopRepository, strapId: String, day: String): FoodEnergy? =
+-            loadRange(ctx, repo, strapId, day, day)[day]
+-
+-        /**
+-         * Every day from [from] to [to] (inclusive, "yyyy-MM-dd") in three reads rather than three per day,
+-         * for the history charts. Days with nothing known are absent.
+-         */
+-        suspend fun loadRange(ctx: Context, repo: WhoopRepository, strapId: String, from: String, to: String): Map<String, FoodEnergy> {
+-            val phoneRows = runCatching {
+-                repo.appleDaily("apple-health", from, to) + repo.appleDaily("health-connect", from, to)
+-            }.getOrDefault(emptyList())
+-            val phoneActive = HashMap<String, Double>()
+-            val phoneBasal = HashMap<String, Double>()
+-            for (r in phoneRows) {
+-                r.activeKcal?.takeIf { it > 0 }?.let { phoneActive.putIfAbsent(r.day, it) }
+-                r.basalKcal?.takeIf { it > 0 }?.let { phoneBasal.putIfAbsent(r.day, it) }
+-            }
+-            val strap = runCatching {
+-                repo.resolvedSeries("active_kcal", "my-whoop", from, to, strapDeviceId = strapId)
+-                    .points.filter { it.value > 0 }.associate { it.day to it.value }
+-            }.getOrDefault(emptyMap())
+-            val basal = dailyBasal(ctx, repo)
+-            val training = runCatching { trainingExtra(ctx, repo, strapId, from, to, basal) }.getOrDefault(emptyMap())
+-            val today = LocalDate.now(ZoneId.systemDefault())
+-            val out = LinkedHashMap<String, FoodEnergy>()
+-            var d = LocalDate.parse(from)
+-            val last = LocalDate.parse(to)
+-            while (!d.isAfter(last)) {
+-                val key = d.toString()
+-                resolve(strap[key], phoneActive[key], phoneBasal[key], basal, dayFraction(key, today), training[key] ?: 0.0)?.let { out[key] = it }
+-                d = d.plusDays(1)
+-            }
+-            return out
+-        }
+-
+-        /** victor:training — per day, what the analysed workouts from [from] to [to] add. */
+-        private suspend fun trainingExtra(
+-            ctx: Context,
+-            repo: WhoopRepository,
+-            strapId: String,
+-            from: String,
+-            to: String,
+-            basal: Double?,
+-        ): Map<String, Double> {
+-            val zone = ZoneId.systemDefault()
+-            val fromS = LocalDate.parse(from).atStartOfDay(zone).toEpochSecond()
+-            val toS = LocalDate.parse(to).plusDays(1).atStartOfDay(zone).toEpochSecond()
+-            val sessions = TrainingStore.load(ctx).filter { it.analysis != null && it.startTs in fromS until toS }
+-            if (sessions.isEmpty()) return emptyMap()
+-            return TrainingEnergy.extraByDay(sessions, repo.workoutsUnion(strapId, fromS, toS), basal, zone)
+-        }
+-    }
+-}
+diff --git a/android/app/src/main/java/com/noop/food/FoodScreen.kt b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+index 95607b3e..a9d0582c 100644
+--- a/android/app/src/main/java/com/noop/food/FoodScreen.kt
++++ b/android/app/src/main/java/com/noop/food/FoodScreen.kt
+@@ -61,6 +61,8 @@ import androidx.core.content.FileProvider
+ import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import androidx.lifecycle.viewmodel.compose.viewModel
+ import com.noop.R
++import com.noop.energy.DayEnergy
++import com.noop.energy.DayEnergyModel
+ import com.noop.goals.VictorGoalsStore
+ import com.noop.training.ScoreBadge
+ import com.noop.training.scoreColor
+@@ -123,8 +125,8 @@ fun FoodScreen(vm: AppViewModel, onOpenCoach: () -> Unit) {
+     // when the strap syncs, an import ends or a workout is analysed ([energyInputs]).
+     LaunchedEffect(Unit) { VictorHcRefresh.refresh(ctx, vm.repo) }
+     val inputs = energyInputs(vm)
+-    val energy by produceState<FoodEnergy?>(null, today, entries, inputs) {
+-        value = withContext(Dispatchers.IO) { runCatching { FoodEnergy.load(ctx, vm.repo, vm.activeStrapId, today) }.getOrNull() }
++    val energy by produceState<DayEnergy?>(null, today, entries, inputs) {
++        value = withContext(Dispatchers.IO) { runCatching { DayEnergyModel.day(ctx, vm.repo, vm.activeStrapId, today) }.getOrNull() }
+     }
+     val adaptive by produceState<AdaptiveState?>(null, entries, inputs) {
+         value = withContext(Dispatchers.IO) { runCatching { FoodAdaptive.load(ctx, vm.repo, vm.activeStrapId) }.getOrNull() }
+@@ -326,8 +328,8 @@ private fun DayCard(
+     val ctx = LocalContext.current
+     val t = FoodTotals.ofEntries(entries)
+     val inputs = energyInputs(vm)
+-    val energy by produceState<FoodEnergy?>(null, day, t.kcal, inputs) {
+-        value = withContext(Dispatchers.IO) { runCatching { FoodEnergy.load(ctx, vm.repo, vm.activeStrapId, day) }.getOrNull() }
++    val energy by produceState<DayEnergy?>(null, day, t.kcal, inputs) {
++        value = withContext(Dispatchers.IO) { runCatching { DayEnergyModel.day(ctx, vm.repo, vm.activeStrapId, day) }.getOrNull() }
+     }
+     NoopCard {
+         Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
+@@ -336,10 +338,10 @@ private fun DayCard(
+                 Text("${whole(t.kcal)} ${uiString(R.string.victor_food_kcal)}", style = NoopType.bodyNumber, color = Palette.textPrimary)
+             }
+             Text(macrosLine(t), style = NoopType.caption, color = Palette.textSecondary)
+-            energy?.let { e ->
+-                val b = e.balance(t.kcal)
++            energy?.totalKcal?.let { burned ->
++                val b = t.kcal - burned
+                 Text(
+-                    uiString(if (b < 0) R.string.victor_food_day_deficit else R.string.victor_food_day_surplus, whole(e.burnedKcal), whole(abs(b))),
++                    uiString(if (b < 0) R.string.victor_food_day_deficit else R.string.victor_food_day_surplus, whole(burned), whole(abs(b))),
+                     style = NoopType.subhead,
+                     color = if (b < 0) Palette.chargeColor else Palette.metricAmber,
+                 )
+diff --git a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+index 7348b546..899c04e8 100644
+--- a/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
++++ b/android/app/src/main/java/com/noop/food/TodayFoodSection.kt
+@@ -9,6 +9,8 @@ import androidx.compose.runtime.produceState
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import com.noop.R
++import com.noop.energy.DayEnergy
++import com.noop.energy.DayEnergyModel
+ import com.noop.goals.VictorGoalsStore
+ import com.noop.ui.AppViewModel
+ import com.noop.ui.Metrics
+@@ -34,8 +36,8 @@ internal fun TodayFoodSection(vm: AppViewModel, onOpenFood: () -> Unit) {
+     }
+     // A strap sync, a Health Connect import or refresh, or a workout analysis reloads the burn.
+     val inputs = energyInputs(vm)
+-    val energy by produceState<FoodEnergy?>(null, today, entries, inputs) {
+-        value = withContext(Dispatchers.IO) { runCatching { FoodEnergy.load(ctx, vm.repo, vm.activeStrapId, today) }.getOrNull() }
++    val energy by produceState<DayEnergy?>(null, today, entries, inputs) {
++        value = withContext(Dispatchers.IO) { runCatching { DayEnergyModel.day(ctx, vm.repo, vm.activeStrapId, today) }.getOrNull() }
+     }
+     val todays = entries.filter { it.day == today }
+     Column(verticalArrangement = Arrangement.spacedBy(Metrics.space16)) {
+diff --git a/android/app/src/main/java/com/noop/training/TrainingAi.kt b/android/app/src/main/java/com/noop/training/TrainingAi.kt
+index 5f7a4054..f386487f 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingAi.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingAi.kt
+@@ -350,12 +350,16 @@ object TrainingAi {
+     ): String = buildString {
+         append("Estimate the energy this person spent in this workout session.\n")
+         append("Use the exercises with their sets, reps and loads, the session's duration (rest between sets included), ")
+-        append("the body data and the strap's heart rate. Ground it in standard references: the Compendium of Physical ")
+-        append("Activities METs and measured energy costs of resistance training. Heart-rate models (the strap's figure below) ")
+-        append("UNDER-estimate resistance training, where efforts are short and partly anaerobic and EPOC follows; for steady ")
+-        append("cardio the heart-rate figure is usually the best one. Account for body weight in body-weight exercises, and for ")
+-        append("both dumbbells where the load is given per dumbbell.\n")
+-        append("Return total_kcal (gross: the whole session including the resting metabolism during it), low_kcal and ")
++        append("the body data and the strap's heart rate. Ground it in the Compendium of Physical Activities 2024 and the ")
++        append("measured energy cost of resistance training: resistance training with multiple exercises, 8-15 reps, is about ")
++        append("3.5 MET over the session; heavy compound lifts (squat, deadlift) about 5.0 MET; vigorous lifting, circuits or ")
++        append("supersets with short rests about 6.0 MET; HIIT 7-11 MET (1 MET = 1 kcal per kg of body weight per hour). ")
++        append("Heart-rate models (the strap's Keytel figure below) OVER-estimate lifting: the pressor response raises the ")
++        append("heart rate well above the oxygen cost, so on a session of sets and rests a heart-rate figure can be near ")
++        append("double the measured one; the anaerobic share and the after-burn are small over a whole session (a few ")
++        append("percent, and tens of kcal). For steady cardio the heart-rate figure is usually the best one. Account for body ")
++        append("weight in body-weight exercises, and for both dumbbells where the load is given per dumbbell.\n")
++        append("Return total_kcal (GROSS: the whole session including the resting metabolism during it), low_kcal and ")
+         append("high_kcal (a plausible range), and notes: ONE short sentence in Spanish (Spain), at most 20 words, saying what ")
+         append("drove the figure, without repeating the numbers back. It is read on a phone: no caveats, no methodology.\n")
+         append("Also score the session: score, an integer 0-10, how good and healthy this workout was for this person today: a ")
+diff --git a/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
+index 25395d18..c77530e0 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
+@@ -104,15 +104,16 @@ object TrainingAnalyzer {
+ 
+     /**
+      * A later rewrite of the workout row (upstream's rescore of a fresh manual workout, a sync) can put back the
+-     * heart-rate-only figures; the session's analysis is applied again, locally, without asking Claude.
++     * heart-rate-only Effort; the session's analysis is applied again, locally, without asking Claude.
+      */
+     private suspend fun reapply(app: NoopApplication, strapId: String, s: TrainingSession) {
+         val analysis = s.analysis ?: return
+         val end = s.endTs ?: return
+         val row = runCatching { app.repository.workoutsUnion(strapId, s.startTs - 1, end + 1).firstOrNull { s.pairs(it) } }.getOrNull() ?: return
+         val fixed = TrainingEnergy.applyToRow(row, analysis, row.avgHr, row.maxHr)
+-        // Only ever raised back: a row already at (or above) the session's figures is left alone.
+-        val behind = (row.energyKcal ?: 0.0) < (fixed.energyKcal ?: 0.0) - 0.5 || (row.strain ?: 0.0) < (fixed.strain ?: 0.0) - 0.05
++        // Only ever raised back: a row already at (or above) the session's Effort is left alone. Its kcal is
++        // not the row's business any more (the day model prices the lists).
++        val behind = (row.strain ?: 0.0) < (fixed.strain ?: 0.0) - 0.05
+         if (behind) {
+             runCatching { app.repository.upsertWorkouts(listOf(fixed)) }
+             _rowsChanged.update { it + 1 }
+@@ -175,7 +176,7 @@ object TrainingAnalyzer {
+                     )
+                     TrainingStore.edit(ctx, sessionId) { it.copy(analysis = analysis) }
+                     failedAt.remove(sessionId)
+-                    // The workout itself shows the session's figures (list, detail, totals), not only this log.
++                    // The workout row takes the session's Effort (its kcal comes from the day model, victor:energy).
+                     runCatching {
+                         val row = repo.workoutsUnion(strapId, session.startTs - 1, end + 1).firstOrNull { session.pairs(it) }
+                         if (row != null) repo.upsertWorkouts(listOf(TrainingEnergy.applyToRow(row, analysis, scored?.avgHr, scored?.maxHr)))
+diff --git a/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt b/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
+index 4db03e53..f52b4034 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingCoachContext.kt
+@@ -3,6 +3,9 @@ package com.noop.training
+ import android.content.Context
+ import com.noop.data.WhoopRepository
+ import com.noop.data.WorkoutRow
++import com.noop.energy.DayEnergyModel
++import com.noop.energy.WorkoutEnergy
++import com.noop.energy.WorkoutKey
+ import java.time.Instant
+ import java.time.ZoneId
+ import java.time.format.DateTimeFormatter
+@@ -11,8 +14,8 @@ import kotlin.math.roundToInt
+ 
+ /**
+  * victor:training — the TRAINING LOG line for the AI Coach: the last two weeks of workouts with an exercise
+- * log, each with its sets as performed, heart rate (whole session and, when ticked live, per exercise) and
+- * Claude's energy estimate beside the strap's heart-rate figure. Only sessions whose workout still exists.
++ * log, each with its sets as performed, heart rate (whole session and, when ticked live, per exercise),
++ * Claude's energy estimate and what the day model counts for it. Only sessions whose workout still exists.
+  */
+ internal object TrainingCoachContext {
+ 
+@@ -28,16 +31,17 @@ internal object TrainingCoachContext {
+         val perExercise = sessions.associate { s ->
+             s.id to runCatching { TrainingHr.perExercise(s, repo.hrSamplesUnion(strapId, s.startTs, s.endTs ?: s.startTs)) }.getOrDefault(emptyMap())
+         }
+-        return line(TrainingEnergy.onePerWorkout(sessions), rows, perExercise, zone, com.noop.food.FoodEnergy.dailyBasal(ctx, repo))
++        val energy = runCatching { DayEnergyModel.workouts(ctx, repo, strapId, rows) }.getOrDefault(emptyMap())   // victor:energy
++        return line(TrainingEnergy.onePerWorkout(sessions), rows, perExercise, zone, energy)
+     }
+ 
+-    /** Pure: newest first; null when no session pairs with a stored workout. */
++    /** Pure: newest first; null when no session pairs with a stored workout. [energy]: the day model's figure per row. */
+     internal fun line(
+         sessions: List<TrainingSession>,
+         rows: List<WorkoutRow>,
+         perExercise: Map<String, Map<Int, TrainingHr.Stat>>,
+         zone: ZoneId,
+-        dailyBasalKcal: Double? = null,
++        energy: Map<WorkoutKey, WorkoutEnergy> = emptyMap(),
+     ): String? {
+         val parts = sessions.sortedByDescending { it.startTs }.mapNotNull { s ->
+             val row = rows.firstOrNull { s.pairs(it) } ?: return@mapNotNull null
+@@ -52,16 +56,18 @@ internal object TrainingCoachContext {
+             val hr = listOfNotNull(
+                 row.avgHr?.let { "HR avg $it" },
+                 row.maxHr?.let { "max $it" },
+-                (s.analysis?.hrKcal ?: row.energyKcal.takeIf { s.analysis == null })?.let { "strap HR estimate ${it.roundToInt()} kcal" },
+             ).joinToString(", ")
++            // The day model's figure for the window: what the day's burn and every list carry.
++            val model = energy[WorkoutKey.of(row)]?.let { e ->
++                "the day counts ${e.grossKcal.roundToInt()} kcal (${e.method.englishName}), adding ${(e.netKcal + e.epocKcal).roundToInt()} kcal above resting, after-burn included"
++            }
+             val ai = s.analysis?.let { a ->
+-                val extra = TrainingEnergy.extraKcal(a.totalKcal, a.hrKcal, row.durationS ?: (row.endTs - row.startTs).toDouble(), dailyBasalKcal)
+-                "Claude estimate ${a.totalKcal.roundToInt()} kcal" + (if (extra >= 1) " (adds ~${extra.roundToInt()} kcal to the day's burn)" else "") +
++                "Claude estimate ${a.totalKcal.roundToInt()} kcal" +
+                     (a.effort?.let { e -> "; effort with muscular load ${e.roundToInt()}/100" + a.hrStrain?.let { h -> " (heart rate alone ${h.roundToInt()})" }.orEmpty() }.orEmpty()) +
+                     (a.score?.let { s -> "; session score $s/10" + a.scoreNote.takeIf { it.isNotBlank() }?.let { " («$it»)" }.orEmpty() }.orEmpty())
+             }
+             "${start.toLocalDate()} ${start.format(HHMM)}-${end.format(HHMM)} ${row.sport} ($how): $exercises" +
+-                listOfNotNull(hr.ifEmpty { null }, ai).joinToString("") { " | $it" }
++                listOfNotNull(hr.ifEmpty { null }, model, ai).joinToString("") { " | $it" }
+         }
+         if (parts.isEmpty()) return null
+         return "TRAINING LOG last $DAYS days (sets x reps · load; user-described, newest first): " + parts.joinToString(" || ")
+diff --git a/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt b/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
+index 958e997e..5cd0dfd0 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingDetailSection.kt
+@@ -29,6 +29,10 @@ import androidx.compose.ui.platform.LocalContext
+ import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import com.noop.R
+ import com.noop.data.WorkoutRow
++import com.noop.energy.DayEnergyModel
++import com.noop.energy.EnergyMethod
++import com.noop.energy.WorkoutEnergy
++import com.noop.energy.WorkoutKey
+ import com.noop.ui.AppViewModel
+ import com.noop.ui.Metrics
+ import com.noop.ui.NoopButton
+@@ -46,9 +50,9 @@ import kotlin.math.roundToInt
+ 
+ /**
+  * victor:training — the exercises of a workout inside its detail sheet: the sets performed, heart rate per
+- * exercise when they were ticked live, and Claude's energy estimate beside the strap's heart-rate figure
+- * (with what it adds to the day). Renders nothing for a workout without an exercise log. Hooked by one
+- * line in WorkoutDetailSheet.
++ * exercise when they were ticked live, the day model's figure for the session (how it was priced, what it
++ * adds to the day) and Claude's own estimate. Renders nothing for a workout without an exercise log. Hooked
++ * by one line in WorkoutDetailSheet.
+  */
+ @OptIn(ExperimentalMaterial3Api::class)
+ @Composable
+@@ -73,8 +77,14 @@ fun TrainingDetailSection(vm: AppViewModel, row: WorkoutRow) {
+         }
+     }
+     var editing by remember { mutableStateOf(false) }
+-    // The same resting share the energy balance takes off, so "adds X to the day" matches Food.
+-    val basal by produceState<Double?>(null) { value = withContext(Dispatchers.IO) { com.noop.food.FoodEnergy.dailyBasal(ctx, vm.repo) } }
++    // victor:energy — the day model's figure for this window: the same one the list, Food and the coach carry.
++    // Re-read when a session is saved or analysed, a row rewritten, or the model's inputs change.
++    val energyVersion by DayEnergyModel.version.collectAsStateWithLifecycle()
++    val energy by produceState<WorkoutEnergy?>(null, row, sessions, rowsChanged, energyVersion) {
++        value = withContext(Dispatchers.IO) {
++            runCatching { DayEnergyModel.workouts(ctx, vm.repo, vm.activeStrapId, listOf(row))[WorkoutKey.of(row)] }.getOrNull()
++        }
++    }
+ 
+     SettingsRowDivider()
+     Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
+@@ -99,18 +109,23 @@ fun TrainingDetailSection(vm: AppViewModel, row: WorkoutRow) {
+                 Text(uiString(R.string.victor_training_estimating), style = NoopType.subhead, color = Palette.textSecondary)
+             }
+             a != null -> {
+-                val range = if (a.lowKcal != null && a.highKcal != null) " (${a.lowKcal.roundToInt()}–${a.highKcal.roundToInt()})" else ""
+-                Text(uiString(R.string.victor_training_ai_kcal, a.totalKcal.roundToInt(), range), style = NoopType.headline, color = Palette.textPrimary)
+-                val hr = a.hrKcal
+-                if (hr != null) {
+-                    val extra = TrainingEnergy.extraKcal(a.totalKcal, hr, row.durationS ?: (row.endTs - row.startTs).toDouble(), basal)
++                energy?.let { e ->
++                    Text(
++                        uiString(R.string.victor_training_model_kcal, e.grossKcal.roundToInt(), uiString(methodLabel(e.method))),
++                        style = NoopType.headline,
++                        color = Palette.textPrimary,
++                    )
+                     Text(
+-                        if (extra > 0) uiString(R.string.victor_training_hr_kcal_extra, hr.roundToInt(), extra.roundToInt())
+-                        else uiString(R.string.victor_training_hr_kcal, hr.roundToInt()),
++                        uiString(R.string.victor_training_adds_day, (e.netKcal + e.epocKcal).roundToInt()),
+                         style = NoopType.subhead,
+                         color = Palette.textSecondary,
+                     )
+                 }
++                // Claude's own figure, when it is not simply the one above.
++                if (energy == null || energy!!.method != EnergyMethod.CLAUDE || kotlin.math.abs(energy!!.grossKcal - a.totalKcal) >= 1.0) {
++                    val range = if (a.lowKcal != null && a.highKcal != null) " (${a.lowKcal.roundToInt()}–${a.highKcal.roundToInt()})" else ""
++                    Text(uiString(R.string.victor_training_ai_kcal, a.totalKcal.roundToInt(), range), style = NoopType.subhead, color = Palette.textSecondary)
++                }
+                 a.effort?.let { e ->
+                     val scale = UnitPrefs.effortScale(ctx)
+                     Text(
+@@ -188,3 +203,12 @@ fun TrainingDetailSection(vm: AppViewModel, row: WorkoutRow) {
+         }
+     }
+ }
++
++/** The short label of how the day model priced a window. */
++internal fun methodLabel(method: EnergyMethod): Int = when (method) {
++    EnergyMethod.HEART_RATE -> R.string.victor_training_method_hr
++    EnergyMethod.CLAUDE -> R.string.victor_training_method_claude
++    EnergyMethod.MET -> R.string.victor_training_method_met
++    EnergyMethod.EXTERNAL -> R.string.victor_training_method_external
++    EnergyMethod.STEPS -> R.string.victor_training_method_steps
++}
+diff --git a/android/app/src/main/java/com/noop/training/TrainingModels.kt b/android/app/src/main/java/com/noop/training/TrainingModels.kt
+index 11481021..2892721b 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingModels.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingModels.kt
+@@ -196,43 +196,13 @@ object TrainingHr {
+ }
+ 
+ /**
+- * Pure: what a session's Claude estimate adds to the day's energy out. Every energy-out candidate of the
+- * day (strap, phone, resting) already holds this window at some rate: the strap's heart-rate model
+- * (the workout row's own kcal is that model for the window) or at least the resting rate. Only the part of
+- * Claude's figure above the larger of the two is new, so nothing is counted twice; a heart-rate figure
+- * above Claude's (steady cardio) adds nothing.
++ * Pure: the session-to-row glue. A session's ENERGY is priced by the day model (`com.noop.energy`), which
++ * reads the analysis straight from the store and gives every list the same figure ([com.noop.energy.EnergyRows]);
++ * the row's own heart-rate kcal is left as upstream wrote it. What the row does take from the session is its
++ * Effort, which has no model of its own, and the freshly scored heart rate.
+  */
+ object TrainingEnergy {
+ 
+-    fun extraKcal(aiTotalKcal: Double, hrKcal: Double?, durationS: Double, dailyBasalKcal: Double?): Double {
+-        if (!aiTotalKcal.isFinite() || aiTotalKcal <= 0.0) return 0.0
+-        val resting = (dailyBasalKcal ?: 0.0).coerceAtLeast(0.0) * durationS.coerceAtLeast(0.0) / 86_400.0
+-        val counted = maxOf(hrKcal?.takeIf { it.isFinite() } ?: 0.0, resting)
+-        return (aiTotalKcal - counted).coerceAtLeast(0.0)
+-    }
+-
+-    /**
+-     * Per local day: the extra of every analysed session whose workout still exists (a deleted workout
+-     * takes its session's energy with it). The heart-rate figure is the analysis's own: the row carries the
+-     * best estimate ([applyToRow]), and the analysis is re-run when more of the strap's heart rate arrives.
+-     */
+-    fun extraByDay(
+-        sessions: List<TrainingSession>,
+-        rows: List<WorkoutRow>,
+-        dailyBasalKcal: Double?,
+-        zone: ZoneId = ZoneId.systemDefault(),
+-    ): Map<String, Double> {
+-        val out = HashMap<String, Double>()
+-        for (s in onePerWorkout(sessions)) {
+-            val a = s.analysis ?: continue
+-            val row = rows.firstOrNull { s.pairs(it) } ?: continue
+-            val duration = row.durationS ?: (row.endTs - row.startTs).toDouble()
+-            val extra = extraKcal(a.totalKcal, a.hrKcal, duration, dailyBasalKcal)
+-            if (extra > 0) out.merge(s.day(zone), extra, Double::plus)
+-        }
+-        return out
+-    }
+-
+     /**
+      * Whether an analysis that saw [seenSamples] heart-rate samples (null = never analysed) should run again
+      * now that the window holds [nowSamples]: never analysed, or a quarter more and at least a minute more.
+@@ -254,14 +224,12 @@ object TrainingEnergy {
+             .map { (_, same) -> same.maxBy { it.analysis?.atMs ?: 0L } } + sessions.filter { it.isLive }
+ 
+     /**
+-     * The workout row with the session's figures from its latest analysis, so the Workouts list, its detail
+-     * and every total show them: energy = the larger of Claude's estimate and the heart-rate one, Effort = the
+-     * larger of Claude's (with muscular load) and the heart-rate one, heart rate as freshly scored. A figure
+-     * the analysis lacks keeps the row's.
++     * The workout row with the session's Effort from its latest analysis (the larger of Claude's, with the
++     * muscular load, and the heart-rate one) and the heart rate as freshly scored. The kcal stays: the
++     * lists show the day model's figure, not a row value.
+      */
+     fun applyToRow(row: WorkoutRow, a: TrainingAnalysis, avgHr: Int?, maxHr: Int?): WorkoutRow {
+-        val kcal = listOfNotNull(a.totalKcal.takeIf { it > 0 }, a.hrKcal).maxOrNull() ?: row.energyKcal
+         val strain = listOfNotNull(a.effort, a.hrStrain).maxOrNull() ?: row.strain
+-        return row.copy(energyKcal = kcal, strain = strain, avgHr = avgHr ?: row.avgHr, maxHr = maxHr ?: row.maxHr)
++        return row.copy(strain = strain, avgHr = avgHr ?: row.avgHr, maxHr = maxHr ?: row.maxHr)
+     }
+ }
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
+index 5b0d53f9..4c9a949e 100644
+--- a/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyReview.kt
+@@ -2,8 +2,10 @@ package com.noop.weekly
+ 
+ import com.noop.data.WorkoutRow
+ import com.noop.day.DayCalendar
++import com.noop.energy.DayEnergy
++import com.noop.energy.DayEnergyModel
++import com.noop.energy.EnergyMethod
+ import com.noop.food.FoodDays
+-import com.noop.food.FoodEnergy
+ import com.noop.food.FoodEntry
+ import com.noop.food.FoodTotals
+ import com.noop.food.MealScore
+@@ -140,19 +142,22 @@ object WeeklyReviews {
+     }
+ 
+     /**
+-     * The request. [weekFood] / [weekWorkouts] / [sessions] are the week's own records; [energy] the burn per
+-     * day; [personLines] (profile, scale, goals, the strap's daily table) only with the coach's consent.
++     * The request. [weekFood] / [weekWorkouts] / [sessions] are the week's own records; [energy] the day
++     * model per day (burn and each workout's figure); [completeDays] the days whose log is the whole day
++     * ([FoodDays.isComplete]), the others being marked; [personLines] (profile, scale, goals, the strap's daily
++     * table) only with the coach's consent.
+      */
+     internal fun prompt(
+         weekStart: LocalDate,
+         weekFood: List<FoodEntry>,
+         mealScores: Map<String, MealScore>,
+-        energy: Map<String, FoodEnergy>,
++        energy: Map<String, DayEnergy>,
+         kcalTarget: Int?,
+         weekWorkouts: List<WorkoutRow>,
+         sessions: List<TrainingSession>,
+         personLines: List<String>,
+         zone: ZoneId,
++        completeDays: Set<String> = weekFood.map { it.day }.toSet(),
+     ): String = buildString {
+         val end = weekStart.plusDays(6)
+         append("Review this person's WEEK as a coach and give three marks from 0 to 10: food (how good and healthy the ")
+@@ -160,7 +165,8 @@ object WeeklyReviews {
+         append("training (volume, frequency, balance between muscle groups and cardio, intensity against their recovery, ")
+         append("rest days, consistency) and overall (the two together with recovery and sleep: what counts is the whole). ")
+         append("10 = excellent, 5 = acceptable but clearly improvable, 2 = poor. Judge the week as a whole, not one day. Days ")
+-        append("with nothing logged mean not logged, not fasting: judge what is there and say if coverage was thin. Use -1 for ")
++        append("with nothing logged mean not logged, not fasting, and a day marked incomplete was only partly logged: judge ")
++        append("what is there and say if coverage was thin, never the amount of an incomplete day. Use -1 for ")
+         append("food_score or training_score when there is too little of it to judge. Each *_note: ONE short sentence in Spanish ")
+         append("(Spain), at most 20 words, the main reason. focus: the ONE most useful thing to change next week, in Spanish, at ")
+         append("most 15 words, concrete.\n\n")
+@@ -170,14 +176,15 @@ object WeeklyReviews {
+         for (i in 0..6) {
+             val day = weekStart.plusDays(i.toLong()).toString()
+             val ofDay = weekFood.filter { it.day == day }
+-            val burn = energy[day]?.burnedKcal
++            val burn = energy[day]?.totalKcal
+             if (ofDay.isEmpty()) {
+                 append("- $day: nothing logged").append(burn?.let { "; burned ${it.roundToInt()} kcal" }.orEmpty()).append('\n')
+                 continue
+             }
+             val t = FoodTotals.ofEntries(ofDay)
+             append("- $day: ${t.kcal.roundToInt()} kcal (P ${t.proteinG.roundToInt()} g, C ${t.carbsG.roundToInt()} g, F ${t.fatG.roundToInt()} g)")
+-            burn?.let { append("; burned ${it.roundToInt()} kcal, balance ${signed(t.kcal - it)}") }
++            if (day !in completeDays) append(" [incomplete: not the whole day was logged]")
++            burn?.let { append("; burned ${it.roundToInt()} kcal") ; if (day in completeDays) append(", balance ${signed(t.kcal - it)}") }
+             append(". ")
+             append(
+                 FoodDays.groupedByMeal(ofDay).joinToString("; ") { (meal, list) ->
+@@ -194,12 +201,11 @@ object WeeklyReviews {
+             val at = Instant.ofEpochSecond(w.startTs).atZone(zone)
+             append("- ${at.toLocalDate()} ${at.format(HHMM)} ${w.sport}, ${((w.durationS ?: (w.endTs - w.startTs).toDouble()) / 60).roundToInt()} min")
+             w.avgHr?.let { append(", HR avg $it") }
++            DayEnergyModel.lookup(energy, w, zone)?.let { append(", ${it.grossKcal.roundToInt()} kcal (${it.method.englishName})") }
+             val paired = sessions.firstOrNull { it.pairs(w) }
+             if (paired?.analysis == null) {
+-                w.energyKcal?.let { append(", ${it.roundToInt()} kcal by HR") }
+                 w.strain?.let { append(", effort ${String.format(Locale.US, "%.1f", it)}/100 by HR") }
+             } else {
+-                paired.analysis.hrKcal?.let { append(", ${it.roundToInt()} kcal by HR") }
+                 paired.analysis.effort?.let { append(", effort with muscular load ${it.roundToInt()}/100") }
+             }
+             paired?.let { s ->
+diff --git a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
+index 1dbace25..84c6c30a 100644
+--- a/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
++++ b/android/app/src/main/java/com/noop/weekly/WeeklyReviewer.kt
+@@ -6,7 +6,8 @@ import com.noop.ai.AiCoach
+ import com.noop.ai.AiKeyStore
+ import com.noop.ai.AiProvider
+ import com.noop.ai.VictorPersonLines
+-import com.noop.food.FoodEnergy
++import com.noop.energy.DayEnergyModel
++import com.noop.food.FoodDays
+ import com.noop.food.FoodStore
+ import com.noop.goals.VictorGoalsStore
+ import com.noop.training.TrainingAi
+@@ -88,7 +89,8 @@ object WeeklyReviewer {
+         val fromS = start.atStartOfDay(zone).toEpochSecond()
+         val toS = end.plusDays(1).atStartOfDay(zone).toEpochSecond()
+ 
+-        val food = FoodStore.load(ctx).filter { it.day >= start.toString() && it.day <= end.toString() }
++        val log = FoodStore.load(ctx)
++        val food = log.filter { it.day >= start.toString() && it.day <= end.toString() }
+         // A failed read is not a change: it must not redo a review.
+         val workouts = runCatching { weekWorkouts(repo, strapId, fromS, toS) }.getOrNull() ?: if (previous == null) emptyList() else return
+         val sessions = TrainingStore.load(ctx).filter { !it.isLive && it.startTs in fromS until toS }
+@@ -98,7 +100,7 @@ object WeeklyReviewer {
+         if (previous != null && !settle.ready(start.toString(), sig, nowMs)) return
+         if (!WeeklyReviews.hasEnough(food.map { it.day }.distinct().size, workouts.size)) return
+ 
+-        val energy = runCatching { FoodEnergy.loadRange(ctx, repo, strapId, start.toString(), end.toString()) }.getOrDefault(emptyMap())
++        val energy = runCatching { DayEnergyModel.range(ctx, repo, strapId, start.toString(), end.toString()) }.getOrDefault(emptyMap())
+         val prompt = WeeklyReviews.prompt(
+             weekStart = start,
+             weekFood = food,
+@@ -109,6 +111,7 @@ object WeeklyReviewer {
+             sessions = sessions,
+             personLines = personLines(ctx, repo, strapId),
+             zone = zone,
++            completeDays = FoodDays.completeDays(log),
+         )
+         lastTry = start.toString() to nowMs
+         val r = TrainingAi.ask(ctx, prompt, WeeklyReviews.schema()) { WeeklyReviews.parse(it, start.toString(), System.currentTimeMillis()) }
+@@ -130,8 +133,9 @@ object WeeklyReviewer {
+     private suspend fun personLines(ctx: Context, repo: com.noop.data.WhoopRepository, strapId: String): List<String> {
+         if (!AiKeyStore.readConsent(ctx)) return emptyList()
+         val days = runCatching { repo.daysMerged(strapId) }.getOrDefault(emptyList())
++        val coach = AiCoach(repo) { strapId }
+         return VictorPersonLines.load(ctx, repo).lines +
+-            listOfNotNull(runCatching { AiCoach(repo) { strapId }.buildContext(days) }.getOrNull())
++            listOfNotNull(runCatching { coach.buildContext(days, coach.activeEnergyByDay(ctx)) }.getOrNull())   // victor:energy
+     }
+ 
+     private suspend fun save(ctx: Context, review: WeeklyReview) = withContext(Dispatchers.IO) {
+diff --git a/android/app/src/main/res/values-es/strings_victor_food.xml b/android/app/src/main/res/values-es/strings_victor_food.xml
+index 7d9fbfb3..3fb6970c 100644
+--- a/android/app/src/main/res/values-es/strings_victor_food.xml
++++ b/android/app/src/main/res/values-es/strings_victor_food.xml
+@@ -91,11 +91,8 @@
+     <string name="victor_food_eaten_all">Todo</string>
+     <string name="victor_food_eaten_result">Comido: %1$s kcal · %2$s</string>
+ 
+-    <string name="victor_food_burned_so_far">Gastado hasta ahora: %1$s kcal · %2$s</string>
+-    <string name="victor_food_burned_day">Gastado: %1$s kcal · %2$s</string>
+-    <string name="victor_food_source_strap">pulsera</string>
+-    <string name="victor_food_source_phone">móvil</string>
+-    <string name="victor_food_source_basal">solo reposo</string>
++    <string name="victor_food_burned_so_far">Gastado hasta ahora: %1$s kcal%2$s</string>
++    <string name="victor_food_burned_day">Gastado: %1$s kcal%2$s</string>
+     <string name="victor_food_projected_deficit">Si no comes más: déficit de %1$s kcal al acabar el día</string>
+     <string name="victor_food_projected_surplus">Si no comes más: superávit de %1$s kcal al acabar el día</string>
+     <string name="victor_food_day_deficit">Gastado %1$s kcal · déficit de %2$s kcal</string>
+@@ -103,7 +100,7 @@
+     <string name="victor_food_adaptive_title">Tu gasto real</string>
+     <string name="victor_food_adaptive_value">~%1$s kcal/día</string>
+     <string name="victor_food_adaptive_detail">%1$s–%2$s kcal, según lo que comes y cómo cambia tu peso (%3$d días)</string>
+-    <string name="victor_food_adaptive_app">La app estimaba %1$s kcal/día esos días</string>
++    <string name="victor_food_adaptive_app">El modelo estimaba %1$s kcal/día esos días</string>
+ 
+     <string name="victor_food_history">Historial</string>
+     <string name="victor_food_history_week">Semana</string>
+@@ -128,6 +125,11 @@
+     <string name="victor_food_fav_logged">Apuntada. Tócala para cambiar la cantidad.</string>
+     <string name="victor_food_fav_remove_title">¿Quitar de frecuentes?</string>
+     <string name="victor_food_fav_remove">Quitar</string>
+-    <string name="victor_food_training_extra">Incluye %1$s kcal más de tus entrenos (Claude)</string>
+     <string name="victor_food_ok">Vale</string>
++    <!-- victor:energy — lo que le falta al modelo (una etiqueta corta tras el gasto) y la parte de los entrenos -->
++    <string name="victor_food_missing_steps">sin pasos</string>
++    <string name="victor_food_steps_estimated">pasos estimados</string>
++    <string name="victor_food_workout_nodata">un entreno sin datos</string>
++    <string name="victor_food_missing_profile">Rellena tu perfil (peso, altura, fecha de nacimiento) para ver tu gasto.</string>
++    <string name="victor_food_workouts_kcal">Entrenos: %1$s kcal</string>
+ </resources>
+diff --git a/android/app/src/main/res/values-es/strings_victor_training.xml b/android/app/src/main/res/values-es/strings_victor_training.xml
+index 15d2811c..36ee2e17 100644
+--- a/android/app/src/main/res/values-es/strings_victor_training.xml
++++ b/android/app/src/main/res/values-es/strings_victor_training.xml
+@@ -43,9 +43,7 @@
+     <string name="victor_training_skipped">no hecho</string>
+     <string name="victor_training_hr_line">Pulso %1$d medio · %2$d máx.</string>
+     <string name="victor_training_estimating">Claude está calculando las calorías…</string>
+-    <string name="victor_training_ai_kcal">Gasto del entreno (Claude): %1$d kcal%2$s</string>
+-    <string name="victor_training_hr_kcal">Por pulso: %1$d kcal</string>
+-    <string name="victor_training_hr_kcal_extra">Por pulso: %1$d kcal · suma %2$d kcal al día</string>
++    <string name="victor_training_ai_kcal">Estimación de Claude: %1$d kcal%2$s</string>
+     <string name="victor_training_estimate">Calcular calorías</string>
+     <string name="victor_training_reestimate">Recalcular</string>
+     <string name="victor_training_edit">Editar ejercicios</string>
+@@ -67,4 +65,12 @@
+     <string name="victor_training_load_per_hand">Por mancuerna</string>
+     <string name="victor_training_kg_each">kg c/u</string>
+     <string name="victor_training_effort">Esfuerzo con la carga muscular: %1$s/%2$s (solo por pulso %3$s)</string>
++    <!-- victor:energy — la cifra del modelo para la sesión y cómo se ha calculado -->
++    <string name="victor_training_model_kcal">Gasto del entreno: %1$d kcal · %2$s</string>
++    <string name="victor_training_adds_day">Suma %1$d kcal al día (con el post-entreno)</string>
++    <string name="victor_training_method_hr">por pulso</string>
++    <string name="victor_training_method_claude">Claude</string>
++    <string name="victor_training_method_met">por deporte (MET)</string>
++    <string name="victor_training_method_external">de la importación</string>
++    <string name="victor_training_method_steps">por pasos</string>
+ </resources>
+diff --git a/android/app/src/main/res/values/strings_victor_food.xml b/android/app/src/main/res/values/strings_victor_food.xml
+index eea4ea70..21bab756 100644
+--- a/android/app/src/main/res/values/strings_victor_food.xml
++++ b/android/app/src/main/res/values/strings_victor_food.xml
+@@ -91,11 +91,8 @@
+     <string name="victor_food_eaten_all">All</string>
+     <string name="victor_food_eaten_result">Eaten: %1$s kcal · %2$s</string>
+ 
+-    <string name="victor_food_burned_so_far">Burned so far: %1$s kcal · %2$s</string>
+-    <string name="victor_food_burned_day">Burned: %1$s kcal · %2$s</string>
+-    <string name="victor_food_source_strap">strap</string>
+-    <string name="victor_food_source_phone">phone</string>
+-    <string name="victor_food_source_basal">resting only</string>
++    <string name="victor_food_burned_so_far">Burned so far: %1$s kcal%2$s</string>
++    <string name="victor_food_burned_day">Burned: %1$s kcal%2$s</string>
+     <string name="victor_food_projected_deficit">If you eat nothing more: a %1$s kcal deficit by tonight</string>
+     <string name="victor_food_projected_surplus">If you eat nothing more: a %1$s kcal surplus by tonight</string>
+     <string name="victor_food_day_deficit">Burned %1$s kcal · deficit of %2$s kcal</string>
+@@ -103,7 +100,7 @@
+     <string name="victor_food_adaptive_title">Your real burn</string>
+     <string name="victor_food_adaptive_value">~%1$s kcal/day</string>
+     <string name="victor_food_adaptive_detail">%1$s–%2$s kcal, from what you eat and how your weight moves (%3$d days)</string>
+-    <string name="victor_food_adaptive_app">The app estimated %1$s kcal/day those days</string>
++    <string name="victor_food_adaptive_app">The model estimated %1$s kcal/day those days</string>
+ 
+     <string name="victor_food_history">History</string>
+     <string name="victor_food_history_week">Week</string>
+@@ -128,6 +125,11 @@
+     <string name="victor_food_fav_logged">Logged. Tap it to change the amount.</string>
+     <string name="victor_food_fav_remove_title">Remove from frequent?</string>
+     <string name="victor_food_fav_remove">Remove</string>
+-    <string name="victor_food_training_extra">Includes %1$s kcal more from your workouts (Claude)</string>
+     <string name="victor_food_ok">OK</string>
++    <!-- victor:energy — what the day model lacks (one short tag after the burn) and the workouts' share -->
++    <string name="victor_food_missing_steps">no steps</string>
++    <string name="victor_food_steps_estimated">steps estimated</string>
++    <string name="victor_food_workout_nodata">a workout without data</string>
++    <string name="victor_food_missing_profile">Fill in your profile (weight, height, date of birth) to see your burn.</string>
++    <string name="victor_food_workouts_kcal">Workouts: %1$s kcal</string>
+ </resources>
+diff --git a/android/app/src/main/res/values/strings_victor_training.xml b/android/app/src/main/res/values/strings_victor_training.xml
+index 0b9d5b18..2a162a42 100644
+--- a/android/app/src/main/res/values/strings_victor_training.xml
++++ b/android/app/src/main/res/values/strings_victor_training.xml
+@@ -43,9 +43,7 @@
+     <string name="victor_training_skipped">not done</string>
+     <string name="victor_training_hr_line">HR %1$d avg · %2$d max</string>
+     <string name="victor_training_estimating">Claude is estimating the calories…</string>
+-    <string name="victor_training_ai_kcal">Workout burn (Claude): %1$d kcal%2$s</string>
+-    <string name="victor_training_hr_kcal">By heart rate: %1$d kcal</string>
+-    <string name="victor_training_hr_kcal_extra">By heart rate: %1$d kcal · adds %2$d kcal to the day</string>
++    <string name="victor_training_ai_kcal">Claude\'s estimate: %1$d kcal%2$s</string>
+     <string name="victor_training_estimate">Estimate calories</string>
+     <string name="victor_training_reestimate">Re-estimate</string>
+     <string name="victor_training_edit">Edit exercises</string>
+@@ -67,4 +65,12 @@
+     <string name="victor_training_load_per_hand">Per dumbbell</string>
+     <string name="victor_training_kg_each">kg each</string>
+     <string name="victor_training_effort">Effort with the muscular load: %1$s/%2$s (heart rate alone %3$s)</string>
++    <!-- victor:energy — the day model's figure for the session and how it was priced -->
++    <string name="victor_training_model_kcal">Workout burn: %1$d kcal · %2$s</string>
++    <string name="victor_training_adds_day">Adds %1$d kcal to the day (after-burn included)</string>
++    <string name="victor_training_method_hr">by heart rate</string>
++    <string name="victor_training_method_claude">Claude</string>
++    <string name="victor_training_method_met">by sport (MET)</string>
++    <string name="victor_training_method_external">as imported</string>
++    <string name="victor_training_method_steps">by steps</string>
+ </resources>
+diff --git a/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
+index 830578dd..222d54ec 100644
+--- a/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
++++ b/android/app/src/test/java/com/noop/ai/VictorCoachExtrasTest.kt
+@@ -4,28 +4,49 @@ import com.noop.analytics.AdaptiveExpenditureConfidence
+ import com.noop.analytics.AdaptiveExpenditureEstimate
+ import com.noop.data.AppleDaily
+ import com.noop.data.DailyMetric
++import com.noop.energy.EnergyFixtures
++import com.noop.energy.EnergyMissing
++import com.noop.energy.StepsSource
+ import com.noop.food.AdaptiveState
+-import com.noop.food.FoodEnergy
+ import java.time.LocalTime
+ import org.junit.Assert.assertEquals
+ import org.junit.Assert.assertNull
+ import org.junit.Test
+ 
+-/** victor:coach-extras — the TODAY, ENERGY BALANCE and MEASURED EXPENDITURE lines. */
++/** victor:coach-extras — the TODAY, ENERGY BALANCE and MEASURED EXPENDITURE lines on the day model. */
+ class VictorCoachExtrasTest {
+     private val teatime = LocalTime.of(18, 0)
+ 
+     @Test
+-    fun todaySaysSoFarAndWhereTheDayCloses() {
+-        val energy = FoodEnergy.resolve(1900.0, 300.0, 1100.0, 1800.0, dayFraction = 0.75)
++    fun todaySaysSoFarWhereItComesFromAndWhereTheDayCloses() {
++        // 18:00 (0.75 of the day): basal 1350 of 1800, steps 230, a lift adding 392 + 47, nothing unlogged, digestion 120 = 2139.
++        val energy = EnergyFixtures.day(
++            "2026-10-16", totalKcal = 2139.0, bmrKcal = 1800.0, fraction = 0.75, stepsKcal = 230.0,
++            workoutsNetKcal = 392.0, epocKcal = 47.0, unloggedKcal = 0.0, tefKcal = 120.0,
++        )
+         assertEquals(
+-            "TODAY so far (2026-10-16, 18:00): steps 6240; energy burned so far 1900 kcal (strap heart-rate estimate, " +
+-                "resting + activity); eaten 2100 kcal (photo food log); balance so far +200 kcal; if nothing more is " +
+-                "eaten and no more exercise, the day closes at -250 kcal",
++            "TODAY so far (2026-10-16, 18:00): steps 6240; energy burned so far 2139 kcal (basal 1350, steps 230, workouts 392, " +
++                "after-burn 47, unlogged activity 0, digestion 120); eaten 2100 kcal (photo food log); balance so far -39 kcal; " +
++                "if nothing more is eaten and no more exercise, the day closes at -489 kcal",
+             VictorCoachExtras.todayLine("2026-10-16", teatime, 6240, energy, 2100.0),
+         )
+     }
+ 
++    @Test
++    fun todayNamesWhatTheModelLacks() {
++        val estimated = EnergyFixtures.day(totalKcal = 2000.0, stepsSource = StepsSource.ESTIMATED, missing = setOf(EnergyMissing.MEALS))
++        assertEquals(
++            "basal 1800, steps 300 (estimated from recent days), workouts 0, after-burn 0, unlogged activity 0; missing: meals (no digestion term)",
++            VictorCoachExtras.breakdown(estimated),
++        )
++        val noProfile = EnergyFixtures.day(totalKcal = null, bmrKcal = null, missing = setOf(EnergyMissing.PROFILE))
++        assertEquals(
++            "TODAY so far (2026-10-16, 18:00): energy burned so far: unknown (profile incomplete: weight, height or date of birth missing); " +
++                "eaten 900 kcal (photo food log)",
++            VictorCoachExtras.todayLine("2026-10-16", teatime, null, noProfile, 900.0),
++        )
++    }
++
+     @Test
+     fun stepsComeInTheTodayCardsOrderStrapFirst() {
+         // Strap 9400, phone 6100: Today shows 9400, so the coach says 9400 too (it said 6100, then 9400/day on average).
+@@ -55,9 +76,9 @@ class VictorCoachExtrasTest {
+     }
+ 
+     @Test
+-    fun weekBalanceListsEachDayAndTheAverage() {
++    fun weekBalanceListsEachWholeDayAndTheAverage() {
+         assertEquals(
+-            "ENERGY BALANCE previous 7 days (eaten − burned, days with food logged): 10-14 ate 2100 burned 2600 (-500); " +
++            "ENERGY BALANCE previous 7 days (eaten − burned, whole logged days only): 10-14 ate 2100 burned 2600 (-500); " +
+                 "10-15 ate 2700 burned 2500 (+200); average -150 kcal/day",
+             VictorCoachExtras.weekBalanceLine(
+                 listOf(Triple("2026-10-15", 2700.0, 2500.0), Triple("2026-10-14", 2100.0, 2600.0)),
+@@ -70,8 +91,8 @@ class VictorCoachExtrasTest {
+     fun measuredExpenditureOnlyWhenReady() {
+         val est = AdaptiveExpenditureEstimate(2550.0, 2350.0, 2750.0, 2200.0, -0.045, 26, 12, 35, AdaptiveExpenditureConfidence.MODERATE)
+         assertEquals(
+-            "MEASURED EXPENDITURE (from logged intake and the weight trend over 35 days, confidence moderate): " +
+-                "~2550 kcal/day (2350-2750); the app's own burn estimate averaged 2700 kcal/day on the same days",
++            "MEASURED EXPENDITURE (from logged intake and the weight trend over 35 days, kcal per kg by body fat, confidence moderate): " +
++                "~2550 kcal/day (2350-2750); the day model's burn averaged 2700 kcal/day on the same days",
+             VictorCoachExtras.adaptiveLine(AdaptiveState.Ready(est, 2700.0)),
+         )
+         assertNull(VictorCoachExtras.adaptiveLine(AdaptiveState.Building(4, 2)))
+diff --git a/android/app/src/test/java/com/noop/food/FoodEnergyTest.kt b/android/app/src/test/java/com/noop/food/FoodEnergyTest.kt
+deleted file mode 100644
+index a3f561e8..00000000
+--- a/android/app/src/test/java/com/noop/food/FoodEnergyTest.kt
++++ /dev/null
+@@ -1,77 +0,0 @@
+-package com.noop.food
+-
+-import java.time.LocalDate
+-import java.time.LocalTime
+-import org.junit.Assert.assertEquals
+-import org.junit.Assert.assertFalse
+-import org.junit.Assert.assertNull
+-import org.junit.Assert.assertTrue
+-import org.junit.Test
+-
+-/** victor:food — the energy-out resolver behind the Food screen's, Today's and the Coach's balance. */
+-class FoodEnergyTest {
+-
+-    @Test
+-    fun theStrapFigureIsATotalAndIsNeverToppedUpWithABasal() {
+-        // The bug this replaced: strap 2600 (resting + activity) + scale BMR 1800 = 4400 "burned".
+-        val e = FoodEnergy.resolve(strapTotalKcal = 2600.0, phoneActiveKcal = null, phoneBasalKcal = null, dailyBasalKcal = 1800.0, dayFraction = 1.0)!!
+-        assertEquals(2600.0, e.burnedKcal, 0.0)
+-        assertEquals(EnergySource.STRAP, e.source)
+-        assertEquals(-400.0, e.balance(2200.0), 0.0)
+-    }
+-
+-    @Test
+-    fun theMoreCompleteSourceWins() {
+-        // Gym day: the phone only saw steps (300 active + 1750 resting); the strap measured the session.
+-        val gym = FoodEnergy.resolve(2700.0, 300.0, 1750.0, 1800.0, 1.0)!!
+-        assertEquals(EnergySource.STRAP, gym.source)
+-        assertEquals(2700.0, gym.burnedKcal, 0.0)
+-        // Strap off the wrist half the day: the phone's total is the fuller one.
+-        val offWrist = FoodEnergy.resolve(1400.0, 450.0, 1750.0, 1800.0, 1.0)!!
+-        assertEquals(EnergySource.PHONE, offWrist.source)
+-        assertEquals(2200.0, offWrist.burnedKcal, 0.0)
+-    }
+-
+-    @Test
+-    fun phoneActiveWithoutItsBasalTakesTheDailyBasalForTheTimeGone() {
+-        val e = FoodEnergy.resolve(null, 400.0, null, 1800.0, 0.5)!!
+-        assertEquals(EnergySource.PHONE, e.source)
+-        assertEquals(1300.0, e.burnedKcal, 0.0)
+-    }
+-
+-    @Test
+-    fun withOnlyARestingFigureTheBalanceRestsOnIt() {
+-        val e = FoodEnergy.resolve(null, null, null, 1800.0, 1.0)!!
+-        assertEquals(EnergySource.BASAL, e.source)
+-        assertEquals(1800.0, e.burnedKcal, 0.0)
+-        assertNull(FoodEnergy.resolve(null, null, null, null, 0.5))
+-        assertNull(FoodEnergy.resolve(0.0, 0.0, 0.0, 0.0, 1.0))
+-    }
+-
+-    @Test
+-    fun todayClosesWithTheRestOfTheDayAtRest() {
+-        // 18:00 (0.75 of the day): 1900 burned so far, 1800 kcal/day resting → +450 by midnight.
+-        val e = FoodEnergy.resolve(1900.0, null, null, 1800.0, 0.75)!!
+-        assertTrue(e.isToday)
+-        assertEquals(2350.0, e.projectedKcal, 0.0)
+-        assertEquals(200.0, e.balance(2100.0), 0.0) // "surplus so far" at teatime …
+-        assertEquals(-250.0, e.projectedBalance(2100.0), 0.0) // … is a deficit by tonight
+-        val past = FoodEnergy.resolve(2400.0, null, null, 1800.0, 1.0)!!
+-        assertFalse(past.isToday)
+-        assertEquals(2400.0, past.projectedKcal, 0.0)
+-    }
+-
+-    @Test
+-    fun profileBasalUsesTheStrapsRestingFormula() {
+-        // Revised Harris–Benedict, male, 78 kg, 178 cm, 26 y: 88.362 + 13.397·78 + 479.9·1.78 − 5.677·26.
+-        assertEquals(1839.9, FoodEnergy.profileBasalKcal("male", 78.0, 178.0, 26)!!, 0.1)
+-        assertNull(FoodEnergy.profileBasalKcal("male", 0.0, 178.0, 26))
+-    }
+-
+-    @Test
+-    fun dayFractionIsWholeForPastDaysAndElapsedForToday() {
+-        val today = LocalDate.of(2026, 10, 16)
+-        assertEquals(1.0, FoodEnergy.dayFraction("2026-10-15", today, LocalTime.NOON), 0.0)
+-        assertEquals(0.5, FoodEnergy.dayFraction("2026-10-16", today, LocalTime.NOON), 0.0)
+-    }
+-}
+diff --git a/android/app/src/test/java/com/noop/food/FoodLogTest.kt b/android/app/src/test/java/com/noop/food/FoodLogTest.kt
+index 96e6c06d..53b13944 100644
+--- a/android/app/src/test/java/com/noop/food/FoodLogTest.kt
++++ b/android/app/src/test/java/com/noop/food/FoodLogTest.kt
+@@ -247,16 +247,34 @@ class FoodLogTest {
+         assertEquals(
+             "FOOD LOG (photo estimates): today 1850 kcal (P 120 g, C 180 g, F 60 g) from 3 meals " +
+                 "(breakfast 600, lunch 800, dinner 450 kcal); previous 7 days avg 2200 kcal/day (P 13 g, C 27 g, F 7 g) " +
+-                "over 3 logged days",
+-            FoodCoachContext.line(log, today),
++                "over 3 complete days",
++            FoodCoachContext.line(log, today, complete = setOf("2026-10-15", "2026-10-13", "2026-10-09")),
++        )
++    }
++
++    @Test
++    fun coachLineLeavesPartlyLoggedDaysOutOfTheAverageAndSaysSo() {
++        val log = listOf(
++            entry("y1", "2026-10-15", 2000.0),
++            entry("d3", "2026-10-13", 1900.0),
++            entry("d4", "2026-10-12", 300.0, meal = MealType.BREAKFAST),
++        )
++        assertEquals(
++            "FOOD LOG (photo estimates): today nothing logged yet; previous 7 days avg 1950 kcal/day (P 10 g, C 20 g, F 5 g) " +
++                "over 2 complete days (1 partly logged day left out)",
++            FoodCoachContext.line(log, today, complete = setOf("2026-10-15", "2026-10-13")),
++        )
++        assertEquals(
++            "FOOD LOG (photo estimates): today nothing logged yet; previous 7 days: 1 partly logged day only, no average",
++            FoodCoachContext.line(listOf(entry("d4", "2026-10-12", 300.0, meal = MealType.BREAKFAST)), today, complete = emptySet()),
+         )
+     }
+ 
+     @Test
+     fun coachLineWithoutTodayOrWithoutHistory() {
+         assertEquals(
+-            "FOOD LOG (photo estimates): today nothing logged yet; previous 7 days avg 2000 kcal/day (P 10 g, C 20 g, F 5 g) over 1 logged day",
+-            FoodCoachContext.line(listOf(entry("y", "2026-10-15", 2000.0)), today),
++            "FOOD LOG (photo estimates): today nothing logged yet; previous 7 days avg 2000 kcal/day (P 10 g, C 20 g, F 5 g) over 1 complete day",
++            FoodCoachContext.line(listOf(entry("y", "2026-10-15", 2000.0)), today, complete = setOf("2026-10-15")),
+         )
+         assertEquals(
+             "FOOD LOG (photo estimates): today 500 kcal (P 10 g, C 20 g, F 5 g) from 1 meal (lunch 500 kcal)",
+@@ -279,7 +297,7 @@ class FoodLogTest {
+         )
+         assertEquals(
+             "FOOD LOG (photo estimates): today 850 kcal (P 38 g, C 101 g, F 29 g) from 2 meals (breakfast 330, lunch 520 kcal); " +
+-                "previous 7 days avg 320 kcal/day (P 45 g, C 0 g, F 14 g) over 2 logged days\n" +
++                "previous 7 days avg 320 kcal/day (P 45 g, C 0 g, F 14 g) over 2 complete days\n" +
+                 "  breakfast: Tostada con tomate, Café con leche\n" +
+                 "  lunch: Lentejas con chorizo",
+             FoodCoachContext.line(log, today),
+@@ -295,10 +313,16 @@ class FoodLogTest {
+     @Test
+     fun withNothingLoggedTheCardShowsNoBalanceAsIfFasting() {
+         // 09:00, nothing logged: "if you eat nothing more, a deficit of 1,800" read as a fast. Burned stays.
+-        val morning = FoodEnergy.resolve(900.0, null, null, 1867.0, dayFraction = 0.375)!!
++        val morning = com.noop.energy.EnergyFixtures.day(totalKcal = 900.0, bmrKcal = 1867.0, fraction = 0.375)
+         assertNull(balanceLine(0.0, meals = 0, energy = morning))
+         val (label, kcal) = balanceLine(400.0, meals = 1, energy = morning)!!
+         assertEquals(com.noop.R.string.victor_food_projected_deficit, label)
+         assertEquals(400.0 - (900.0 + 1867.0 * 0.625), kcal, 0.01)
++        // No profile: no burn, no balance; the card says what is missing instead.
++        val blind = com.noop.energy.EnergyFixtures.day(totalKcal = null, bmrKcal = null, missing = setOf(com.noop.energy.EnergyMissing.PROFILE))
++        assertNull(balanceLine(400.0, meals = 1, energy = blind))
++        assertEquals(com.noop.R.string.victor_food_steps_estimated, missingLabel(com.noop.energy.EnergyFixtures.day(stepsSource = com.noop.energy.StepsSource.ESTIMATED)))
++        assertEquals(com.noop.R.string.victor_food_missing_steps, missingLabel(com.noop.energy.EnergyFixtures.day(missing = setOf(com.noop.energy.EnergyMissing.STEPS))))
++        assertNull(missingLabel(com.noop.energy.EnergyFixtures.day(missing = setOf(com.noop.energy.EnergyMissing.MEALS))))
+     }
+ }
+diff --git a/android/app/src/test/java/com/noop/training/TrainingTest.kt b/android/app/src/test/java/com/noop/training/TrainingTest.kt
+index 8ccae7cb..ba1ca5d6 100644
+--- a/android/app/src/test/java/com/noop/training/TrainingTest.kt
++++ b/android/app/src/test/java/com/noop/training/TrainingTest.kt
+@@ -2,7 +2,6 @@ package com.noop.training
+ 
+ import com.noop.data.HrSample
+ import com.noop.data.WorkoutRow
+-import com.noop.food.FoodEnergy
+ import com.noop.food.FoodError
+ import kotlinx.coroutines.runBlocking
+ import org.json.JSONObject
+@@ -91,36 +90,6 @@ class TrainingTest {
+         assertNull(hr[2])
+     }
+ 
+-    @Test
+-    fun claudesFigureOnlyAddsWhatTheDayDoesNotAlreadyHold() {
+-        // 380 by Claude, 220 by heart rate → +160. Resting for an hour at 1800 kcal/day is 75, below the HR figure.
+-        assertEquals(160.0, TrainingEnergy.extraKcal(380.0, 220.0, 3600.0, 1800.0), 1e-9)
+-        // No heart rate: the resting share of the hour is already in the day.
+-        assertEquals(305.0, TrainingEnergy.extraKcal(380.0, null, 3600.0, 1800.0), 1e-9)
+-        // Steady cardio where heart rate beats Claude: nothing added.
+-        assertEquals(0.0, TrainingEnergy.extraKcal(300.0, 450.0, 3600.0, 1800.0), 0.0)
+-        assertEquals(0.0, TrainingEnergy.extraKcal(Double.NaN, 100.0, 3600.0, 1800.0), 0.0)
+-    }
+-
+-    @Test
+-    fun extraByDayNeedsTheWorkoutAndUsesTheAnalysisHeartRateFigure() {
+-        // 380 by Claude − 210 by heart rate (the analysis's own; the row now carries the best estimate).
+-        assertEquals(mapOf("2026-10-19" to 170.0), TrainingEnergy.extraByDay(listOf(logged), listOf(row), 1800.0, madrid))
+-        assertEquals(170.0, TrainingEnergy.extraByDay(listOf(logged), listOf(row.copy(energyKcal = 380.0)), null, madrid).getValue("2026-10-19"), 1e-9)
+-        assertEquals(emptyMap<String, Double>(), TrainingEnergy.extraByDay(listOf(logged), emptyList(), 1800.0, madrid))
+-        assertEquals(emptyMap<String, Double>(), TrainingEnergy.extraByDay(listOf(logged.copy(analysis = null)), listOf(row), 1800.0, madrid))
+-    }
+-
+-    @Test
+-    fun theDaysBurnCarriesTheTrainingExtraOnEveryCandidate() {
+-        val e = FoodEnergy.resolve(strapTotalKcal = 2500.0, phoneActiveKcal = null, phoneBasalKcal = null, dailyBasalKcal = 1800.0, dayFraction = 1.0, trainingKcal = 160.0)!!
+-        assertEquals(2660.0, e.burnedKcal, 1e-9)
+-        assertEquals(160.0, e.trainingKcal, 1e-9)
+-        val none = FoodEnergy.resolve(2500.0, null, null, 1800.0, 1.0)!!
+-        assertEquals(2500.0, none.burnedKcal, 1e-9)
+-        assertEquals(0.0, none.trainingKcal, 0.0)
+-    }
+-
+     @Test
+     fun aPlanReplyIsSanitised() {
+         val reply = JSONObject(
+@@ -231,7 +200,14 @@ class TrainingTest {
+         assertNotNull(line)
+         assertTrue(line!!.startsWith("TRAINING LOG last 14 days"))
+         assertTrue(line.contains("2026-10-19 17:00-18:00 Strength (logged afterwards): Pecho 5×5 · 20 kg (HR avg 121, max 150); Dominadas 5×5; Cinta 10 min + 1.5 km"))
+-        assertTrue(line.contains("HR avg 118, max 152, strap HR estimate 210 kcal | Claude estimate 380 kcal (adds ~170 kcal to the day's burn)"))
++        assertTrue(line.contains("HR avg 118, max 152 | Claude estimate 380 kcal"))
++        assertFalse(line.contains("strap HR estimate"))
++        // With the day model's figure for the row, the coach is told what the day counts and how it was priced.
++        val priced = TrainingCoachContext.line(
++            listOf(logged), listOf(row), emptyMap(), madrid,
++            mapOf(com.noop.energy.WorkoutKey.of(row) to com.noop.energy.EnergyFixtures.workout(start, end, grossKcal = 380.0, netKcal = 302.0, epocKcal = 36.0, method = com.noop.energy.EnergyMethod.CLAUDE)),
++        )!!
++        assertTrue(priced.contains("HR avg 118, max 152 | the day counts 380 kcal (Claude's estimate from the exercises), adding 338 kcal above resting, after-burn included | Claude estimate 380 kcal"))
+         assertNull(TrainingCoachContext.line(listOf(logged), emptyList(), emptyMap(), madrid))
+     }
+ 
+@@ -286,15 +262,15 @@ class TrainingTest {
+     }
+ 
+     @Test
+-    fun theWorkoutRowShowsTheSessionsBestFiguresAndHeartRateArrivingLaterTriggersANewOne() {
++    fun theWorkoutRowTakesTheSessionsEffortNotItsKcalAndHeartRateArrivingLaterTriggersANewOne() {
+         val a = logged.analysis!!.copy(hrKcal = 263.0, hrStrain = 18.0, hrSamples = 1200, effort = 52.0)
+         val updated = TrainingEnergy.applyToRow(row.copy(energyKcal = 263.0, strain = 18.0), a, 121, 158)
+-        assertEquals(380.0, updated.energyKcal!!, 0.0)
++        assertEquals(263.0, updated.energyKcal!!, 0.0)   // the row's kcal is not rewritten: the day model prices the lists
+         assertEquals(52.0, updated.strain!!, 0.0)
+         assertEquals(121, updated.avgHr)
+-        // Steady cardio: heart rate above Claude stays; no effort from Claude keeps the heart-rate one.
++        // No effort from Claude keeps the heart-rate one.
+         val cardio = TrainingEnergy.applyToRow(row, a.copy(totalKcal = 300.0, hrKcal = 450.0, effort = null), null, null)
+-        assertEquals(450.0, cardio.energyKcal!!, 0.0)
++        assertEquals(220.0, cardio.energyKcal!!, 0.0)
+         assertEquals(18.0, cardio.strain!!, 0.0)
+         assertEquals(118, cardio.avgHr)
+ 
+@@ -313,6 +289,11 @@ class TrainingTest {
+         val prompt = TrainingAi.kcalPrompt(logged, "x", 70, null, null, null, TrainingAi.HrFacts(118, 152, 1200, 70, 263.0, 18.0), emptyMap())
+         assertTrue(prompt.contains("heart-rate effort 18.0 on the 0-100 axis"))
+         assertTrue(prompt.contains("Strength Trainer"))
++        // The pulse OVER-reads lifting (the pressor response), and Claude anchors on the Compendium's METs, gross.
++        assertTrue(prompt.contains("OVER-estimate lifting"))
++        assertFalse(prompt.contains("UNDER-estimate"))
++        assertTrue(prompt.contains("8-15 reps, is about 3.5 MET"))
++        assertTrue(prompt.contains("total_kcal (GROSS"))
+         val line = TrainingCoachContext.line(listOf(stored), listOf(row), emptyMap(), madrid)!!
+         assertTrue(line.contains("effort with muscular load 52/100 (heart rate alone 18)"))
+     }
+@@ -324,10 +305,7 @@ class TrainingTest {
+         val live = logged.copy(id = "c", endTs = null, analysis = null)
+         val kept = TrainingEnergy.onePerWorkout(listOf(older, newer, live))
+         assertEquals(setOf("b", "c"), kept.map { it.id }.toSet())
+-        val once = TrainingEnergy.extraByDay(listOf(newer), listOf(row), null, madrid)
+-        assertEquals(once, TrainingEnergy.extraByDay(listOf(older, newer), listOf(row), null, madrid))
+-        // Not paired with a stored workout (deleted, or re-timed): nothing added.
+-        assertEquals(emptyMap<String, Double>(), TrainingEnergy.extraByDay(listOf(newer), emptyList(), null, madrid))
++        assertEquals(380.0, kept.first { it.id == "b" }.analysis!!.totalKcal, 0.0)
+     }
+ 
+     @Test
+diff --git a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
+index 10448d0b..d5df6ce7 100644
+--- a/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
++++ b/android/app/src/test/java/com/noop/weekly/WeeklyReviewTest.kt
+@@ -119,8 +119,30 @@ class WeeklyReviewTest {
+         assertTrue(p.contains("WEEK: 2026-10-12 (Monday) to 2026-10-18 (Sunday). Daily intake target: 2200 kcal."))
+         assertTrue(p.contains("- 2026-10-12: nothing logged"))
+         assertTrue(p.contains("- 2026-10-14: 180 kcal (P 12 g, C 1 g, F 13 g). breakfast 180 kcal [8/10] (Huevos)"))
+-        assertTrue(p.contains("- 2026-10-14 18:00 Strength, 60 min, HR avg 118, 220 kcal by HR"))
++        assertTrue(p.contains("- 2026-10-14 18:00 Strength, 60 min, HR avg 118\n"))   // no model figure given: no kcal, never the row's heart-rate one
++        assertFalse(p.contains("by HR"))
+         assertTrue(p.contains("the coach's data consent is off"))
++        // With the day model: the burn, the balance only on a whole day, the workout's figure and how it was priced.
++        val priced = WeeklyReviews.prompt(
++            weekStart = LocalDate.of(2026, 10, 12),
++            weekFood = listOf(eggs),
++            mealScores = emptyMap(),
++            energy = mapOf(day to com.noop.energy.EnergyFixtures.day(day, totalKcal = 2600.0, workouts = listOf(com.noop.energy.EnergyFixtures.workout(start, start + 3600)))),
++            kcalTarget = null,
++            weekWorkouts = listOf(gym),
++            sessions = emptyList(),
++            personLines = emptyList(),
++            zone = madrid,
++            completeDays = emptySet(),
++        )
++        assertTrue(priced.contains("- 2026-10-14: 180 kcal (P 12 g, C 1 g, F 13 g) [incomplete: not the whole day was logged]; burned 2600 kcal. breakfast"))
++        assertFalse(priced.contains("kcal, balance"))   // no balance on a day that was only partly logged
++        assertTrue(priced.contains("- 2026-10-14 18:00 Strength, 60 min, HR avg 118, 490 kcal (by the sport's MET)"))
++        val whole = WeeklyReviews.prompt(
++            LocalDate.of(2026, 10, 12), listOf(eggs), emptyMap(), mapOf(day to com.noop.energy.EnergyFixtures.day(day, totalKcal = 2600.0)),
++            null, emptyList(), emptyList(), emptyList(), madrid, completeDays = setOf(day),
++        )
++        assertTrue(whole.contains("- 2026-10-14: 180 kcal (P 12 g, C 1 g, F 13 g); burned 2600 kcal, balance -2420. breakfast"))
+     }
+ 
+     @Test
+-- 
+2.54.0
+

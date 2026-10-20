@@ -1,0 +1,283 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 17:20:47 +0200
+Subject: [PATCH] perf(energy): split the day pass so ART compiles it
+
+DayEnergyModel.compute was 18,896 code units, past ART's compiler limit, so it ran
+interpreted on every read. The store reads, the per-day reduction and the model inputs
+now live in their own functions (compute < 1,500; reduce 2,136; stores 1,990). Same
+reads, same order, same results.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../java/com/noop/energy/DayEnergyModel.kt    | 235 +++++++++++-------
+ 1 file changed, 145 insertions(+), 90 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt b/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
+index 012f28ae..2fb2276e 100644
+--- a/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
++++ b/android/app/src/main/java/com/noop/energy/DayEnergyModel.kt
+@@ -352,6 +352,9 @@ object DayEnergyModel {
+     /**
+      * Compose [wanted] (sorted). With [lookback] the [STEPS_MEMORY_DAYS] days before the first are composed
+      * too, unreturned, so a day without steps can borrow its neighbours' median; without it only [wanted].
++     *
++     * The pass is split into [stores], [reduce] and [inputs]: ART refuses to compile a method past its
++     * instruction limit and runs it interpreted on every call, and the pass in one piece was nearly twice it.
+      */
+     private suspend fun compute(
+         ctx: Context,
+@@ -370,7 +373,48 @@ object DayEnergyModel {
+         val today = EnergyDays.dayOf(nowEpochS, zone)
+         val recentFrom = EnergyDays.plusDays(today, -RECENT_DAYS)
+         val days = cache(ctx)
++        val stores = stores(ctx, repo, strapId, lookFrom, blendFrom, to, zone)
+ 
++        var changed = false
++        val priorSteps = ArrayList<Double>()
++        val out = LinkedHashMap<String, DayEnergy>()
++        val toCompose = if (lookback) EnergyDays.days(lookFrom, to) else wanted
++        val wantedSet = wanted.toSet()
++        for (day in toCompose) {
++            val restingHr = stores.restingByDay.floorEntry(day)?.value
++            val hrMax = stores.profile.hrMaxOn(day)
++            val windows = stores.windowsByDay[day] ?: emptyList()
++            val (raw, moved) = reduce(repo, strapId, day, zone, day >= recentFrom, windows, restingHr, hrMax, days)
++            if (moved) changed = true
++            val energy = EnergyModel.compose(inputs(day, raw, stores, windows, restingHr, hrMax, priorSteps, nowEpochS, zone))
++            energy.steps?.takeIf { it.source != StepsSource.ESTIMATED }?.let { priorSteps += it.kcal }
++            if (day in wantedSet) out[day] = energy
++        }
++        if (changed) runCatching { mutex.withLock { EnergyCacheFile.write(ctx, HashMap(days)) } }
++        return out
++    }
++
++    /** What a pass reads from the stores once for its whole span. */
++    private class Stores(
++        val profile: Profile,
++        val weights: List<Pair<String, Double>>,
++        val restingByDay: TreeMap<String, Double>,
++        val strapTotalByDay: Map<String, Double>,
++        val windowsByDay: Map<String, List<Window>>,
++        val claudeByKey: Map<WorkoutKey, Double>,
++        val mealsByDay: Map<String, List<FoodEntry>>,
++        val phone: Map<String, PhoneDay>,
++    )
++
++    private suspend fun stores(
++        ctx: Context,
++        repo: WhoopRepository,
++        strapId: String,
++        lookFrom: String,
++        blendFrom: String,
++        to: String,
++        zone: ZoneId,
++    ): Stores {
+         val profile = profile(ctx)
+         val weights = runCatching {
+             repo.metricSeries(HealthConnectImporter.HC_DEVICE, ScaleBody.KEY_WEIGHT, "0000-01-01", to).map { it.day to it.value }
+@@ -397,100 +441,111 @@ object DayEnergyModel {
+             runCatching { repo.appleDaily(HealthConnectImporter.HC_DEVICE, lookFrom, to) + repo.appleDaily("apple-health", lookFrom, to) }
+                 .getOrDefault(emptyList()),
+         )
++        return Stores(profile, weights, restingByDay, strapTotalByDay, windowsByDay, claudeByKey, mealsByDay, phone)
++    }
+ 
+-        var changed = false
+-        val priorSteps = ArrayList<Double>()
+-        val out = LinkedHashMap<String, DayEnergy>()
+-        val toCompose = if (lookback) EnergyDays.days(lookFrom, to) else wanted
+-        val wantedSet = wanted.toSet()
+-        for (day in toCompose) {
+-            val startS = EnergyDays.startEpochS(day, zone)
+-            val endS = EnergyDays.endEpochS(day, zone)
+-            val restingHr = restingByDay.floorEntry(day)?.value
+-            val hrMax = profile.hrMaxOn(day)
+-            val windows = windowsByDay[day] ?: emptyList()
+-            val setup = setupKey(windows, restingHr, hrMax)
+-            val recent = day >= recentFrom
+-            val cached = days[day]
+-            val hrKey = if (recent) runCatching { hrKey(repo, strapId, startS, endS) }.getOrNull() else null
+-            val stepsKey = if (recent) runCatching { stepsKey(repo, strapId, startS, endS) }.getOrNull() else null
+-            val setupStale = cached == null || cached.setupKey != setup
+-            val stepsStale = setupStale || (stepsKey != null && cached!!.stepsKey != stepsKey)
+-            val hrStale = setupStale || (hrKey != null && cached!!.hrKey != hrKey)
+-            val raw = if (!stepsStale && !hrStale) {
+-                cached!!
+-            } else {
+-                // Steps: the day's samples, re-read only when their witness moved; else the cached ticks.
+-                // The unlogged minutes need the steps per minute too, so a heart-rate change re-reads them as well.
+-                val samples = if (stepsStale || hrStale) runCatching { stepSamplesUnion(repo, strapId, startS, endS - 1) }.getOrDefault(emptyList()) else emptyList()
+-                val dayTicks = if (stepsStale) ticks(samples, startS, endS - 1) else cached!!.strapTicks
+-                // Heart rate: the whole day once; every window is a slice of it, and the rest is the unlogged minutes.
+-                val dayHr: List<HrSample> = if (hrStale) runCatching { repo.hrSamplesUnion(strapId, startS, endS - 1, SAMPLE_LIMIT) }.getOrDefault(emptyList()) else emptyList()
+-                val reduced = windows.map { w ->
+-                    val old = cached?.window(w.startTs, w.endTs, w.row.sport)
+-                    val hr = when {
+-                        !hrStale && old != null -> old.hr
+-                        w.durationS <= 0L -> HrIntegral.empty(restingHr, hrMax ?: HrIntegral.EMPTY_HRMAX)
+-                        else -> HrIntegral.of(dayHr, w.startTs, w.endTs, restingHr, hrMax)
+-                    }
+-                    val wTicks = if (stepsStale || old == null) ticks(samples, w.startTs, w.endTs) else old.strapTicks
+-                    WindowRaw(w.startTs, w.endTs, w.row.sport, hr, wTicks)
+-                }
+-                val unlogged = if (hrStale) {
+-                    val byMinute = UnloggedMinutes.ticksByMinute(samples)
+-                    UnloggedMinutes.of(dayHr, byMinute, windows, startS, endS, restingHr, hrMax).map { UnloggedRaw(it.minute, it.meanBpm, it.steps) }
+-                } else {
+-                    cached!!.unlogged
+-                }
+-                val hasHr = if (hrStale) dayHr.isNotEmpty() else cached!!.hasHr
+-                DayRaw(day, setup, hrKey ?: cached?.hrKey ?: "", stepsKey ?: cached?.stepsKey ?: "", dayTicks, reduced, hasHr, unlogged).also {
+-                    days[day] = it
+-                    // The file is rewritten only for a reduction whose CONTENT moved: a live heart-rate stream
+-                    // outside any window moves today's witness on every read and nothing else.
+-                    if (cached == null || !cached.sameContentAs(it)) changed = true
+-                }
++    /**
++     * [day]'s reduction: the cached one while its witnesses match, else re-read from the raw streams and put
++     * in [days]. The flag is true when the reduction's CONTENT moved, so the cache file needs rewriting.
++     */
++    private suspend fun reduce(
++        repo: WhoopRepository,
++        strapId: String,
++        day: String,
++        zone: ZoneId,
++        recent: Boolean,
++        windows: List<Window>,
++        restingHr: Double?,
++        hrMax: Double?,
++        days: ConcurrentHashMap<String, DayRaw>,
++    ): Pair<DayRaw, Boolean> {
++        val startS = EnergyDays.startEpochS(day, zone)
++        val endS = EnergyDays.endEpochS(day, zone)
++        val setup = setupKey(windows, restingHr, hrMax)
++        val cached = days[day]
++        val hrKey = if (recent) runCatching { hrKey(repo, strapId, startS, endS) }.getOrNull() else null
++        val stepsKey = if (recent) runCatching { stepsKey(repo, strapId, startS, endS) }.getOrNull() else null
++        val setupStale = cached == null || cached.setupKey != setup
++        val stepsStale = setupStale || (stepsKey != null && cached!!.stepsKey != stepsKey)
++        val hrStale = setupStale || (hrKey != null && cached!!.hrKey != hrKey)
++        if (!stepsStale && !hrStale) return cached!! to false
++        // Steps: the day's samples, re-read only when their witness moved; else the cached ticks.
++        // The unlogged minutes need the steps per minute too, so a heart-rate change re-reads them as well.
++        val samples = runCatching { stepSamplesUnion(repo, strapId, startS, endS - 1) }.getOrDefault(emptyList())
++        val dayTicks = if (stepsStale) ticks(samples, startS, endS - 1) else cached!!.strapTicks
++        // Heart rate: the whole day once; every window is a slice of it, and the rest is the unlogged minutes.
++        val dayHr: List<HrSample> = if (hrStale) runCatching { repo.hrSamplesUnion(strapId, startS, endS - 1, SAMPLE_LIMIT) }.getOrDefault(emptyList()) else emptyList()
++        val reduced = windows.map { w ->
++            val old = cached?.window(w.startTs, w.endTs, w.row.sport)
++            val hr = when {
++                !hrStale && old != null -> old.hr
++                w.durationS <= 0L -> HrIntegral.empty(restingHr, hrMax ?: HrIntegral.EMPTY_HRMAX)
++                else -> HrIntegral.of(dayHr, w.startTs, w.endTs, restingHr, hrMax)
+             }
+-            val age = profile.ageOn(day)
+-            val body = BodyInputs(
++            val wTicks = if (stepsStale || old == null) ticks(samples, w.startTs, w.endTs) else old.strapTicks
++            WindowRaw(w.startTs, w.endTs, w.row.sport, hr, wTicks)
++        }
++        val unlogged = if (hrStale) {
++            val byMinute = UnloggedMinutes.ticksByMinute(samples)
++            UnloggedMinutes.of(dayHr, byMinute, windows, startS, endS, restingHr, hrMax).map { UnloggedRaw(it.minute, it.meanBpm, it.steps) }
++        } else {
++            cached!!.unlogged
++        }
++        val hasHr = if (hrStale) dayHr.isNotEmpty() else cached!!.hasHr
++        val raw = DayRaw(day, setup, hrKey ?: cached?.hrKey ?: "", stepsKey ?: cached?.stepsKey ?: "", dayTicks, reduced, hasHr, unlogged)
++        days[day] = raw
++        // The file is rewritten only for a reduction whose CONTENT moved: a live heart-rate stream
++        // outside any window moves today's witness on every read and nothing else.
++        return raw to (cached == null || !cached.sameContentAs(raw))
++    }
++
++    /** The model's inputs for [day], from its reduction [raw] and the pass's [stores]. */
++    private fun inputs(
++        day: String,
++        raw: DayRaw,
++        stores: Stores,
++        windows: List<Window>,
++        restingHr: Double?,
++        hrMax: Double?,
++        priorSteps: List<Double>,
++        nowEpochS: Long,
++        zone: ZoneId,
++    ): DayInputs {
++        val profile = stores.profile
++        val phone = stores.phone[day]
++        return DayInputs(
++            day = day,
++            fraction = EnergyDays.fraction(day, nowEpochS, zone),
++            body = BodyInputs(
+                 sex = profile.sex,
+-                weightKg = EnergyEquations.weightOn(day, weights) ?: profile.weightKg,
++                weightKg = EnergyEquations.weightOn(day, stores.weights) ?: profile.weightKg,
+                 heightCm = profile.heightCm,
+-                ageYears = age,
+-            )
+-            val inputs = DayInputs(
+-                day = day,
+-                fraction = EnergyDays.fraction(day, nowEpochS, zone),
+-                body = body,
+-                trainingDays28 = EnergyModel.trainingDays28(day, windowsByDay),
+-                strapDaySteps = raw.strapTicks?.let { profile.steps(it) },
+-                phoneDaySteps = phone[day]?.steps,
+-                windows = windows.map { w ->
+-                    val wr = raw.window(w.startTs, w.endTs, w.row.sport)
+-                    WindowInputs(
+-                        window = w,
+-                        hr = wr?.hr ?: HrIntegral.empty(restingHr, hrMax ?: HrIntegral.EMPTY_HRMAX),
+-                        strapSteps = wr?.strapTicks?.let { profile.steps(it) },
+-                        claudeKcal = claudeByKey[w.key],
+-                        externalKcal = EnergyModel.externalKcal(w.row),
+-                    )
+-                },
+-                meals = mealsByDay[day] ?: emptyList(),
+-                priorStepsKcal = priorSteps.takeLast(STEPS_MEMORY_DAYS.toInt()),
+-                unlogged = if (raw.hasHr) raw.unlogged.map { UnloggedMinute(it.minute, it.meanBpm, profile.steps(it.ticks)) } else null,
+-                restingHr = restingHr,
+-                hrMax = hrMax,
+-                diagnostics = EnergyDiagnostics(
+-                    strapTotalKcal = strapTotalByDay[day],
+-                    phoneActiveKcal = phone[day]?.activeKcal,
+-                    phoneBasalKcal = phone[day]?.basalKcal,
+-                ),
+-            )
+-            val energy = EnergyModel.compose(inputs)
+-            energy.steps?.takeIf { it.source != StepsSource.ESTIMATED }?.let { priorSteps += it.kcal }
+-            if (day in wantedSet) out[day] = energy
+-        }
+-        if (changed) runCatching { mutex.withLock { EnergyCacheFile.write(ctx, HashMap(days)) } }
+-        return out
++                ageYears = profile.ageOn(day),
++            ),
++            trainingDays28 = EnergyModel.trainingDays28(day, stores.windowsByDay),
++            strapDaySteps = raw.strapTicks?.let { profile.steps(it) },
++            phoneDaySteps = phone?.steps,
++            windows = windows.map { w ->
++                val wr = raw.window(w.startTs, w.endTs, w.row.sport)
++                WindowInputs(
++                    window = w,
++                    hr = wr?.hr ?: HrIntegral.empty(restingHr, hrMax ?: HrIntegral.EMPTY_HRMAX),
++                    strapSteps = wr?.strapTicks?.let { profile.steps(it) },
++                    claudeKcal = stores.claudeByKey[w.key],
++                    externalKcal = EnergyModel.externalKcal(w.row),
++                )
++            },
++            meals = stores.mealsByDay[day] ?: emptyList(),
++            priorStepsKcal = priorSteps.takeLast(STEPS_MEMORY_DAYS.toInt()),
++            unlogged = if (raw.hasHr) raw.unlogged.map { UnloggedMinute(it.minute, it.meanBpm, profile.steps(it.ticks)) } else null,
++            restingHr = restingHr,
++            hrMax = hrMax,
++            diagnostics = EnergyDiagnostics(
++                strapTotalKcal = stores.strapTotalByDay[day],
++                phoneActiveKcal = phone?.activeKcal,
++                phoneBasalKcal = phone?.basalKcal,
++            ),
++        )
+     }
+ }
+ 
+-- 
+2.54.0
+

@@ -1,0 +1,796 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 16:16:16 +0200
+Subject: [PATCH] fix(backup): the .noopbak carries food, workouts and weekly
+ reviews
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The backup held only the SQLite, settings.json and manifest.json, so a
+restore onto a new phone brought back the strap history but an empty Food
+tab, workouts without exercises and no weekly reviews.
+
+VictorBackupFiles adds optional victor/* entries between settings.json and
+manifest.json: files/food (log + thumbnails), files/training,
+files/weekly, the fork's user prefs (goals, coach agenda switch, Mi día
+view, automatic vibrations) and an end marker with the count. Never in the
+copy: the Claude key and consent (encrypted store, never read), the
+Tasker token and enable flag, the Google Tasks flag, the scale watermark.
+
+Restore runs only after the new DB has landed and passed its check, is
+all or nothing for our part (path whitelist, no .., size and count caps,
+end marker), replaces only the folders the backup carries, and never fails
+the DB restore. Older backups restore exactly as before.
+
+Two hook lines in DataBackup (victor:backup); Settings blurb mentions
+meals and that the Claude key is not in the copy.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/main/java/com/noop/data/DataBackup.kt |   2 +
+ .../java/com/noop/data/VictorBackupFiles.kt   | 376 ++++++++++++++++++
+ .../strings_victor_l10n_settings.xml          |   2 +-
+ .../values/strings_victor_l10n_settings.xml   |   2 +-
+ .../com/noop/data/VictorBackupFilesTest.kt    | 320 +++++++++++++++
+ 5 files changed, 700 insertions(+), 2 deletions(-)
+ create mode 100644 android/app/src/main/java/com/noop/data/VictorBackupFiles.kt
+ create mode 100644 android/app/src/test/java/com/noop/data/VictorBackupFilesTest.kt
+
+diff --git a/android/app/src/main/java/com/noop/data/DataBackup.kt b/android/app/src/main/java/com/noop/data/DataBackup.kt
+index 82ee87c7..9fe7a1e4 100644
+--- a/android/app/src/main/java/com/noop/data/DataBackup.kt
++++ b/android/app/src/main/java/com/noop/data/DataBackup.kt
+@@ -308,6 +308,7 @@ object DataBackup {
+                         zip.write(settingsJson.toByteArray(Charsets.UTF_8))
+                         zip.closeEntry()
+                     }
++                    VictorBackupFiles.writeEntries(zip, appContext)   // victor:backup — food, workouts, weeks, prefs
+                     zip.putNextEntry(ZipEntry(MANIFEST_ENTRY_NAME))
+                     zip.write(manifestJson.toByteArray(Charsets.UTF_8))
+                     zip.closeEntry()
+@@ -557,6 +558,7 @@ object DataBackup {
+             }
+             tempSettings.delete()
+         }
++        VictorBackupFiles.restore(appContext) { resolver.openInputStream(uri) }   // victor:backup — after the DB landed
+ 
+         rollbackFile.delete()
+         tempSqlite.delete()
+diff --git a/android/app/src/main/java/com/noop/data/VictorBackupFiles.kt b/android/app/src/main/java/com/noop/data/VictorBackupFiles.kt
+new file mode 100644
+index 00000000..ca4274f5
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/data/VictorBackupFiles.kt
+@@ -0,0 +1,376 @@
++package com.noop.data
++
++import android.content.Context
++import android.util.Log
++import com.noop.ui.NoopPrefs
++import org.json.JSONObject
++import java.io.File
++import java.io.FileInputStream
++import java.io.FileOutputStream
++import java.io.IOException
++import java.io.InputStream
++import java.io.OutputStream
++import java.util.zip.ZipEntry
++import java.util.zip.ZipInputStream
++import java.util.zip.ZipOutputStream
++
++/**
++ * victor:backup — the fork's own data inside the `.noopbak`, which upstream's archive (the SQLite,
++ * `settings.json` and `manifest.json`) leaves out: the food log with its thumbnails (`files/food`), the
++ * workouts' exercises and Claude's analyses (`files/training`), the weekly reviews (`files/weekly`) and
++ * the fork's user preferences in `noop_prefs` ([PREFS]). Without them, restoring onto a new phone brought
++ * back the strap history but an empty Food tab, workouts without exercises and no weeks.
++ *
++ * Entries, all optional and all under [PREFIX]: `victor/prefs.json`, `victor/files/<dir>/<path>` for every
++ * file of the three folders, and `victor/end.json` closing them ([END_ENTRY]). [DataBackup.exportTo] writes
++ * them after `settings.json` and before `manifest.json`, so the DB entry stays first and an older importer,
++ * which picks entries by their file name, never meets one of ours under a name it knows ([RESERVED_NAMES]
++ * are refused on both sides).
++ *
++ * Restore is all or nothing for our part, and never fails the DB restore (the same rule upstream applies
++ * to `settings.json`): [DataBackup.importFrom] calls [restore] only after the new database has landed and
++ * passed its check, so a rolled-back DB restore never reaches it. Every entry is checked before anything
++ * live is touched (no `..`, no absolute paths, only the three folders, size caps); one bad entry and none
++ * of ours is applied. A folder the backup carries replaces the device's one whole; a folder it does not
++ * carry (every older backup) is left exactly as it was. The stores ([com.noop.food.FoodStore],
++ * [com.noop.training.TrainingStore], [com.noop.weekly.WeeklyReviewer]) read their file again on the next
++ * launch, which is the restart upstream already asks for after a restore.
++ *
++ * Never in the copy: the Claude key and the coach's consent (encrypted in `noop_ai_secure_prefs`, never
++ * read here), the Tasker token, and any per-phone state (see [PREFS]).
++ */
++internal object VictorBackupFiles {
++
++    private const val TAG = "VictorBackup"
++
++    /** Every entry of ours starts with this. */
++    const val PREFIX = "victor/"
++
++    private const val FILES_PREFIX = "victor/files/"
++
++    /** The preferences entry ([PREFS] only). */
++    const val PREFS_ENTRY = "victor/prefs.json"
++
++    /**
++     * Written after all of ours with their count. A copy cut exactly between two entries still reads as a
++     * clean end, so without it a half-carried folder could replace a whole one.
++     */
++    const val END_ENTRY = "victor/end.json"
++
++    /** The app-private folders under `filesDir` that hold the fork's data. */
++    val DIRS: List<String> = listOf("food", "training", "weekly")
++
++    /** Upstream's entry names: an importer that matches by file name must never meet one of ours. */
++    private val RESERVED_NAMES = setOf("noop-backup.sqlite", BackupSettingsCodec.ENTRY_NAME, BackupManifest.ENTRY_NAME)
++
++    /** Caps, far above a real log (a thumbnail is tens of KB) and checked on export and on restore. */
++    const val MAX_ENTRY_BYTES = 64L * 1024 * 1024
++    const val MAX_TOTAL_BYTES = 2L * 1024 * 1024 * 1024
++    const val MAX_ENTRIES = 100_000
++    private const val MAX_PREFS_BYTES = 64L * 1024
++    private const val MAX_DEPTH = 4
++    private val SEGMENT = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
++
++    /** Where a restore is staged and where the replaced folders wait until the swap is done. */
++    private const val STAGING = "victor-restore.staging"
++    private const val ASIDE_SUFFIX = ".victor-restore-old"
++
++    enum class Kind { BOOL, STRING }
++
++    /**
++     * The fork's preferences that travel, all in `noop_prefs`: the goals, the coach's agenda switch, the
++     * "Mi día" view and the automatic-vibration switch. Left out on purpose: `victor.tasker.token` (a
++     * secret) and `victor.tasker.enabled` (the bridge belongs to that phone's Tasker), `victor.gtasks.connected`
++     * (the Google grant is per phone and its token is never stored), `victor.scale.newestReading*` (that
++     * phone's Health Connect watermark) and `victor.today.quietCards.v1` (once per install).
++     */
++    val PREFS: Map<String, Kind> = linkedMapOf(
++        "victor.goals.goal" to Kind.STRING,
++        "victor.goals.targetWeightKg" to Kind.STRING,
++        "victor.goals.dailyKcal" to Kind.STRING,
++        "victor.goals.note" to Kind.STRING,
++        "victor.coach.agenda" to Kind.BOOL,
++        "victor.day.view" to Kind.STRING,
++        "victor.haptics.automatic" to Kind.BOOL,
++    )
++
++    // ── Preferences (pure JSON + whitelist) ─────────────────────────────────────
++
++    /** The whitelisted, correctly typed subset of [values] as `prefs.json`, or null when there is none. */
++    fun encodePrefs(values: Map<String, Any?>): String? {
++        val obj = JSONObject()
++        for ((key, kind) in PREFS) coerce(values[key], kind)?.let { obj.put(key, it) }
++        return if (obj.length() == 0) null else obj.toString()
++    }
++
++    /** A `prefs.json` down to its whitelisted, correctly typed keys; anything malformed is dropped. */
++    fun decodePrefs(json: String): Map<String, Any> {
++        val obj = runCatching { JSONObject(json) }.getOrNull() ?: return emptyMap()
++        val out = LinkedHashMap<String, Any>()
++        for ((key, kind) in PREFS) {
++            if (obj.has(key)) coerce(obj.opt(key), kind)?.let { out[key] = it }
++        }
++        return out
++    }
++
++    private fun coerce(value: Any?, kind: Kind): Any? = when (kind) {
++        Kind.BOOL -> value as? Boolean
++        Kind.STRING -> (value as? String)?.take(1_000)
++    }
++
++    // ── Export ──────────────────────────────────────────────────────────────────
++
++    /** Live wrapper for [DataBackup.exportTo]: this phone's folders and preferences. */
++    fun writeEntries(zip: ZipOutputStream, context: Context) {
++        val app = context.applicationContext
++        writeEntries(zip, app.filesDir, prefsSnapshot(app))
++    }
++
++    /**
++     * Write our entries into [zip]: [prefsJson] when given, every file [plan] keeps, then [END_ENTRY]. A
++     * file that cannot be opened (deleted meanwhile) is skipped; a failure WRITING the archive propagates,
++     * so the export fails as a whole, as upstream's does. Nothing at all is written when there is nothing.
++     */
++    @Throws(IOException::class)
++    fun writeEntries(zip: ZipOutputStream, filesDir: File, prefsJson: String?) {
++        var written = 0
++        if (prefsJson != null) {
++            zip.putNextEntry(ZipEntry(PREFS_ENTRY))
++            zip.write(prefsJson.toByteArray(Charsets.UTF_8))
++            zip.closeEntry()
++            written++
++        }
++        for ((name, file) in plan(filesDir)) {
++            val input = runCatching { FileInputStream(file) }.getOrNull() ?: continue
++            input.use {
++                zip.putNextEntry(ZipEntry(name))
++                copyBounded(it, zip, MAX_ENTRY_BYTES)
++                zip.closeEntry()
++            }
++            written++
++        }
++        if (written == 0) return
++        zip.putNextEntry(ZipEntry(END_ENTRY))
++        zip.write(JSONObject().put("entries", written).toString().toByteArray(Charsets.UTF_8))
++        zip.closeEntry()
++    }
++
++    /**
++     * Entry name → file for every file of [DIRS] under [filesDir], sorted. Skips `.tmp` files (a write in
++     * flight) and names the restore would refuse. A folder that breaks a cap is left out WHOLE: restoring
++     * replaces a folder, so half of one would lose data.
++     */
++    fun plan(filesDir: File): List<Pair<String, File>> {
++        val out = ArrayList<Pair<String, File>>()
++        var total = 0L
++        for (dir in DIRS) {
++            val root = File(filesDir, dir)
++            if (!root.isDirectory) continue
++            val files = root.walkTopDown()
++                .filter { it.isFile && !it.name.endsWith(".tmp") }
++                .mapNotNull { f ->
++                    val rel = f.relativeTo(root).invariantSeparatorsPath
++                    val name = FILES_PREFIX + dir + "/" + rel
++                    if (relativePathOf(name) == null) null else name to f
++                }
++                .sortedBy { it.first }
++                .toList()
++            val bytes = files.sumOf { it.second.length() }
++            val fits = files.all { it.second.length() <= MAX_ENTRY_BYTES } &&
++                total + bytes <= MAX_TOTAL_BYTES && out.size + files.size <= MAX_ENTRIES
++            if (!fits) continue
++            out += files
++            total += bytes
++        }
++        return out
++    }
++
++    // ── Restore ─────────────────────────────────────────────────────────────────
++
++    /** What [restoreInto] did. */
++    sealed interface Restored {
++        /** The backup carries nothing of ours (every older backup): nothing was touched. */
++        data object Absent : Restored
++
++        /** [dirs] replaced the device's folders; [prefs] are the preferences to apply. */
++        data class Done(val dirs: Set<String>, val prefs: Map<String, Any>) : Restored
++
++        /** Our part was refused or could not be applied, and the device's files are as they were. */
++        data class Skipped(val reason: String) : Restored
++    }
++
++    /**
++     * Live wrapper for [DataBackup.importFrom], called once the new database is in place. Never throws:
++     * our part can only add to a restore, never fail it.
++     */
++    fun restore(context: Context, open: () -> InputStream?) {
++        val app = context.applicationContext
++        val result = runCatching {
++            open()?.use { restoreInto(app.filesDir, it) } ?: Restored.Skipped("could not reopen the backup")
++        }.getOrElse { Restored.Skipped(it.message ?: it.javaClass.simpleName) }
++        when (result) {
++            is Restored.Done -> runCatching { applyPrefs(app, result.prefs) }
++            is Restored.Skipped -> runCatching { Log.w(TAG, "Fork data not restored: ${result.reason}") }
++            Restored.Absent -> Unit
++        }
++    }
++
++    /**
++     * Stage our entries of the backup in [input] under [filesDir], check them all, then swap the carried
++     * folders in. The staging folder is gone afterwards whatever happens.
++     */
++    fun restoreInto(
++        filesDir: File,
++        input: InputStream,
++        maxEntryBytes: Long = MAX_ENTRY_BYTES,
++        maxTotalBytes: Long = MAX_TOTAL_BYTES,
++        maxEntries: Int = MAX_ENTRIES,
++    ): Restored {
++        val staging = File(filesDir, STAGING)
++        try {
++            staging.deleteRecursively()
++            val staged = stage(input, staging, maxEntryBytes, maxTotalBytes, maxEntries)
++            if (staged !is Restored.Done) return staged
++            if (!swapIn(File(staging, "files"), staged.dirs, filesDir)) {
++                return Restored.Skipped("could not move the restored folders into place")
++            }
++            return staged
++        } finally {
++            staging.deleteRecursively()
++        }
++    }
++
++    /** Copy our entries into [staging], refusing the lot on the first bad one. */
++    private fun stage(
++        input: InputStream,
++        staging: File,
++        maxEntryBytes: Long,
++        maxTotalBytes: Long,
++        maxEntries: Int,
++    ): Restored {
++        val filesRoot = File(staging, "files")
++        val rootPath = filesRoot.canonicalPath + File.separator
++        val dirs = LinkedHashSet<String>()
++        var prefs: Map<String, Any>? = null
++        var count = 0
++        var total = 0L
++        var declared: Int? = null
++        try {
++            ZipInputStream(input).use { zip ->
++                var entry = zip.nextEntry
++                while (entry != null) {
++                    val name = entry.name
++                    when {
++                        !name.startsWith(PREFIX) || entry.isDirectory -> Unit
++                        declared != null -> return Restored.Skipped("entry after the end marker: $name")
++                        name == END_ENTRY -> {
++                            val buf = java.io.ByteArrayOutputStream()
++                            if (!copyBounded(zip, buf, 1_024)) return Restored.Skipped("end marker too large")
++                            declared = runCatching { JSONObject(buf.toString(Charsets.UTF_8.name())).getInt("entries") }
++                                .getOrDefault(-1)
++                        }
++                        name == PREFS_ENTRY -> {
++                            if (prefs != null) return Restored.Skipped("prefs.json twice")
++                            val buf = java.io.ByteArrayOutputStream()
++                            if (!copyBounded(zip, buf, MAX_PREFS_BYTES)) return Restored.Skipped("prefs.json too large")
++                            prefs = decodePrefs(buf.toString(Charsets.UTF_8.name()))
++                        }
++                        else -> {
++                            val segments = relativePathOf(name) ?: return Restored.Skipped("refused entry name: $name")
++                            val dest = File(filesRoot, segments.joinToString(File.separator))
++                            if (!dest.canonicalPath.startsWith(rootPath)) return Restored.Skipped("entry escapes its folder: $name")
++                            if (dest.exists()) return Restored.Skipped("entry twice: $name")
++                            if (++count > maxEntries) return Restored.Skipped("too many entries")
++                            dest.parentFile?.mkdirs()
++                            val cap = minOf(maxEntryBytes, maxTotalBytes - total)
++                            val ok = FileOutputStream(dest).use { out -> copyBounded(zip, out, cap) }
++                            if (!ok) return Restored.Skipped("entry too large: $name")
++                            total += dest.length()
++                            dirs += segments.first()
++                        }
++                    }
++                    entry = zip.nextEntry
++                }
++            }
++        } catch (e: IOException) {
++            return Restored.Skipped("unreadable archive: ${e.message}")
++        }
++        val carried = count + (if (prefs != null) 1 else 0)
++        if (carried == 0 && declared == null) return Restored.Absent
++        if (declared != carried) return Restored.Skipped("incomplete: $carried of ${declared ?: "?"} entries")
++        return Restored.Done(dirs, prefs.orEmpty())
++    }
++
++    /**
++     * Move each staged folder in place of the live one. The live one is first renamed aside (same
++     * filesystem, so each step is atomic), and any failure puts every folder back as it was.
++     */
++    private fun swapIn(stagedRoot: File, dirs: Set<String>, filesDir: File): Boolean {
++        val done = ArrayList<String>()
++        for (dir in dirs.sorted()) {
++            val live = File(filesDir, dir)
++            val aside = File(filesDir, dir + ASIDE_SUFFIX)
++            aside.deleteRecursively()
++            val hadLive = live.exists()
++            val ok = (!hadLive || live.renameTo(aside)) && File(stagedRoot, dir).renameTo(live)
++            if (!ok) {
++                if (hadLive && aside.exists()) { live.deleteRecursively(); aside.renameTo(live) }
++                for (prev in done.asReversed()) {
++                    val prevLive = File(filesDir, prev)
++                    val prevAside = File(filesDir, prev + ASIDE_SUFFIX)
++                    prevLive.deleteRecursively()
++                    if (prevAside.exists()) prevAside.renameTo(prevLive)
++                }
++                return false
++            }
++            done += dir
++        }
++        for (dir in done) File(filesDir, dir + ASIDE_SUFFIX).deleteRecursively()
++        return true
++    }
++
++    /**
++     * The path segments under `victor/files/` of a valid entry name, or null: the first segment one of
++     * [DIRS], at most [MAX_DEPTH] more, each plain ([SEGMENT]: no `..`, no hidden names, no separators),
++     * and never one of upstream's [RESERVED_NAMES].
++     */
++    fun relativePathOf(name: String): List<String>? {
++        if (!name.startsWith(FILES_PREFIX)) return null
++        val segments = name.removePrefix(FILES_PREFIX).split('/')
++        if (segments.size < 2 || segments.size > MAX_DEPTH + 1) return null
++        if (segments.first() !in DIRS) return null
++        if (segments.any { !SEGMENT.matches(it) }) return null
++        if (segments.last() in RESERVED_NAMES) return null
++        return segments
++    }
++
++    // ── SharedPreferences boundary ──────────────────────────────────────────────
++
++    private fun prefsSnapshot(context: Context): String? =
++        runCatching { encodePrefs(context.getSharedPreferences(NoopPrefs.NAME, Context.MODE_PRIVATE).all) }.getOrNull()
++
++    private fun applyPrefs(context: Context, values: Map<String, Any>) {
++        if (values.isEmpty()) return
++        val editor = context.getSharedPreferences(NoopPrefs.NAME, Context.MODE_PRIVATE).edit()
++        for ((key, value) in values) {
++            when (value) {
++                is Boolean -> editor.putBoolean(key, value)
++                is String -> editor.putString(key, value)
++            }
++        }
++        editor.apply()
++    }
++
++    /** Copy at most [cap] bytes; false (with the copy cut short) when [input] holds more. */
++    private fun copyBounded(input: InputStream, out: OutputStream, cap: Long): Boolean {
++        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
++        var total = 0L
++        while (true) {
++            val read = input.read(buffer)
++            if (read < 0) return true
++            if (total + read > cap) return false
++            out.write(buffer, 0, read)
++            total += read
++        }
++    }
++}
+diff --git a/android/app/src/main/res/values-es/strings_victor_l10n_settings.xml b/android/app/src/main/res/values-es/strings_victor_l10n_settings.xml
+index 82239a6b..59b78761 100644
+--- a/android/app/src/main/res/values-es/strings_victor_l10n_settings.xml
++++ b/android/app/src/main/res/values-es/strings_victor_l10n_settings.xml
+@@ -88,7 +88,7 @@
+     <string name="victor_l10n_settings_turn_on_a_test_for_the_thing_that_s_wrong">Activa una prueba para lo que falla, ponte la pulsera y toca Informar. Aquí también están el registro de la pulsera, la recalibración, la exportación programada y las pruebas experimentales.</string>
+     <string name="victor_l10n_settings_charge_is_noop_s_daily_readiness_score">La Carga es la puntuación diaria de preparación de NOOP, aprendida con el tiempo de tu propia VFC, tu frecuencia cardiaca en reposo y más. Tu historial se conserva.</string>
+     <string name="victor_l10n_settings_charge_baseline_reset_noop_will_re_learn">Referencia de la Carga reiniciada. NOOP la volverá a aprender desde esta noche. Tu historial se conserva y tardará unas noches en asentarse.</string>
+-    <string name="victor_l10n_settings_move_all_your_noop_data_to_another_phone">Pasa todos tus datos de NOOP a otro móvil. Exportar lo guarda todo (historial, sueños, entrenamientos, ajustes) en un único archivo que puedes copiar; importar sustituye los datos de este móvil por una copia de seguridad.</string>
++    <string name="victor_l10n_settings_move_all_your_noop_data_to_another_phone">Pasa todos tus datos de NOOP a otro móvil. Exportar lo guarda todo (historial, sueños, entrenamientos, comidas, ajustes) en un único archivo que puedes copiar, salvo la clave de Claude; importar sustituye los datos de este móvil por una copia de seguridad.</string>
+     <string name="victor_l10n_settings_have_noop_save_a_dated_backup_to_a_folder">Haz que NOOP guarde cada día (hacia la 1:00) una copia de seguridad con fecha en una carpeta y conserve las últimas; así, si los datos se corrompen, restauras la más reciente. Elige una carpeta de Drive o Dropbox para tener copias fuera del móvil. Desactivado hasta que lo actives.</string>
+     <string name="victor_l10n_settings_noop_all_your_data_none_of_the_cloud">NOOP: todos tus datos, nada de nube.</string>
+     <string name="victor_l10n_settings_built_on">Basado en</string>
+diff --git a/android/app/src/main/res/values/strings_victor_l10n_settings.xml b/android/app/src/main/res/values/strings_victor_l10n_settings.xml
+index e52585f9..81f01b49 100644
+--- a/android/app/src/main/res/values/strings_victor_l10n_settings.xml
++++ b/android/app/src/main/res/values/strings_victor_l10n_settings.xml
+@@ -88,7 +88,7 @@
+     <string name="victor_l10n_settings_turn_on_a_test_for_the_thing_that_s_wrong">Turn on a test for the thing that\'s wrong, wear the strap, then tap Report. Your strap log, recalibrate, scheduled export and experimental probes all live here too.</string>
+     <string name="victor_l10n_settings_charge_is_noop_s_daily_readiness_score">Charge is NOOP\'s daily readiness score, learned from your own HRV, resting heart rate and more over time. Your history stays.</string>
+     <string name="victor_l10n_settings_charge_baseline_reset_noop_will_re_learn">Charge baseline reset. NOOP will re-learn it from tonight. Your history stays, and it takes a few nights to settle.</string>
+-    <string name="victor_l10n_settings_move_all_your_noop_data_to_another_phone">Move all your NOOP data to another phone. Export saves everything (history, sleeps, workouts, settings) to a single file you can copy across; import replaces this phone\'s data with a backup.</string>
++    <string name="victor_l10n_settings_move_all_your_noop_data_to_another_phone">Move all your NOOP data to another phone. Export saves everything (history, sleeps, workouts, meals, settings) to a single file you can copy across, except the Claude key; import replaces this phone\'s data with a backup.</string>
+     <string name="victor_l10n_settings_have_noop_save_a_dated_backup_to_a_folder">Have NOOP save a dated backup to a folder every day (around 1am) and keep the last several - so if data ever corrupts, restore the newest. Point the folder at Drive/Dropbox for off-device copies. Off until you switch it on.</string>
+     <string name="victor_l10n_settings_noop_all_your_data_none_of_the_cloud">NOOP: all your data, none of the cloud.</string>
+     <string name="victor_l10n_settings_built_on">Built on</string>
+diff --git a/android/app/src/test/java/com/noop/data/VictorBackupFilesTest.kt b/android/app/src/test/java/com/noop/data/VictorBackupFilesTest.kt
+new file mode 100644
+index 00000000..647764f1
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/data/VictorBackupFilesTest.kt
+@@ -0,0 +1,320 @@
++package com.noop.data
++
++import org.junit.Assert.assertArrayEquals
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Rule
++import org.junit.Test
++import org.junit.rules.TemporaryFolder
++import java.io.ByteArrayInputStream
++import java.io.ByteArrayOutputStream
++import java.io.File
++import java.util.zip.ZipEntry
++import java.util.zip.ZipInputStream
++import java.util.zip.ZipOutputStream
++
++/**
++ * victor:backup — the fork's files and preferences inside the `.noopbak` ([VictorBackupFiles]), driven with
++ * real archives and real folders: the round trip, older backups, the zip-slip and size refusals, and the
++ * secrets that must never travel. The archives are written in the order [DataBackup.exportTo] uses (DB,
++ * settings, ours, manifest), so upstream's staging and write checks are exercised against the same shape.
++ */
++class VictorBackupFilesTest {
++
++    @get:Rule val tmp = TemporaryFolder()
++
++    private val sqliteMagic = "SQLite format 3\u0000".toByteArray(Charsets.ISO_8859_1)
++    private val dbBody = sqliteMagic + ByteArray(4_096) { (it % 251).toByte() }
++    private val thumb = ByteArray(20_000).also { java.util.Random(7).nextBytes(it) }
++
++    /** A phone's `filesDir` with a food log (and a thumbnail), workouts, weeks and some upstream files. */
++    private fun sourcePhone(): File {
++        val dir = tmp.newFolder("source")
++        File(dir, "food/thumbs").mkdirs()
++        File(dir, "food/log.json").writeText("""{"v":1,"entries":[{"id":"meal1","kcal":640}]}""")
++        File(dir, "food/thumbs/meal1-0.jpg").writeBytes(thumb)
++        File(dir, "food/log.json.tmp").writeText("half a write")
++        File(dir, "training").mkdirs()
++        File(dir, "training/sessions.json").writeText("""[{"id":"s1","exercises":["press banca"]}]""")
++        File(dir, "weekly").mkdirs()
++        File(dir, "weekly/reviews.json").writeText("""[{"weekStart":"2026-10-12"}]""")
++        File(dir, "diagnostics").mkdirs()
++        File(dir, "diagnostics/oura-steps.jsonl").writeText("not ours")
++        File(dir, "avatar.jpg").writeBytes(byteArrayOf(1, 2, 3))
++        return dir
++    }
++
++    private val phonePrefs: Map<String, Any?> = mapOf(
++        "victor.goals.goal" to "loseFat",
++        "victor.goals.targetWeightKg" to "78.5",
++        "victor.goals.dailyKcal" to "2200",
++        "victor.goals.note" to "Sin gluten",
++        "victor.coach.agenda" to true,
++        "victor.day.view" to "week",
++        "victor.haptics.automatic" to false,
++        "victor.tasker.enabled" to true,
++        "victor.tasker.token" to "0123456789abcdef01234567",
++        "victor.gtasks.connected" to true,
++        "victor.scale.newestReadingAt" to 1_790_000_000L,
++        "victor.scale.newestReadingDay" to "2026-10-19",
++        "victor.today.quietCards.v1" to true,
++        "noop.onboarded" to true,
++        "api_key" to "sk-ant-secret",
++    )
++
++    /** A `.noopbak` in [DataBackup.exportTo]'s entry order; [files] null = an older backup with nothing of ours. */
++    private fun backup(files: File?, prefsJson: String?, settingsJson: String? = """{"profile.age":26}"""): ByteArray {
++        val out = ByteArrayOutputStream()
++        ZipOutputStream(out).use { zip ->
++            zip.putNextEntry(ZipEntry("noop-backup.sqlite"))
++            zip.write(dbBody)
++            zip.closeEntry()
++            if (settingsJson != null) {
++                zip.putNextEntry(ZipEntry("settings.json"))
++                zip.write(settingsJson.toByteArray())
++                zip.closeEntry()
++            }
++            if (files != null) VictorBackupFiles.writeEntries(zip, files, prefsJson)
++            zip.putNextEntry(ZipEntry("manifest.json"))
++            zip.write("""{"platform":"android"}""".toByteArray())
++            zip.closeEntry()
++        }
++        return out.toByteArray()
++    }
++
++    /** DB entry plus hand-made entries of ours, for the hostile cases. */
++    private fun backupWith(vararg entries: Pair<String, ByteArray>): ByteArray {
++        val out = ByteArrayOutputStream()
++        ZipOutputStream(out).use { zip ->
++            zip.putNextEntry(ZipEntry("noop-backup.sqlite"))
++            zip.write(dbBody)
++            zip.closeEntry()
++            for ((name, bytes) in entries) {
++                zip.putNextEntry(ZipEntry(name))
++                zip.write(bytes)
++                zip.closeEntry()
++            }
++        }
++        return out.toByteArray()
++    }
++
++    private fun entryNames(bytes: ByteArray): List<String> = ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
++        generateSequence { zip.nextEntry }.map { it.name }.toList()
++    }
++
++    /** A phone that already has some food and weeks of its own. */
++    private fun targetPhone(): File {
++        val dir = tmp.newFolder("target")
++        File(dir, "food/thumbs").mkdirs()
++        File(dir, "food/log.json").writeText("device food")
++        File(dir, "food/thumbs/old-0.jpg").writeBytes(byteArrayOf(9, 9))
++        File(dir, "weekly").mkdirs()
++        File(dir, "weekly/reviews.json").writeText("device weeks")
++        return dir
++    }
++
++    private fun leftovers(dir: File): List<String> =
++        dir.listFiles().orEmpty().map { it.name }.filter { it.contains("victor-restore") }
++
++    @Test
++    fun `round trip brings back food with thumbnails, workouts, weeks and prefs`() {
++        val source = sourcePhone()
++        val bytes = backup(source, VictorBackupFiles.encodePrefs(phonePrefs))
++
++        // Upstream's write-side checks still pass with our entries inside.
++        assertTrue(DataBackup.backupStreamIsIntact(ByteArrayInputStream(bytes)))
++        assertTrue(DataBackup.hasEndOfCentralDirectory(bytes))
++        val names = entryNames(bytes)
++        assertEquals(
++            listOf(
++                "noop-backup.sqlite", "settings.json", "victor/prefs.json", "victor/files/food/log.json",
++                "victor/files/food/thumbs/meal1-0.jpg", "victor/files/training/sessions.json",
++                "victor/files/weekly/reviews.json", "victor/end.json", "manifest.json",
++            ),
++            names,
++        )
++
++        // Upstream's staging still finds the DB and settings.
++        val stagedDb = tmp.newFile()
++        val stagedSettings = File(tmp.root, "staged-settings.json")
++        val archive = File(tmp.root, "b.noopbak").apply { writeBytes(bytes) }
++        assertEquals(
++            DataBackup.StageResult.OK,
++            DataBackup.stageBackupSqlite(archive.inputStream(), DataBackup.peekHeader(archive), stagedDb, stagedSettings),
++        )
++        assertArrayEquals(dbBody, stagedDb.readBytes())
++        assertEquals("""{"profile.age":26}""", stagedSettings.readText())
++
++        val phone = tmp.newFolder("new-phone")
++        val result = VictorBackupFiles.restoreInto(phone, ByteArrayInputStream(bytes))
++        assertTrue(result is VictorBackupFiles.Restored.Done)
++        result as VictorBackupFiles.Restored.Done
++        assertEquals(setOf("food", "training", "weekly"), result.dirs)
++        for (path in listOf("food/log.json", "food/thumbs/meal1-0.jpg", "training/sessions.json", "weekly/reviews.json")) {
++            assertArrayEquals(path, File(source, path).readBytes(), File(phone, path).readBytes())
++        }
++        assertFalse("a write in flight is not backed up", File(phone, "food/log.json.tmp").exists())
++        assertFalse("upstream's own files are not ours to carry", File(phone, "diagnostics").exists())
++        assertFalse(File(phone, "avatar.jpg").exists())
++        assertEquals(
++            mapOf(
++                "victor.goals.goal" to "loseFat",
++                "victor.goals.targetWeightKg" to "78.5",
++                "victor.goals.dailyKcal" to "2200",
++                "victor.goals.note" to "Sin gluten",
++                "victor.coach.agenda" to true,
++                "victor.day.view" to "week",
++                "victor.haptics.automatic" to false,
++            ),
++            result.prefs,
++        )
++        assertEquals(emptyList<String>(), leftovers(phone))
++    }
++
++    @Test
++    fun `secrets and per-phone state never reach the copy`() {
++        val json = VictorBackupFiles.encodePrefs(phonePrefs)!!
++        for (key in listOf("victor.tasker.token", "victor.tasker.enabled", "victor.gtasks.connected",
++                           "victor.scale.newestReadingAt", "victor.scale.newestReadingDay",
++                           "victor.today.quietCards.v1", "noop.onboarded", "api_key")) {
++            assertFalse(key, json.contains(key))
++        }
++        assertFalse(json.contains("0123456789abcdef01234567"))
++        assertFalse(json.contains("sk-ant-secret"))
++
++        // Nothing in the whole copy holds them either, entry names or contents (read back inflated).
++        val bytes = backup(sourcePhone(), json)
++        assertFalse(entryNames(bytes).any { it.contains("shared_prefs") || it.contains("secure") })
++        val contents = ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
++            generateSequence { zip.nextEntry }.map { String(zip.readBytes(), Charsets.ISO_8859_1) }.toList()
++        }
++        for (secret in listOf("victor.tasker.token", "0123456789abcdef01234567", "sk-ant-secret", "api_key")) {
++            assertFalse(secret, contents.any { it.contains(secret) })
++        }
++
++        assertNull(VictorBackupFiles.encodePrefs(mapOf("victor.tasker.token" to "x", "api_key" to "y")))
++    }
++
++    @Test
++    fun `a hand-edited prefs entry cannot switch on the Tasker bridge or smuggle wrong types`() {
++        val hostile = """{"victor.tasker.enabled":true,"victor.tasker.token":"known","victor.gtasks.connected":true,
++            "victor.coach.agenda":"yes","victor.goals.dailyKcal":2200,"victor.day.view":"month"}"""
++        assertEquals(mapOf<String, Any>("victor.day.view" to "month"), VictorBackupFiles.decodePrefs(hostile))
++        assertEquals(emptyMap<String, Any>(), VictorBackupFiles.decodePrefs("not json"))
++    }
++
++    @Test
++    fun `an older backup without our entries leaves the phone's files alone`() {
++        val phone = targetPhone()
++        val result = VictorBackupFiles.restoreInto(phone, ByteArrayInputStream(backup(files = null, prefsJson = null)))
++        assertEquals(VictorBackupFiles.Restored.Absent, result)
++        assertEquals("device food", File(phone, "food/log.json").readText())
++        assertTrue(File(phone, "food/thumbs/old-0.jpg").exists())
++        assertEquals("device weeks", File(phone, "weekly/reviews.json").readText())
++        assertEquals(emptyList<String>(), leftovers(phone))
++    }
++
++    @Test
++    fun `a carried folder replaces the phone's whole and one not carried is untouched`() {
++        val source = tmp.newFolder("food-only")
++        File(source, "food/thumbs").mkdirs()
++        File(source, "food/log.json").writeText("backup food")
++        File(source, "food/thumbs/new-0.jpg").writeBytes(thumb)
++        val phone = targetPhone()
++
++        val result = VictorBackupFiles.restoreInto(phone, ByteArrayInputStream(backup(source, prefsJson = null)))
++
++        assertEquals(VictorBackupFiles.Restored.Done(setOf("food"), emptyMap()), result)
++        assertEquals("backup food", File(phone, "food/log.json").readText())
++        assertTrue(File(phone, "food/thumbs/new-0.jpg").exists())
++        assertFalse("the replaced folder does not keep stale thumbnails", File(phone, "food/thumbs/old-0.jpg").exists())
++        assertEquals("device weeks", File(phone, "weekly/reviews.json").readText())
++        assertEquals(emptyList<String>(), leftovers(phone))
++    }
++
++    @Test
++    fun `an entry climbing out with dot-dot is refused and nothing is written`() {
++        val phone = targetPhone()
++        val bytes = backupWith(
++            "victor/files/food/log.json" to "evil food".toByteArray(),
++            "victor/files/food/../../shared_prefs/noop_prefs.xml" to "<map/>".toByteArray(),
++        )
++        val result = VictorBackupFiles.restoreInto(phone, ByteArrayInputStream(bytes))
++        assertTrue(result is VictorBackupFiles.Restored.Skipped)
++        assertEquals("device food", File(phone, "food/log.json").readText())
++        assertFalse(File(phone, "shared_prefs").exists())
++        assertFalse(File(phone.parentFile, "shared_prefs").exists())
++        assertEquals(emptyList<String>(), leftovers(phone))
++    }
++
++    @Test
++    fun `entry names outside the three folders or with tricks are refused`() {
++        for (name in listOf(
++            "victor/files/food/../x", "victor/files/../food/x", "/victor/files/food/x", "victor/files/food/..",
++            "victor/files/food/.hidden", "victor/files/food//x", "victor/files/food/a\\..\\b",
++            "victor/files/shared_prefs/noop_prefs.xml", "victor/files/databases/noop.db", "victor/files/food",
++            "victor/files/food/settings.json", "victor/files/food/thumbs/noop-backup.sqlite",
++            "victor/files/food/a/b/c/d/e.json",
++        )) {
++            assertNull(name, VictorBackupFiles.relativePathOf(name))
++        }
++        assertEquals(listOf("food", "thumbs", "meal1-0.jpg"), VictorBackupFiles.relativePathOf("victor/files/food/thumbs/meal1-0.jpg"))
++        assertEquals(listOf("food", "log.json.corrupt-1790000000000"),
++            VictorBackupFiles.relativePathOf("victor/files/food/log.json.corrupt-1790000000000"))
++    }
++
++    @Test
++    fun `a file named like an upstream entry is not exported, so old importers never mistake it`() {
++        val source = sourcePhone()
++        File(source, "food/settings.json").writeText("""{"profile.age":99}""")
++        val bytes = backup(source, prefsJson = null, settingsJson = null)
++        assertFalse(entryNames(bytes).any { it.endsWith("/settings.json") })
++
++        // With no settings entry, upstream reads the archive to the end and must stage none.
++        val archive = File(tmp.root, "no-settings.noopbak").apply { writeBytes(bytes) }
++        val stagedSettings = File(tmp.root, "staged-settings.json")
++        assertEquals(
++            DataBackup.StageResult.OK,
++            DataBackup.stageBackupSqlite(archive.inputStream(), DataBackup.peekHeader(archive), tmp.newFile(), stagedSettings),
++        )
++        assertFalse(stagedSettings.exists())
++    }
++
++    @Test
++    fun `an oversized entry is refused whole`() {
++        val phone = targetPhone()
++        val bytes = backup(sourcePhone(), prefsJson = null)
++        val result = VictorBackupFiles.restoreInto(phone, ByteArrayInputStream(bytes), maxEntryBytes = 1_000)
++        assertTrue(result is VictorBackupFiles.Restored.Skipped)
++        assertEquals("device food", File(phone, "food/log.json").readText())
++        assertFalse(File(phone, "training").exists())
++        assertEquals(emptyList<String>(), leftovers(phone))
++    }
++
++    @Test
++    fun `a copy that ends cleanly between two of our entries is not taken as complete`() {
++        val phone = targetPhone()
++        // What a ZipInputStream sees when a file is cut exactly at an entry boundary: a clean end, with the
++        // food log there but its thumbnails and the end marker missing.
++        val bytes = backupWith("victor/files/food/log.json" to "half the food".toByteArray())
++        val result = VictorBackupFiles.restoreInto(phone, ByteArrayInputStream(bytes))
++        assertTrue(result.toString(), result is VictorBackupFiles.Restored.Skipped)
++        assertEquals("device food", File(phone, "food/log.json").readText())
++        assertTrue(File(phone, "food/thumbs/old-0.jpg").exists())
++        assertEquals(emptyList<String>(), leftovers(phone))
++    }
++
++    @Test
++    fun `a backup cut short inside our entries changes nothing`() {
++        val phone = targetPhone()
++        val bytes = backup(sourcePhone(), VictorBackupFiles.encodePrefs(phonePrefs))
++        val cut = bytes.copyOf(bytes.size - 2_000)   // inside the last of our entries
++        val result = VictorBackupFiles.restoreInto(phone, ByteArrayInputStream(cut))
++        assertTrue(result.toString(), result is VictorBackupFiles.Restored.Skipped)
++        assertEquals("device food", File(phone, "food/log.json").readText())
++        assertFalse(File(phone, "training").exists())
++        assertEquals(emptyList<String>(), leftovers(phone))
++    }
++}
+-- 
+2.54.0
+
