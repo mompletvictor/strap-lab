@@ -1,0 +1,148 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Tue, 20 Oct 2026 20:32:34 +0200
+Subject: [PATCH] feat(widget): the quick widget is 3x2
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Víctor wanted it three cells wide by two high: same five figures and two
+buttons, tighter type so it fits two rows. Still resizable.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../noop/widget/VictorQuickGlanceWidget.kt    | 26 +++++++++----------
+ .../main/res/xml/victor_quick_widget_info.xml |  6 ++---
+ 2 files changed, 16 insertions(+), 16 deletions(-)
+
+diff --git a/android/app/src/main/java/com/noop/widget/VictorQuickGlanceWidget.kt b/android/app/src/main/java/com/noop/widget/VictorQuickGlanceWidget.kt
+index 8fe35f8b4..62ec7f07f 100644
+--- a/android/app/src/main/java/com/noop/widget/VictorQuickGlanceWidget.kt
++++ b/android/app/src/main/java/com/noop/widget/VictorQuickGlanceWidget.kt
+@@ -40,7 +40,7 @@ import com.noop.ui.uiString
+ import java.util.Date
+ 
+ /**
+- * victor:widget — the 3x3 quick widget: Rest · Charge · Effort, live heart rate and strap battery (the
++ * victor:widget — the 3x2 quick widget: Rest · Charge · Effort, live heart rate and strap battery (the
+  * same snapshot as the 2x2 [NoopGlanceWidget], so the same honest "—" before a score exists), plus two
+  * buttons: Food opens the camera for a meal photo, Workout opens the training sheet (or the running
+  * workout). Tapping anywhere else opens the app. Offered as its own picker entry; the 2x2 stays as it is.
+@@ -89,28 +89,28 @@ private fun QuickContent(snap: WidgetSnapshot, dark: Boolean) {
+             .background(surface(dark))
+             .cornerRadius(20.dp)
+             .clickable(actionStartActivity<MainActivity>())
+-            .padding(horizontal = 12.dp, vertical = 12.dp),
++            .padding(horizontal = 12.dp, vertical = 10.dp),
+         horizontalAlignment = Alignment.CenterHorizontally,
+     ) {
+         Spacer(GlanceModifier.defaultWeight())
+         Row(modifier = GlanceModifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
+             Score(
+                 uiString(R.string.l10n_noop_glance_widget_rest_cbaaa181), snap.restPct,
+-                snap.restPct?.let { bandColor(it, dark) } ?: secondary, 30.sp, secondary,
++                snap.restPct?.let { bandColor(it, dark) } ?: secondary, 26.sp, secondary,
+                 GlanceModifier.defaultWeight(),
+             )
+             Score(
+                 uiString(R.string.l10n_noop_glance_widget_charge_49a8cb83), snap.recoveryPct,
+-                snap.recoveryPct?.let { bandColor(it, dark) } ?: secondary, 40.sp, secondary,
++                snap.recoveryPct?.let { bandColor(it, dark) } ?: secondary, 34.sp, secondary,
+                 GlanceModifier.defaultWeight(),
+             )
+             Score(
+                 uiString(R.string.l10n_noop_glance_widget_effort_660752e7), snap.effortPct,
+-                snap.effortPct?.let { effortColor(dark) } ?: secondary, 30.sp, secondary,
++                snap.effortPct?.let { effortColor(dark) } ?: secondary, 26.sp, secondary,
+                 GlanceModifier.defaultWeight(),
+             )
+         }
+-        Spacer(GlanceModifier.height(14.dp))
++        Spacer(GlanceModifier.height(4.dp))
+         val hrLabel = uiString(R.string.l10n_noop_glance_widget_heart_rate_410aa15c)
+         val batteryLabel = uiString(R.string.l10n_noop_glance_widget_strap_battery_a6c7f09c)
+         val hrDescription = snap.heartRate
+@@ -121,13 +121,13 @@ private fun QuickContent(snap: WidgetSnapshot, dark: Boolean) {
+             Text(
+                 text = snap.heartRate?.let { "♥ $it" } ?: "♥ —",
+                 // A carried-over reading is dimmed so it can't pass for a live one (as on the 2x2).
+-                style = TextStyle(color = if (snap.heartRateStale) secondary else primary, fontSize = 20.sp, fontWeight = FontWeight.Medium),
++                style = TextStyle(color = if (snap.heartRateStale) secondary else primary, fontSize = 17.sp, fontWeight = FontWeight.Medium),
+                 modifier = GlanceModifier.semantics { contentDescription = hrDescription },
+             )
+             Spacer(GlanceModifier.width(20.dp))
+             Text(
+                 text = snap.batteryPct?.let { "⚡ $it%" } ?: "⚡ —",
+-                style = TextStyle(color = primary, fontSize = 20.sp, fontWeight = FontWeight.Medium),
++                style = TextStyle(color = primary, fontSize = 17.sp, fontWeight = FontWeight.Medium),
+                 modifier = GlanceModifier.semantics { contentDescription = batteryDescription },
+             )
+         }
+@@ -143,7 +143,7 @@ private fun QuickContent(snap: WidgetSnapshot, dark: Boolean) {
+                 VictorWidgetAction.intent(context, VictorWidgetAction.TRAINING), GlanceModifier.defaultWeight(),
+             )
+         }
+-        Spacer(GlanceModifier.height(6.dp))
++        Spacer(GlanceModifier.height(4.dp))
+         Text(
+             text = when {
+                 snap.connected -> uiString(R.string.victor_widget_connected)
+@@ -152,7 +152,7 @@ private fun QuickContent(snap: WidgetSnapshot, dark: Boolean) {
+                 ).format(Date(snap.updatedAtMs))
+                 else -> uiString(R.string.victor_widget_open_app)
+             },
+-            style = TextStyle(color = secondary, fontSize = 11.sp),
++            style = TextStyle(color = secondary, fontSize = 10.sp),
+         )
+     }
+ }
+@@ -167,7 +167,7 @@ private fun Score(
+     modifier: GlanceModifier,
+ ) {
+     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+-        Text(text = label, style = TextStyle(color = secondary, fontSize = 12.sp, fontWeight = FontWeight.Medium))
++        Text(text = label, style = TextStyle(color = secondary, fontSize = 11.sp, fontWeight = FontWeight.Medium))
+         Text(text = pct?.let { "$it%" } ?: "—", style = TextStyle(color = color, fontSize = valueSize, fontWeight = FontWeight.Bold))
+     }
+ }
+@@ -176,7 +176,7 @@ private fun Score(
+ private fun ActionButton(label: String, dark: Boolean, intent: android.content.Intent, modifier: GlanceModifier) {
+     Box(
+         modifier = modifier
+-            .height(56.dp)
++            .height(46.dp)
+             .background(buttonFill(dark))
+             .cornerRadius(14.dp)
+             .clickable(androidx.glance.appwidget.action.actionStartActivity(intent)),
+@@ -184,7 +184,7 @@ private fun ActionButton(label: String, dark: Boolean, intent: android.content.I
+     ) {
+         Text(
+             text = label,
+-            style = TextStyle(color = textPrimary(dark), fontSize = 17.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center),
++            style = TextStyle(color = textPrimary(dark), fontSize = 16.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center),
+         )
+     }
+ }
+diff --git a/android/app/src/main/res/xml/victor_quick_widget_info.xml b/android/app/src/main/res/xml/victor_quick_widget_info.xml
+index 9035c8a73..6823fc2ca 100644
+--- a/android/app/src/main/res/xml/victor_quick_widget_info.xml
++++ b/android/app/src/main/res/xml/victor_quick_widget_info.xml
+@@ -1,12 +1,12 @@
+ <?xml version="1.0" encoding="utf-8"?>
+-<!-- victor:widget — 3x3 quick widget. updatePeriodMillis=0: the app pushes updates through
++<!-- victor:widget — 3x2 quick widget. updatePeriodMillis=0: the app pushes updates through
+      WidgetSnapshotStore, exactly as for the 2x2 (#516). -->
+ <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+     android:description="@string/victor_widget_quick_description"
+     android:minWidth="180dp"
+-    android:minHeight="180dp"
++    android:minHeight="110dp"
+     android:targetCellWidth="3"
+-    android:targetCellHeight="3"
++    android:targetCellHeight="2"
+     android:resizeMode="horizontal|vertical"
+     android:widgetCategory="home_screen"
+     android:updatePeriodMillis="0"
+-- 
+2.54.0
+
