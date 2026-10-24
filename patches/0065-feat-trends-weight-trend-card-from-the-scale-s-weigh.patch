@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Sat, 24 Oct 2026 10:48:33 +0200
+Subject: [PATCH] feat(trends): weight trend card from the scale's weigh-ins
+
+Plots the Health Connect weight series (the one the energy model reads) over the
+selected range, widening like the other cards. Hidden without weigh-ins.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/main/java/com/noop/ui/TrendsScreen.kt | 43 +++++++++++++++++++
+ 1 file changed, 43 insertions(+)
+
+diff --git a/android/app/src/main/java/com/noop/ui/TrendsScreen.kt b/android/app/src/main/java/com/noop/ui/TrendsScreen.kt
+index f6e814046..b74132578 100644
+--- a/android/app/src/main/java/com/noop/ui/TrendsScreen.kt
++++ b/android/app/src/main/java/com/noop/ui/TrendsScreen.kt
+@@ -57,8 +57,10 @@ import androidx.compose.ui.unit.Dp
+ import androidx.compose.ui.unit.dp
+ import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import com.noop.R
++import com.noop.analytics.ScaleBody
+ import com.noop.analytics.WeeklyDigestEngine
+ import com.noop.data.DailyMetric
++import com.noop.ingest.HealthConnectImporter
+ import java.time.LocalDate
+ import java.time.format.DateTimeFormatter
+ import java.util.Locale
+@@ -157,6 +159,16 @@ fun TrendsScreen(vm: AppViewModel) {
+     val rest = remember(days, range, sleepPerfByDay) {
+         resolveMetric(days, range) { d -> sleepPerfByDay[d.day] }
+     }
++    // victor:weight — the scale's weigh-ins (Health Connect, newest of each day), the series the energy model reads.
++    var weightByDay by remember { mutableStateOf<Map<String, Double>>(emptyMap()) }
++    LaunchedEffect(days) {
++        weightByDay = runCatching {
++            vm.repo.metricSeries(HealthConnectImporter.HC_DEVICE, ScaleBody.KEY_WEIGHT, "0000-01-01", "9999-12-31")
++                .associate { it.day to it.value }
++        }.getOrDefault(emptyMap())
++    }
++    val weight = remember(weightByDay, range) { resolveSeries(weightByDay, range) }
++    val massSystem = UnitPrefs.system(LocalContext.current)
+     val recAvg = recovery.values.averageOrNull()
+     val rangeSubtitle = range.days?.let { dayCount ->
+         stringResource(R.string.trends_trailing_days, dayCount)
+@@ -307,6 +319,16 @@ fun TrendsScreen(vm: AppViewModel) {
+                     fmt = { UnitFormatter.effortDisplay(it, effortScale) },
+                     partialToday = true,   // victor:effort
+                 )
++                // victor:weight — hidden without weigh-ins; neutral chip, since up or down depends on the goal.
++                if (weight.values.isNotEmpty()) {
++                    MetricTrendCard(
++                        title = uiString(R.string.victor_scale_weight), unit = UnitFormatter.massUnit(massSystem),
++                        color = Palette.accent,
++                        higherIsBetter = null,
++                        resolved = weight,
++                        fmt = { v -> String.format(Locale.US, "%.1f", if (massSystem == UnitSystem.IMPERIAL) UnitFormatter.kgToPounds(v) else v) },
++                    )
++                }
+             }
+         }
+ 
+@@ -635,6 +657,27 @@ private fun resolveMetric(
+     )
+ }
+ 
++/**
++ * victor:weight — [resolveMetric] for a series keyed by its own days rather than by the strap's day rows, so
++ * a weigh-in on a day the strap has no row for still plots. Same calendar windows and widening order.
++ */
++private fun resolveSeries(byDay: Map<String, Double>, selected: TrendsRange): ResolvedMetric {
++    val all = byDay.toSortedMap().toList()
++    fun window(r: TrendsRange) = r.days?.let { n ->
++        val cutoff = LocalDate.now().minusDays((n - 1).toLong()).toString()
++        all.filter { it.first >= cutoff }
++    } ?: all
++    val eff = selected.widening.firstOrNull { window(it).isNotEmpty() } ?: TrendsRange.All
++    val pts = window(eff)
++    return ResolvedMetric(
++        values = pts.map { it.second },
++        dates = pts.map { it.first },
++        effective = eff,
++        widened = eff != selected,
++        caption = caption(pts.size, eff, selected),
++    )
++}
++
+ /**
+  * Non-null metric points (day, value) within [range]'s trailing window, taken relative to
+  * the latest recorded day (oldest → newest). `days` is the full oldest-first history. A null
+-- 
+2.54.0
+
