@@ -1,0 +1,167 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Sat, 24 Oct 2026 12:06:30 +0200
+Subject: [PATCH] feat(battery): sample the day of 24/7 HRV capture, offload
+ every 30 min while streaming
+
+24/7 continuous capture now streams the whole nightly window as before and, by
+day, 5 of every 30 minutes: a 5-minute R-R window is the standard short-term HRV
+reading and the daytime Stress score is HR-only, needing 5 minutes of samples an
+hour, so every waking hour keeps two windows while the strap streams a sixth of
+the day. While the realtime stream runs, the history offload waits 30 min instead
+of 15 (HR and R-R already arrive live; nothing is lost). Arming the stream
+restarts the lapse clock so the off spell is not read as a stall. Overnight-only
+and live screens are unchanged. The settings copy says so.
+
+Not validated on a strap yet: BLE behaviour cannot be tested off-device.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Tools/victor_l10n/es_fixes.json               |  4 +-
+ .../main/java/com/noop/ble/WhoopBleClient.kt  | 32 ++++++++++++---
+ .../java/com/noop/ble/VictorBatteryTest.kt    | 40 +++++++++++++++++++
+ 3 files changed, 69 insertions(+), 7 deletions(-)
+ create mode 100644 android/app/src/test/java/com/noop/ble/VictorBatteryTest.kt
+
+diff --git a/Tools/victor_l10n/es_fixes.json b/Tools/victor_l10n/es_fixes.json
+index 9cf88899c..f62916ee9 100644
+--- a/Tools/victor_l10n/es_fixes.json
++++ b/Tools/victor_l10n/es_fixes.json
+@@ -2289,7 +2289,7 @@
+  },
+  "l10n_settings_screen_keeps_the_detailed_beat_to_beat_87b78edd": {
+   "en": "Keeps the detailed beat-to-beat stream running all day and night, not just while a live screen is open, so NOOP captures much more for overnight HRV, recovery and sleep. Uses more battery (your strap streams heart rate continuously). Needs \"Keep connected in the background\" on.",
+-  "es": "Mantiene el flujo detallado latido a latido activo todo el día y toda la noche, no solo mientras una pantalla en vivo está abierta, así que NOOP captura mucho más para la VFC nocturna, la recuperación y el sueño. Gasta más batería (tu pulsera transmite la frecuencia cardíaca sin parar). Requiere \"Mantener conectada en segundo plano\" activado."
++  "es": "Mantiene el flujo detallado latido a latido activo toda la noche y, de día, 5 minutos de cada 30 (bastan para el estrés de cada hora), no solo mientras una pantalla en vivo está abierta, así que NOOP captura mucho más para la VFC nocturna, la recuperación y el sueño. Gasta más batería (de noche tu pulsera transmite la frecuencia cardíaca sin parar). Requiere \"Mantener conectada en segundo plano\" activado."
+  },
+  "l10n_settings_screen_live_deeppacketsthissession_type_0x2f_historical_offload_8fef3d84": {
+   "en": "%1$s type-0x2F historical-offload frame(s) seen outside our sync. These are history (e.g. another app pulling the strap\\'s backlog), not a live R22 stream (#494).",
+@@ -2357,7 +2357,7 @@
+  },
+  "l10n_settings_screen_runs_the_continuous_hrv_stream_only_3fed47c5": {
+   "en": "Runs the continuous HRV stream only during your quiet hours window (22:00–07:00 by default), roughly halving the battery cost. Daytime Stress readings will be sparser. Note: continuous background HRV capture (including daytime naps) is paused outside this window. For on-demand daytime HRV readings (including naps), use the \\\"Take an HRV reading\\\" button on the Live screen.",
+-  "es": "Ejecuta el flujo continuo de VFC solo durante tu franja de horas de silencio (22:00–07:00 por defecto), lo que reduce aproximadamente a la mitad el consumo de batería. Las lecturas de Estrés diurnas serán más escasas. Nota: la captura continua de VFC en segundo plano (incluidas las siestas diurnas) se pausa fuera de esta franja. Para lecturas de VFC diurnas a demanda (incluidas las siestas), usa el botón \\\"Tomar una lectura de VFC\\\" de la pantalla En vivo."
++  "es": "Ejecuta el flujo continuo de VFC solo durante tu franja de horas de silencio (22:00–07:00 por defecto), sin las muestras de 5 minutos de cada media hora del día. Las lecturas de Estrés diurnas serán más escasas. Nota: la captura continua de VFC en segundo plano (incluidas las siestas diurnas) se pausa fuera de esta franja. Para lecturas de VFC diurnas a demanda (incluidas las siestas), usa el botón \\\"Tomar una lectura de VFC\\\" de la pantalla En vivo."
+  },
+  "l10n_settings_screen_saves_the_last_24h_of_decoded_f7026f47": {
+   "en": "Saves the last 24h of decoded sensor samples (heart rate, R-R, motion, steps and any 5/MG deep streams you\\'ve unlocked) as one CSV you can share, for tinkering with your own data. Nothing leaves the phone unless you share it.",
+diff --git a/android/app/src/main/java/com/noop/ble/WhoopBleClient.kt b/android/app/src/main/java/com/noop/ble/WhoopBleClient.kt
+index dbbaaa322..98ee3a26e 100644
+--- a/android/app/src/main/java/com/noop/ble/WhoopBleClient.kt
++++ b/android/app/src/main/java/com/noop/ble/WhoopBleClient.kt
+@@ -2127,6 +2127,26 @@ class WhoopBleClient(
+             if (!overnightOnly) return true
+             return overnightWindowContains(minuteOfDay, startMin, endMin)
+         }
++
++        /** victor:battery — the daytime share of 24/7 capture: [VICTOR_DAY_DUTY_ON_MIN] of every
++         *  [VICTOR_DAY_DUTY_PERIOD_MIN] minutes. Five minutes of R-R is the standard short-term HRV reading, and
++         *  the daytime Stress score is HR-only and needs five minutes of samples an hour, so every waking hour
++         *  keeps two full windows while the strap streams a sixth of the day. */
++        fun victorDayDutyOn(minuteOfDay: Int): Boolean = minuteOfDay.mod(VICTOR_DAY_DUTY_PERIOD_MIN) < VICTOR_DAY_DUTY_ON_MIN
++
++        /** victor:battery — continuous capture (already known on): the nightly window streams the whole time, as
++         *  before; outside it, overnight-only streams nothing and 24/7 samples the day ([victorDayDutyOn]). */
++        fun victorContinuousCaptureWanted(overnightOnly: Boolean, minuteOfDay: Int, startMin: Int, endMin: Int): Boolean =
++            overnightWindowContains(minuteOfDay, startMin, endMin) || (!overnightOnly && victorDayDutyOn(minuteOfDay))
++
++        /** victor:battery — while the realtime stream runs its HR and R-R already arrive live, so the history
++         *  offload waits [VICTOR_STREAMING_BACKFILL_INTERVAL_MS]: bigger batches, nothing lost. Only lengthens. */
++        fun victorStreamingBackfillBaseMs(baseMs: Long, streaming: Boolean): Long =
++            if (streaming) maxOf(baseMs, VICTOR_STREAMING_BACKFILL_INTERVAL_MS) else baseMs
++
++        const val VICTOR_DAY_DUTY_ON_MIN = 5
++        const val VICTOR_DAY_DUTY_PERIOD_MIN = 30
++        const val VICTOR_STREAMING_BACKFILL_INTERVAL_MS = 1_800_000L
+     }
+ 
+     // MARK: Published state — the single source of truth the UI observes. Seeded with the PERSISTED
+@@ -2504,7 +2524,7 @@ class WhoopBleClient(
+     private fun nextBackfillDelayMs(): Long {
+         // Low refresh moves the BASE the other levers stretch from; each composes with `max`, so the
+         // cadence can only get quieter, never faster than the user asked for.
+-        val base = baseBackfillIntervalMs(lowRefreshMode)
++        val base = victorStreamingBackfillBaseMs(baseBackfillIntervalMs(lowRefreshMode), realtimeArmed)   // victor:battery
+         // #battery: known-empty-history 5/MG → stretch to the 45-min floor before any battery lever.
+         if (connectedFamily == DeviceFamily.WHOOP5) {
+             val stretched = whoop5EmptyHistoryBackfillIntervalMs(
+@@ -9331,8 +9351,8 @@ class WhoopBleClient(
+                 val captureWantNow = screenWantsRealtime || continuousCaptureWantsNow()
+                 if (wantsRealtime != captureWantNow && keepStreamForData && !screenWantsRealtime) {
+                     log(
+-                        if (captureWantNow) "Continuous HRV: overnight window opened; arming the realtime stream (#927)"
+-                        else "Continuous HRV: overnight window closed; realtime stream disarmed until tonight (#927)",
++                        if (captureWantNow) "Continuous HRV: capture window opened; arming the realtime stream (#927)"
++                        else "Continuous HRV: capture window closed; realtime stream disarmed (#927)",
+                     )
+                 }
+                 reconcileRealtime()   // recomputes wantsRealtime from the fresh predicate; toggles only on an edge
+@@ -9498,8 +9518,7 @@ class WhoopBleClient(
+         }
+         val cal = java.util.Calendar.getInstance()
+         val minuteOfDay = cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 + cal.get(java.util.Calendar.MINUTE)
+-        return continuousHrvStreamWanted(
+-            continuousHrv = true,
++        return victorContinuousCaptureWanted(   // victor:battery — the night continuous, the day sampled
+             overnightOnly = NoopPrefs.continuousHrvOvernight(context),
+             minuteOfDay = minuteOfDay,
+             startMin = NotifPrefs.getInt(context, NotifPrefs.QUIET_START, 22 * 60),
+@@ -9537,6 +9556,9 @@ class WhoopBleClient(
+         if (connectedFamily != DeviceFamily.WHOOP4 && !_state.value.bonded) return   // can't reach the strap yet
+         realtimeArmed = want
+         if (want) realtimeArmedThisLink = true   // #1809: latch the per-link fact
++        // victor:battery — a stream just armed has missed nothing yet (the daytime windows arm it every 30 min):
++        // restart the lapse clock so the same keep-alive tick does not read the off spell as a stall and re-arm.
++        if (want) noteLiveHr()
+         // Both families arm/disarm via TOGGLE_REALTIME_HR; send() frames it correctly per family (puffin
+         // for 5/MG). A screen re-entry blanks its own smoothing window in the view-model, not here.
+         send(CommandNumber.TOGGLE_REALTIME_HR, byteArrayOf(if (want) 1.toByte() else 0.toByte()))
+diff --git a/android/app/src/test/java/com/noop/ble/VictorBatteryTest.kt b/android/app/src/test/java/com/noop/ble/VictorBatteryTest.kt
+new file mode 100644
+index 000000000..d65317536
+--- /dev/null
++++ b/android/app/src/test/java/com/noop/ble/VictorBatteryTest.kt
+@@ -0,0 +1,40 @@
++package com.noop.ble
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/** victor:battery — the sampled day of 24/7 capture and the slower offload while the stream runs. */
++class VictorBatteryTest {
++
++    private val start = 22 * 60
++    private val end = 7 * 60
++
++    @Test
++    fun theNightStreamsTheWholeTimeAndTheDayFiveMinutesOfEveryThirty() {
++        for (m in listOf(22 * 60, 23 * 60 + 17, 0, 3 * 60 + 44, 6 * 60 + 59)) {
++            assertTrue("night $m", WhoopBleClient.victorContinuousCaptureWanted(false, m, start, end))
++        }
++        val day = (7 * 60 until 22 * 60).filter { WhoopBleClient.victorContinuousCaptureWanted(false, it, start, end) }
++        assertEquals(30 * 5, day.size)   // 15 h × 2 windows × 5 min
++        assertTrue(WhoopBleClient.victorContinuousCaptureWanted(false, 9 * 60 + 4, start, end))
++        assertFalse(WhoopBleClient.victorContinuousCaptureWanted(false, 9 * 60 + 5, start, end))
++        assertTrue(WhoopBleClient.victorContinuousCaptureWanted(false, 9 * 60 + 30, start, end))
++        // Every waking hour keeps two whole windows: ten minutes of samples, past the Stress score's five.
++        for (h in 7 until 22) assertEquals(10, (h * 60 until h * 60 + 60).count { WhoopBleClient.victorDayDutyOn(it) })
++    }
++
++    @Test
++    fun overnightOnlyStillStreamsNothingByDay() {
++        assertTrue(WhoopBleClient.victorContinuousCaptureWanted(true, 23 * 60, start, end))
++        for (m in 7 * 60 until 22 * 60) assertFalse("day $m", WhoopBleClient.victorContinuousCaptureWanted(true, m, start, end))
++    }
++
++    @Test
++    fun theOffloadWaitsHalfAnHourOnlyWhileStreamingAndNeverShortensASlowerChoice() {
++        assertEquals(1_800_000L, WhoopBleClient.victorStreamingBackfillBaseMs(900_000L, streaming = true))
++        assertEquals(900_000L, WhoopBleClient.victorStreamingBackfillBaseMs(900_000L, streaming = false))
++        assertEquals(3_600_000L, WhoopBleClient.victorStreamingBackfillBaseMs(3_600_000L, streaming = true))   // low refresh stays hourly
++    }
++}
+-- 
+2.54.0
+
