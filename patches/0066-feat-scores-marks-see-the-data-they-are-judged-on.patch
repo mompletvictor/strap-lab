@@ -1,0 +1,347 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Victor Momplet <mompletvictor@gmail.com>
+Date: Sat, 24 Oct 2026 11:04:10 +0200
+Subject: [PATCH] feat(scores): marks see the data they are judged on
+
+The session mark was asked to weigh recovery, sleep, goals and the last 48 h but
+received none of them: it now gets the GOALS line, the session day's Charge,
+sleep, Rest and HRV, and every workout of the 48 h before it (with sets when
+logged). The meal mark gets the day's burn (so far and projected for today) and
+its workouts with their times. Both only with the coach's data consent.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/main/java/com/noop/food/FoodScorer.kt | 13 +++-
+ .../main/java/com/noop/food/MealScoring.kt    | 35 ++++++++-
+ .../main/java/com/noop/training/TrainingAi.kt |  8 +-
+ .../com/noop/training/TrainingAnalyzer.kt     |  5 +-
+ .../com/noop/training/TrainingScoreContext.kt | 74 +++++++++++++++++++
+ .../java/com/noop/food/MealScoringTest.kt     | 21 ++++++
+ .../java/com/noop/training/TrainingTest.kt    | 36 +++++++++
+ 7 files changed, 186 insertions(+), 6 deletions(-)
+ create mode 100644 android/app/src/main/java/com/noop/training/TrainingScoreContext.kt
+
+diff --git a/android/app/src/main/java/com/noop/food/FoodScorer.kt b/android/app/src/main/java/com/noop/food/FoodScorer.kt
+index 0652e33c1..891afbc31 100644
+--- a/android/app/src/main/java/com/noop/food/FoodScorer.kt
++++ b/android/app/src/main/java/com/noop/food/FoodScorer.kt
+@@ -5,6 +5,7 @@ import com.noop.NoopApplication
+ import com.noop.ai.AiKeyStore
+ import com.noop.ai.AiProvider
+ import com.noop.ai.VictorPersonLines
++import com.noop.energy.DayEnergyModel
+ import com.noop.training.TrainingAi
+ import com.noop.training.TrainingAiResult
+ import kotlinx.coroutines.CoroutineScope
+@@ -49,11 +50,19 @@ object FoodScorer {
+         val today = LocalDate.parse(FoodDays.today())
+         val due = MealScoring.due(entries, FoodStore.loadScores(ctx), now, setOf(today.toString(), today.minusDays(1).toString()))
+         if (due.isEmpty()) return
+-        val person = VictorPersonLines.load(ctx, (ctx.applicationContext as NoopApplication).repository).lines
++        val app = ctx.applicationContext as NoopApplication
++        val person = VictorPersonLines.load(ctx, app.repository).lines
++        // victor:scores — the day's burn and workouts, with the same consent the person lines need.
++        val energy = if (AiKeyStore.readConsent(ctx)) {
++            val strapId = app.sourceCoordinator.activeDeviceId.value ?: app.activeDeviceId
++            runCatching { DayEnergyModel.range(ctx, app.repository, strapId, due.minOf { it.first }, due.maxOf { it.first }) }.getOrDefault(emptyMap())
++        } else {
++            emptyMap()
++        }
+         for ((day, meal) in due) {
+             val group = entries.filter { it.day == day && it.meal == meal }
+             val signature = MealScoring.signature(group)
+-            val prompt = MealScoring.prompt(meal, day, group, entries.filter { it.day == day }, person)
++            val prompt = MealScoring.prompt(meal, day, group, entries.filter { it.day == day }, person, MealScoring.energyLine(energy[day]))
+             when (val r = TrainingAi.ask(ctx, prompt, MealScoring.schema()) { MealScoring.parse(it, signature, System.currentTimeMillis()) }) {
+                 is TrainingAiResult.Ok -> FoodStore.saveScore(ctx, MealScoring.key(day, meal), r.value)
+                 is TrainingAiResult.Failed -> {
+diff --git a/android/app/src/main/java/com/noop/food/MealScoring.kt b/android/app/src/main/java/com/noop/food/MealScoring.kt
+index f2ba638ab..d9133972c 100644
+--- a/android/app/src/main/java/com/noop/food/MealScoring.kt
++++ b/android/app/src/main/java/com/noop/food/MealScoring.kt
+@@ -1,5 +1,6 @@
+ package com.noop.food
+ 
++import com.noop.energy.DayEnergy
+ import org.json.JSONArray
+ import org.json.JSONObject
+ import java.time.LocalDate
+@@ -100,10 +101,18 @@ object MealScoring {
+      * The request: the meal's foods with portions and macros, the rest of that day's log, and (only with the
+      * coach's data consent) the profile and goals lines the coach reads.
+      */
+-    fun prompt(meal: MealType, day: String, entries: List<FoodEntry>, dayEntries: List<FoodEntry>, personLines: List<String>): String = buildString {
++    fun prompt(
++        meal: MealType,
++        day: String,
++        entries: List<FoodEntry>,
++        dayEntries: List<FoodEntry>,
++        personLines: List<String>,
++        energyLine: String? = null,   // victor:scores — [energyLine], only with the coach's data consent
++    ): String = buildString {
+         append("Score this meal from 0 to 10 for how good and healthy it is for this person: nutritional quality (protein, ")
+         append("vegetables and fruit, fibre, whole versus ultra-processed food, added sugar, fried food, alcohol), the portion ")
+-        append("for their goals and for the rest of the day, and balance. 10 = excellent, 5 = acceptable but clearly ")
++        append("for their goals, for what they burned that day (the ENERGY line, workouts included) and for the rest of the ")
++        append("day, and balance. 10 = excellent, 5 = acceptable but clearly ")
+         append("improvable, 2 = poor. Judge what was eaten, not the photo. note: ONE short sentence in Spanish (Spain), at most ")
+         append("15 words, the main reason or what would make it better.\n\n")
+         append("MEAL: ${meal.englishName} on $day")
+@@ -122,9 +131,31 @@ object MealScoring {
+             append(others.joinToString(", ") { (m, l) -> "${m.englishName} ${FoodTotals.ofEntries(l).kcal.roundToInt()} kcal" })
+             append('\n')
+         }
++        energyLine?.let { append(it).append('\n') }
+         personLines.forEach { append(it).append('\n') }
+     }
+ 
++    /**
++     * The day's burn from the day model: the whole day for a finished day; for today what is burned so far and
++     * where the day closes. Each workout carries its time, so a meal right after training is judged as one.
++     * Null without a figure (no profile).
++     */
++    fun energyLine(e: DayEnergy?, zone: ZoneId = ZoneId.systemDefault()): String? {
++        val total = e?.totalKcal ?: return null
++        val projected = e.projectedKcal?.takeIf { e.fraction < 1.0 }
++        val burn = if (projected != null) {
++            "burned ${total.roundToInt()} kcal so far, about ${projected.roundToInt()} by the end of the day"
++        } else {
++            "burned ${total.roundToInt()} kcal over the whole day"
++        }
++        val workouts = e.workouts.sortedBy { it.startTs }.joinToString("; ") { w ->
++            val start = java.time.Instant.ofEpochSecond(w.startTs).atZone(zone)
++            val end = java.time.Instant.ofEpochSecond(w.endTs).atZone(zone)
++            "${HHMM.format(start)}-${HHMM.format(end)} ${w.sport} ${w.grossKcal.roundToInt()} kcal"
++        }.ifEmpty { "none recorded" }
++        return "ENERGY THAT DAY: $burn; workouts: $workouts"
++    }
++
+     fun parse(o: JSONObject, signature: String, nowMs: Long): MealScore? {
+         val s = o.optDouble("score", Double.NaN).takeIf { it.isFinite() } ?: return null
+         return MealScore(s.roundToInt().coerceIn(0, 10), o.optString("note").trim().take(200), signature, nowMs)
+diff --git a/android/app/src/main/java/com/noop/training/TrainingAi.kt b/android/app/src/main/java/com/noop/training/TrainingAi.kt
+index bfb38fbb7..10719e77b 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingAi.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingAi.kt
+@@ -402,6 +402,8 @@ object TrainingAi {
+         restingHr: Int?,
+         hr: HrFacts?,
+         perExercise: Map<Int, TrainingHr.Stat>,
++        goalsLine: String? = null,   // victor:scores — the GOALS line and the SESSION DAY / LAST 48 H lines the mark needs
++        scoreContext: List<String> = emptyList(),
+     ): String = buildString {
+         append("Estimate the energy this person spent in this workout session.\n")
+         append("Use the exercises with their sets, reps and loads, the session's duration (rest between sets included), ")
+@@ -422,7 +424,9 @@ object TrainingAi {
+         append("actually done, nothing risky (hard work on muscles trained hard or sore in the last 48 h lowers it; so does a ")
+         append("session far too light or far too long for its purpose). 10 = excellent, 5 = fine but clearly improvable, ")
+         append("2 = counterproductive. score_note: ONE short sentence in Spanish (Spain), at most 15 words, the main reason ")
+-        append("or the one thing to change next time.\n")
++        append("or the one thing to change next time. Judge recovery, sleep and the last 48 h only from the SESSION DAY and ")
++        append("WORKOUTS IN THE 48 H BEFORE IT lines below, and the goals from the GOALS line; when a line is absent, leave that ")
++        append("part out rather than guess it.\n")
+         append("And effort: the session's overall Effort on the app's 0-100 axis, the same axis as the strap's heart-rate ")
+         append("effort given below. Heart rate measures only the cardiovascular load; add the muscular load of the lifting (sets, ")
+         append("reps and loads relative to body weight, big compound and loaded body-weight movements counting most), the way ")
+@@ -434,6 +438,8 @@ object TrainingAi {
+         profileLine?.let { append(it).append('\n') }
+         bodyLine?.let { append(it).append('\n') }
+         restingHr?.let { append("Resting HR: $it bpm\n") }
++        goalsLine?.let { append(it).append('\n') }
++        scoreContext.forEach { append(it).append('\n') }
+         append("SESSION: $whenLine, $durationMin min, sport ${session.sport}")
+         append(if (session.mode == TrainingMode.PLANNED) " (tracked live; only ticked sets were performed)\n" else " (logged afterwards)\n")
+         session.exercises.forEachIndexed { i, ex ->
+diff --git a/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
+index c77530e09..57ea9889b 100644
+--- a/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
++++ b/android/app/src/main/java/com/noop/training/TrainingAnalyzer.kt
+@@ -136,7 +136,8 @@ object TrainingAnalyzer {
+             val end = session.endTs ?: return
+             val samples = runCatching { repo.hrSamplesUnion(strapId, session.startTs, end, HR_LIMIT) }.getOrDefault(emptyList())
+             val profile = ProfileStore.from(ctx)
+-            val restingHr = runCatching { repo.daysMerged(strapId).lastOrNull { it.restingHr != null }?.restingHr }.getOrNull()
++            val days = runCatching { repo.daysMerged(strapId) }.getOrDefault(emptyList())
++            val restingHr = days.lastOrNull { it.restingHr != null }?.restingHr
+             val scored = ManualWorkoutRescore.scored(
+                 samples, profile.toUserProfile(), profile.hrMax.toDouble(), restingHr?.toDouble(), NoopPrefs.effortMethod(ctx),
+             )
+@@ -164,6 +165,8 @@ object TrainingAnalyzer {
+                 restingHr = if (consent) restingHr else null,
+                 hr = if (consent) hr else null,
+                 perExercise = if (consent) TrainingHr.perExercise(session, samples) else emptyMap(),
++                goalsLine = person.goals,   // victor:scores
++                scoreContext = if (consent) TrainingScoreContext.lines(ctx, repo, strapId, session, days, zone) else emptyList(),
+             )
+             when (val r = TrainingAi.estimate(ctx, prompt)) {
+                 is TrainingAiResult.Ok -> {
+diff --git a/android/app/src/main/java/com/noop/training/TrainingScoreContext.kt b/android/app/src/main/java/com/noop/training/TrainingScoreContext.kt
+new file mode 100644
+index 000000000..39a171f6f
+--- /dev/null
++++ b/android/app/src/main/java/com/noop/training/TrainingScoreContext.kt
+@@ -0,0 +1,74 @@
++package com.noop.training
++
++import android.content.Context
++import com.noop.ai.AiCoach
++import com.noop.data.DailyMetric
++import com.noop.data.WhoopRepository
++import com.noop.data.WorkoutRow
++import com.noop.energy.EnergyDays
++import java.time.Instant
++import java.time.ZoneId
++import java.time.format.DateTimeFormatter
++import java.util.Locale
++import kotlin.math.roundToInt
++
++/**
++ * victor:scores — what a session's 0-10 mark is judged against, as of the session itself: that day's Charge and
++ * the night before it, and every workout in the 48 hours before it started. Read only with the coach's data
++ * consent (the analyzer checks), and worded so a missing record reads as missing, never as a rest day.
++ */
++internal object TrainingScoreContext {
++
++    private const val WINDOW_S = 48 * 3_600L
++
++    suspend fun lines(
++        ctx: Context,
++        repo: WhoopRepository,
++        strapId: String,
++        session: TrainingSession,
++        days: List<DailyMetric>,
++        zone: ZoneId,
++    ): List<String> {
++        val day = EnergyDays.dayOf(session.startTs, zone)
++        val rest = runCatching {
++            repo.resolvedSeries("sleep_performance", "my-whoop", day, day, strapDeviceId = strapId)
++                .values.firstOrNull { it.first == day }?.second
++        }.getOrNull()
++        val rows = runCatching {
++            AiCoach(repo) { strapId }.visibleWorkoutRows(session.startTs - WINDOW_S, session.startTs - 1)
++        }.getOrDefault(emptyList())
++        val sessions = runCatching { TrainingStore.load(ctx) }.getOrDefault(emptyList())
++        return listOf(dayLine(day, days.firstOrNull { it.day == day }, rest), recentLine(session, rows, sessions, zone))
++    }
++
++    /** Pure. The session day's Charge, the night before it and its Rest score. */
++    internal fun dayLine(day: String, d: DailyMetric?, restScore: Double?): String {
++        val parts = listOfNotNull(
++            d?.recovery?.let { "Charge (recovery) ${it.roundToInt()}/100" },
++            d?.totalSleepMin?.takeIf { it > 0 }?.let { "slept ${it.roundToInt() / 60} h ${it.roundToInt() % 60} min" },
++            restScore?.let { "Rest (sleep score) ${it.roundToInt()}/100" },
++            d?.avgHrv?.let { "HRV ${it.roundToInt()} ms" },
++        )
++        return "SESSION DAY ($day): " + parts.joinToString(", ").ifEmpty { "no recovery or sleep recorded" }
++    }
++
++    /** Pure. Every workout that started in the 48 h before [session], oldest first, with its sets when logged. */
++    internal fun recentLine(session: TrainingSession, rows: List<WorkoutRow>, sessions: List<TrainingSession>, zone: ZoneId): String {
++        val parts = rows
++            .filter { it.startTs in (session.startTs - WINDOW_S) until session.startTs }
++            .sortedBy { it.startTs }
++            .map { row ->
++                val logged = sessions.firstOrNull { !it.isLive && it.pairs(row) }
++                val start = Instant.ofEpochSecond(row.startTs).atZone(zone)
++                val end = Instant.ofEpochSecond(row.endTs).atZone(zone)
++                val effort = (logged?.analysis?.effort ?: row.strain)?.let { ", effort ${it.roundToInt()}/100" }.orEmpty()
++                val sets = logged?.exercises?.mapNotNull { ex ->
++                    TrainingFormat.summary(ex, logged::performed, Locale.US).takeIf { it.isNotEmpty() }?.let { "${ex.name} $it" }
++                }?.takeIf { it.isNotEmpty() }?.joinToString("; ", prefix = ": ").orEmpty()
++                "${start.toLocalDate()} ${start.format(HHMM)}-${end.format(HHMM)} ${row.sport}$effort$sets"
++            }
++        return "WORKOUTS IN THE 48 H BEFORE IT: " + parts.joinToString(" || ").ifEmpty { "none recorded" }
++    }
++
++    private val HHMM = DateTimeFormatter.ofPattern("HH:mm")
++}
+diff --git a/android/app/src/test/java/com/noop/food/MealScoringTest.kt b/android/app/src/test/java/com/noop/food/MealScoringTest.kt
+index 640be4e43..8115f5c43 100644
+--- a/android/app/src/test/java/com/noop/food/MealScoringTest.kt
++++ b/android/app/src/test/java/com/noop/food/MealScoringTest.kt
+@@ -1,5 +1,6 @@
+ package com.noop.food
+ 
++import com.noop.energy.EnergyFixtures
+ import org.json.JSONObject
+ import org.junit.Assert.assertEquals
+ import org.junit.Assert.assertNull
+@@ -144,4 +145,24 @@ class MealScoringTest {
+         }
+         assertEquals(listOf("breakfast", "mid-morning snack", "lunch", "afternoon snack", "dinner", "nibbles"), MealType.entries.map { it.englishName })
+     }
++
++    @Test
++    fun theMealMarkSeesTheDaysBurnAndItsWorkouts() {   // victor:scores
++        val gym = LocalDate.parse(day).atTime(18, 0).atZone(madrid).toEpochSecond()
++        val past = EnergyFixtures.day(day = day, totalKcal = 2800.0, workouts = listOf(EnergyFixtures.workout(gym, gym + 3_600, "Weightlifting", grossKcal = 450.0)))
++        assertEquals(
++            "ENERGY THAT DAY: burned 2800 kcal over the whole day; workouts: 18:00-19:00 Weightlifting 450 kcal",
++            MealScoring.energyLine(past, madrid),
++        )
++        val today = EnergyFixtures.day(day = day, totalKcal = 1200.0, bmrKcal = 1800.0, fraction = 0.5)
++        assertEquals(
++            "ENERGY THAT DAY: burned 1200 kcal so far, about 2100 by the end of the day; workouts: none recorded",
++            MealScoring.energyLine(today, madrid),
++        )
++        assertNull(MealScoring.energyLine(null))
++        val lunch = entry("l", 14, 0, MealType.LUNCH, 700.0)
++        val p = MealScoring.prompt(MealType.LUNCH, day, listOf(lunch), listOf(lunch), listOf("GOALS: gain muscle"), MealScoring.energyLine(past, madrid))
++        assertTrue(p.contains("burned 2800 kcal over the whole day"))
++        assertTrue(p.trim().endsWith("GOALS: gain muscle"))
++    }
+ }
+diff --git a/android/app/src/test/java/com/noop/training/TrainingTest.kt b/android/app/src/test/java/com/noop/training/TrainingTest.kt
+index 38ed7a553..f6e1eb83b 100644
+--- a/android/app/src/test/java/com/noop/training/TrainingTest.kt
++++ b/android/app/src/test/java/com/noop/training/TrainingTest.kt
+@@ -1,5 +1,6 @@
+ package com.noop.training
+ 
++import com.noop.data.DailyMetric
+ import com.noop.data.HrSample
+ import com.noop.data.WorkoutRow
+ import com.noop.food.FoodError
+@@ -368,4 +369,39 @@ class TrainingTest {
+         assertFalse(TrainingAnalyzer.recheckDue(logged.copy(analysis = null), now))
+         assertFalse(TrainingAnalyzer.recheckDue(sparse.copy(endTs = null), now))
+     }
++
++    @Test
++    fun theSessionMarkSeesItsDayTheLast48HoursAndTheGoals() {   // victor:scores
++        val day = DailyMetric(deviceId = "my-whoop", day = "2026-10-19", totalSleepMin = 400.0, recovery = 62.0, avgHrv = 58.0)
++        assertEquals(
++            "SESSION DAY (2026-10-19): Charge (recovery) 62/100, slept 6 h 40 min, Rest (sleep score) 71/100, HRV 58 ms",
++            TrainingScoreContext.dayLine("2026-10-19", day, 71.4),
++        )
++        assertEquals("SESSION DAY (2026-10-19): no recovery or sleep recorded", TrainingScoreContext.dayLine("2026-10-19", null, null))
++        // Yesterday's legs (logged, with its sets) and a strap run 30 h before; one three days before falls outside.
++        val legsStart = start - 24 * 3_600L
++        val legs = logged.copy(
++            id = "s0", startTs = legsStart, endTs = legsStart + 3_600L,
++            exercises = listOf(TrainingExercise("Sentadilla", ExerciseKind.STRENGTH, List(4) { TrainingSet(reps = 8, kg = 60.0, done = true) })),
++            analysis = logged.analysis!!.copy(effort = 48.0),
++        )
++        val legsRow = row.copy(startTs = legsStart, endTs = legsStart + 3_600L, strain = 30.0)
++        val run = row.copy(startTs = start - 30 * 3_600L, endTs = start - 30 * 3_600L + 1_800L, sport = "Running", strain = 41.0)
++        val old = row.copy(startTs = start - 72 * 3_600L, endTs = start - 71 * 3_600L)
++        val line = TrainingScoreContext.recentLine(logged, listOf(legsRow, old, run, row), listOf(legs, logged), madrid)
++        assertEquals(
++            "WORKOUTS IN THE 48 H BEFORE IT: 2026-10-18 11:00-11:30 Running, effort 41/100 || " +
++                "2026-10-18 17:00-18:00 Strength, effort 48/100: Sentadilla 4×8 · 60 kg",
++            line,
++        )
++        assertEquals("WORKOUTS IN THE 48 H BEFORE IT: none recorded", TrainingScoreContext.recentLine(logged, listOf(row, old), emptyList(), madrid))
++        val p = TrainingAi.kcalPrompt(
++            logged, "x", 60, null, null, null, null, emptyMap(),
++            goalsLine = "GOALS (set by the user; plan advice against them): main goal: gain muscle",
++            scoreContext = listOf(line),
++        )
++        assertTrue(p.contains("main goal: gain muscle"))
++        assertTrue(p.contains("Sentadilla 4×8 · 60 kg"))
++        assertTrue(p.contains("leave that part out rather than guess it"))
++    }
+ }
+-- 
+2.54.0
+
